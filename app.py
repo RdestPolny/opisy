@@ -30,7 +30,7 @@ Opis powinien zawierać:
    - Wzmocnić wiarygodność opisu
    - Dodać emocje i autentyczność
 3. Formatowanie:
-   - Używaj tagów HTML: <h2>, <p>, <b>, <h3>
+   - Używaj tagów HTML: <h2>, <p>, <b>, <ul>, <li>
    - Wyróżniaj kluczowe frazy za pomocą <b>
    - Nie używaj znaczników Markdown, tylko HTML
    - Nie dodawaj komentarzy ani wyjaśnień, tylko sam opis
@@ -137,8 +137,9 @@ default_prompt_beletrystyka = """Jako autor opisów w księgarni internetowej, t
 <p>akapit</p>
 <p>akapit</p>
 <h3>CTA</h3>
-```"""
-default_prompt_zabawki = """Jako autor opisów w sklepie internetowym, twoim zdaniem jest przygotowanie rzetelnego, zoptymalizowanego opisu produktu o nazwie "{taniaksiazka_title}". Oto informacje, na których powinieneś bazować: {taniaksiazka_details} {taniaksiazka_description}. Stwórz angażujący opis w HTML z wykorzystaniem:<h2>, <p>, <b>, <ul>, <li>. Opis powinien:
+""" 
+
+default_prompt_zabawki = """Jako autor opisów w księgarni internetowej, twoim zdaniem jest przygotowanie rzetelnego, zoptymalizowanego opisu produktu o tytule "{taniaksiazka_title}". Oto informacje, na których powinieneś bazować: {taniaksiazka_details} {taniaksiazka_description}. Stwórz angażujący opis w HTML z wykorzystaniem:<h2>, <p>, <b>, <ul>, <li>. Opis powinien:
 
 Zaczyna się od nagłówka <h2> z kreatywnym hasłem, które oddaje emocje i charakter zabawki oraz wskazuje na grupę docelową, np. dla dzieci w wieku 3-7 lat lub dla entuzjastów interaktywnych zabawek.
 1. Zawiera sekcje:
@@ -167,6 +168,7 @@ Przykład formatu:
 <p>akapit</p>
 <p>akapit</p>
 <h3>CTA</h3>
+"""
 
 # ------------------------#
 # Sidebar – wybór promptu
@@ -182,6 +184,8 @@ elif selected_prompt == "TK - gry planszowe":
     st.sidebar.markdown("**Opis:** Prompt do opisu gier planszowych, skupiający się na mechanice, emocjach i unikalnych cechach rozgrywki.")
 elif selected_prompt == "TK - beletrystyka":
     st.sidebar.markdown("**Opis:** Prompt do opisu beletrystyki książkowej, wykorzystujący dane z Tania Ksiażka.")
+elif selected_prompt == "TK - Zabawki":
+    st.sidebar.markdown("**Opis:** Prompt do opisu zabawek, oparty na strukturze opisu dla gier planszowych, dostosowany do cech i funkcjonalności zabawek.")
 
 # ------------------------#
 # Główna część aplikacji
@@ -397,7 +401,7 @@ if submit_button:
                     'Opinie': book_data.get('reviews', ''),
                     'Nowy opis': new_description
                 })
-            # Dla taniaksiazka.pl – oczekiwany prompt to "TK - Podręczniki", "TK - gry planszowe" lub "TK - beletrystyka"
+            # Dla taniaksiazka.pl – oczekiwany prompt to "TK - Podręczniki", "TK - gry planszowe", "TK - beletrystyka" lub "TK - Zabawki"
             elif "taniaksiazka.pl" in url_lower:
                 if selected_prompt not in ["TK - Podręczniki", "TK - gry planszowe", "TK - beletrystyka", "TK - Zabawki"]:
                     st.error(f"Wybrano prompt '{selected_prompt}', ale URL '{url}' pochodzi z taniaksiazka.pl. Pomijam ten URL.")
