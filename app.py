@@ -138,12 +138,41 @@ default_prompt_beletrystyka = """Jako autor opisów w księgarni internetowej, t
 <p>akapit</p>
 <h3>CTA</h3>
 ```"""
+default_prompt_zabawki = """Jako autor opisów w sklepie internetowym, twoim zdaniem jest przygotowanie rzetelnego, zoptymalizowanego opisu produktu o nazwie "{taniaksiazka_title}". Oto informacje, na których powinieneś bazować: {taniaksiazka_details} {taniaksiazka_description}. Stwórz angażujący opis w HTML z wykorzystaniem:<h2>, <p>, <b>, <ul>, <li>. Opis powinien:
+
+Zaczyna się od nagłówka <h2> z kreatywnym hasłem, które oddaje emocje i charakter zabawki oraz wskazuje na grupę docelową, np. dla dzieci w wieku 3-7 lat lub dla entuzjastów interaktywnych zabawek.
+1. Zawiera sekcje:
+    <p>Wprowadzenie, które przedstawia zabawkę, jej funkcjonalność, przeznaczenie oraz główne cechy, takie jak bezpieczeństwo i rozwój kreatywności.</p>
+    <p>Opis działania lub interakcji z <b>wyróżnionymi</b> słowami kluczowymi, podkreślającymi unikalne elementy, takie jak interaktywność, edukacyjność i doskonała zabawa.</p>
+    <p>Korzyści dla dzieci, np. rozwój wyobraźni, zdolności manualnych oraz wspomaganie nauki poprzez zabawę.</p>
+    <p>Podsumowanie, które zachęca do zakupu i podkreśla, dlaczego ta zabawka jest wyjątkowa.</p>
+    <h3>Przekonujący call to action</h3>
+2. Wykorzystuje pobrane informacje, aby:
+    - Podkreślić najważniejsze cechy zabawki
+    - Wzmocnić wiarygodność opisu poprzez konkretne przykłady
+3. Formatowanie:
+  - Używaj tagów HTML: <h2>, <p>, <b>, <h3>
+  - Wyróżniaj kluczowe frazy za pomocą <b>
+  - Nie używaj znaczników Markdown, tylko HTML
+  - Nie dodawaj komentarzy ani wyjaśnień, tylko sam opis
+4. Styl:
+  - Opis ma być angażujący, ale profesjonalny
+  - Używaj słownictwa dostosowanego do odbiorców poszukujących zabawek
+  - Unikaj powtórzeń
+  - Zachowaj spójność tonu
+Przykład formatu:
+
+<h2>nagłówek</h2>
+<p>dwa akapity</p>
+<p>akapit</p>
+<p>akapit</p>
+<h3>CTA</h3>
 
 # ------------------------#
 # Sidebar – wybór promptu
 # ------------------------#
 
-selected_prompt = st.sidebar.selectbox("Wybierz prompt", ["LC - książki", "TK - Podręczniki", "TK - gry planszowe", "TK - beletrystyka"])
+selected_prompt = st.sidebar.selectbox("Wybierz prompt", ["LC - książki", "TK - Podręczniki", "TK - gry planszowe", "TK - beletrystyka", "TK - Zabawki"])
 
 if selected_prompt == "LC - książki":
     st.sidebar.markdown("**Opis:** Prompt przeznaczony do tworzenia angażujących opisów książek, oparty na danych z Lubimy Czytać.")
@@ -370,7 +399,7 @@ if submit_button:
                 })
             # Dla taniaksiazka.pl – oczekiwany prompt to "TK - Podręczniki", "TK - gry planszowe" lub "TK - beletrystyka"
             elif "taniaksiazka.pl" in url_lower:
-                if selected_prompt not in ["TK - Podręczniki", "TK - gry planszowe", "TK - beletrystyka"]:
+                if selected_prompt not in ["TK - Podręczniki", "TK - gry planszowe", "TK - beletrystyka", "TK - Zabawki"]:
                     st.error(f"Wybrano prompt '{selected_prompt}', ale URL '{url}' pochodzi z taniaksiazka.pl. Pomijam ten URL.")
                     continue
                 book_data = get_taniaksiazka_data(url)
@@ -383,6 +412,8 @@ if submit_button:
                     prompt_used = default_prompt_gry_planszowe
                 elif selected_prompt == "TK - beletrystyka":
                     prompt_used = default_prompt_beletrystyka
+                elif selected_prompt == "TK - Zabawki":
+                    prompt_used = default_prompt_zabawki
                 new_description = generate_description_taniaksiazka(book_data, prompt_used)
                 results.append({
                     'URL': url,
