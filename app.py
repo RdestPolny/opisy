@@ -196,6 +196,7 @@ client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
 
 with st.form("url_form"):
     urls_input = st.text_area('Wprowadź adresy URL (po jednym w linii):')
+    generate_meta = st.checkbox("Generuj też metatagi")
     submit_button = st.form_submit_button("Uruchom")
 
 # ------------------------#
@@ -368,6 +369,49 @@ def generate_description_taniaksiazka(book_data, prompt_template):
         st.error(f"Błąd generowania opisu: {str(e)}")
         return ""
 
+def generate_meta_tags(product_data):
+    """
+    Generuje meta title oraz meta description na podstawie danych produktu.
+    Jeśli dostępne, używa zarówno 'details' jak i 'description' (lub tylko 'description' dla Lubimy Czytac).
+    Meta title powinien zaczynać się od silnego słowa kluczowego i zawierać do 60 znaków.
+    Meta description to jedno zdanie informacyjne, do 160 znaków.
+    """
+    try:
+        title = product_data.get('title', '')
+        details = product_data.get('details', '')
+        description = product_data.get('description', '')
+        prompt_meta = f"""Jako doświadczony copywriter SEO, stwórz meta title oraz meta description dla produktu o tytule "{title}" bazując na następujących danych: {details} {description}. Meta title powinien zaczynać się od silnego słowa kluczowego, zawierać do 60 znaków, a meta description powinien być jednym zdaniem informacyjnym, zawierającym do 160 znaków. Podaj wynik w formacie:
+Meta title: [treść]
+Meta description: [treść]"""
+        messages = [
+            {
+                "role": "system",
+                "content": "Jesteś doświadczonym copywriterem SEO."
+            },
+            {
+                "role": "user",
+                "content": prompt_meta
+            }
+        ]
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=messages,
+            temperature=0.7,
+            max_tokens=200
+        )
+        result = response.choices[0].message.content
+        meta_title = ""
+        meta_description = ""
+        for line in result.splitlines():
+            if line.lower().startswith("meta title:"):
+                meta_title = line[len("meta title:"):].strip()
+            elif line.lower().startswith("meta description:"):
+                meta_description = line[len("meta description:"):].strip()
+        return meta_title, meta_description
+    except Exception as e:
+        st.error(f"Błąd generowania metatagów: {str(e)}")
+        return "", ""
+
 # ------------------------#
 # Przetwarzanie danych po zatwierdzeniu formularza
 # ------------------------#
@@ -394,12 +438,17 @@ if submit_button:
                     st.error(f"Błąd dla {url}: {book_data['error']}")
                     continue
                 new_description = generate_description_lubimyczytac(book_data, default_prompt_lubimyczytac)
+                meta_title, meta_description = ("", "")
+                if generate_meta:
+                    meta_title, meta_description = generate_meta_tags(book_data)
                 results.append({
                     'URL': url,
                     'Tytuł': book_data.get('title', ''),
                     'Stary opis': book_data.get('description', ''),
                     'Opinie': book_data.get('reviews', ''),
-                    'Nowy opis': new_description
+                    'Nowy opis': new_description,
+                    'Meta title': meta_title,
+                    'Meta description': meta_description
                 })
             # Dla taniaksiazka.pl – oczekiwany prompt to "TK - Podręczniki", "TK - gry planszowe", "TK - beletrystyka" lub "TK - Zabawki"
             elif "taniaksiazka.pl" in url_lower:
@@ -419,12 +468,17 @@ if submit_button:
                 elif selected_prompt == "TK - Zabawki":
                     prompt_used = default_prompt_zabawki
                 new_description = generate_description_taniaksiazka(book_data, prompt_used)
+                meta_title, meta_description = ("", "")
+                if generate_meta:
+                    meta_title, meta_description = generate_meta_tags(book_data)
                 results.append({
                     'URL': url,
                     'Tytuł': book_data.get('title', ''),
                     'Szczegóły': book_data.get('details', ''),
                     'Opis': book_data.get('description', ''),
-                    'Nowy opis': new_description
+                    'Nowy opis': new_description,
+                    'Meta title': meta_title,
+                    'Meta description': meta_description
                 })
             else:
                 st.error(f"Nieobsługiwana domena dla {url}")
