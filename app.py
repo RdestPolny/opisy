@@ -7,8 +7,46 @@ import random
 from openai import OpenAI
 
 # ------------------------#
-# Definicje funkcji
+# Definicje funkcji – globalne
 # ------------------------#
+
+def get_lubimyczytac_data(url):
+    MOBILE_USER_AGENTS = [
+        "Mozilla/5.0 (Linux; Android 10; SM-A505F) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/83.0.4103.106 Mobile Safari/537.36",
+        "Mozilla/5.0 (iPhone; CPU iPhone OS 13_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/13.1.1 Mobile/15E148 Safari/604.1",
+        "Mozilla/5.0 (Linux; Android 9; SAMSUNG SM-G960F) AppleWebKit/537.36 (KHTML, like Gecko) SamsungBrowser/10.1 Chrome/71.0.3578.99 Mobile Safari/537.36",
+        "Mozilla/5.0 (iPhone; CPU iPhone OS 14_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.0 Mobile/15E148 Safari/604.1"
+    ]
+    headers = {
+        'User-Agent': random.choice(MOBILE_USER_AGENTS),
+        'Accept-Language': 'pl-PL,pl;q=0.9,en-US;q=0.8,en;q=0.7',
+    }
+    try:
+        response = requests.get(url, headers=headers, timeout=30)
+        response.raise_for_status()
+        soup = bs(response.text, 'html.parser')
+        title_tag = soup.find('h1', class_='book__title')
+        title = title_tag.get_text(strip=True) if title_tag else ''
+        description_div = soup.find('div', id='book-description')
+        description = description_div.get_text(strip=True) if description_div else ''
+        reviews = []
+        for review in soup.select('p.expandTextNoJS.p-expanded.js-expanded'):
+            text = review.get_text(strip=True)
+            if len(text) > 50:
+                reviews.append(text)
+        return {
+            'title': title,
+            'description': description,
+            'reviews': "\n\n---\n\n".join(reviews) if reviews else '',
+            'error': None
+        }
+    except Exception as e:
+        return {
+            'title': '',
+            'description': '',
+            'reviews': '',
+            'error': f"Błąd pobierania: {str(e)}"
+        }
 
 def get_taniaksiazka_data(url):
     headers = {
@@ -35,10 +73,10 @@ def get_taniaksiazka_data(url):
             description_text = description_div.get_text(separator="\n", strip=True)
         if not description_text:
             return {
-                'title': '',
-                'details': '',
+                'title': title,
+                'details': details_text,
                 'description': '',
-                'error': "Brak opisu — zatrzymuję przetwarzanie."
+                'error': "Nie udało się pobrać opisu produktu. Zatrzymuję przetwarzanie."
             }
         return {
             'title': title,
@@ -54,7 +92,7 @@ def get_taniaksiazka_data(url):
             'error': f"Błąd pobierania: {str(e)}"
         }
 
-def generate_description_taniaksiazka(book_data, prompt_template):
+def generate_description(book_data, prompt_template, system_prompt):
     try:
         prompt_filled = prompt_template.format(
             taniaksiazka_title=book_data.get('title', ''),
@@ -62,14 +100,8 @@ def generate_description_taniaksiazka(book_data, prompt_template):
             taniaksiazka_description=book_data.get('description', '')
         )
         messages = [
-            {
-                "role": "system",
-                "content": "Jesteś doświadczonym copywriterem specjalizującym się w tworzeniu opisów produktów dla księgarni internetowej."
-            },
-            {
-                "role": "user",
-                "content": prompt_filled
-            }
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": prompt_filled}
         ]
         response = client.chat.completions.create(
             model="gpt-4o-mini",
@@ -82,222 +114,129 @@ def generate_description_taniaksiazka(book_data, prompt_template):
         st.error(f"Błąd generowania opisu: {str(e)}")
         return ""
 
-# ------------------------#
-# Prompty
-# ------------------------#
-
-default_prompt_taniaksiazka = """Jako autor opisów w księgarni internetowej, twoim zdaniem jest przygotowanie rzetelnego, zoptymalizowanego opisu produktu o tytule "{taniaksiazka_title}". Oto informacje, na których powinieneś bazować: {taniaksiazka_details} {taniaksiazka_description}. Stwórz angażujący opis w HTML z wykorzystaniem:<h2>, <p>, <b>, <ul>, <li>. Opis powinien:
-
-1. Zawiera sekcje:
-   <h2> z kreatywnym hasłem nawiązującym do przedmiotu nauki, z którym związany jest podręcznik oraz jego targetem np. dla uczniów 2 klasy szkoły podstawowej.
-   <p>Wprowadzenie z opisem tego, czym jest dany podręcznik / ćwiczenie / zeszyt ćwiczeń itd. (w zależności od tego, czym jest dany tytuł), informacje na temat jego zawartości, docelowego targetu i tym, co uznasz za stosowne do opisania w kluczowym pierwszym akapicie.</p>
-   <p>Zalety / szczególne cechy warte podkreślenia, z <b>wyróżnionymi</b> słowami kluczowymi</p>
-   <p>Wartości i korzyści dla ucznia</p>
-   <p>Podsumowanie</p>
-   <h3>Przekonujący call to action</h3>
-2. Wykorzystuje pobrane informacje, aby:
-   - Podkreślić najczęściej wymieniane zalety książki
-   - Wzmocnić wiarygodność opisu
-3. Formatowanie:
-   - Używaj tagów HTML: <h2>, <p>, <b>, <h3>
-   - Wyróżniaj kluczowe frazy lub informacje godne wzmocnienia za pomocą <b>
-   - Nie używaj znaczników Markdown, tylko HTML
-   - Nie dodawaj komentarzy ani wyjaśnień, tylko sam opis
-4. Styl:
-   - Opis ma być angażujący, ale profesjonalny
-   - Używaj słownictwa dostosowanego do odbiorcy
-   - Unikaj powtórzeń
-   - Zachowaj spójność tonu
-5. Przykład formatu:
-
-<h2>nagłówek</h2>
-<p>dwa akapity</p>
-<p>akapit</p>
-<p>akapit</p>
-<h3>CTA</h3>
-"""
-
-default_prompt_gry_planszowe = """Jako autor opisów w księgarni internetowej, twoim zdaniem jest przygotowanie rzetelnego, zoptymalizowanego opisu produktu o tytule "{taniaksiazka_title}". Oto informacje, na których powinieneś bazować: {taniaksiazka_details} {taniaksiazka_description}. Stwórz angażujący opis w HTML z wykorzystaniem:<h2>, <p>, <b>, <ul>, <li>. Opis powinien:
-
-Zaczyna się od nagłówka <h2> z kreatywnym hasłem, które oddaje emocje i charakter gry planszowej oraz wskazuje na grupę docelową, np. dla miłośników strategii i rozgrywek rodzinnych.
-1. Zawiera sekcje:
-    <p>Wprowadzenie, które przedstawia grę, jej tematykę, mechanikę (jeśli masz na jej temat informacje w pobranych danych) oraz główne cechy, takie jak czas rozgrywki i poziom trudności.</p>
-    <p>Opis rozgrywki z <b>wyróżnionymi</b> słowami kluczowymi, podkreślającymi unikalne elementy, takie jak interakcja, strategia i rywalizacja.</p>
-    <p>Korzyści dla graczy, np. rozwój umiejętności logicznego myślenia, budowanie relacji rodzinnych oraz doskonała zabawa.</p>
-    <p>Podsumowanie, które zachęca do zakupu i podkreśla, dlaczego ta gra planszowa jest wyjątkowa.</p>
-    <h3>Przekonujący call to action</h3>
-2. Wykorzystuje pobrane informacje, aby:
-    - Podkreślić najważniejsze cechy gry planszowej
-    - Wzmocnić wiarygodność opisu poprzez konkretne przykłady
-3. Formatowanie:
-  - Używaj tagów HTML: <h2>, <p>, <b>, <h3>
-  - Wyróżniaj kluczowe frazy za pomocą <b>
-  - Nie używaj znaczników Markdown, tylko HTML
-  - Nie dodawaj komentarzy ani wyjaśnień, tylko sam opis
-4. Styl:
-  - Opis ma być angażujący, ale profesjonalny
-  - Używaj słownictwa dostosowanego do miłośników gier planszowych
-  - Unikaj powtórzeń
-  - Zachowaj spójność tonu
-Przykład formatu:
-
-<h2>nagłówek</h2>
-<p>dwa akapity</p>
-<p>akapit</p>
-<p>akapit</p>
-<h3>CTA</h3>
-"""
-
-default_prompt_beletrystyka = """Jako autor opisów w księgarni internetowej, twoim zdaniem jest przygotowanie rzetelnego, zoptymalizowanego opisu produktu, który jest książką o tytule "{taniaksiazka_title}". Oto informacje, na których powinieneś bazować: {taniaksiazka_details} {taniaksiazka_description}. Stwórz angażujący opis w HTML z wykorzystaniem:<h2>, <p>, <b>, <ul>, <li>. Opis powinien:
-
-Zawiera sekcje:
-<h2> z kreatywnym hasłem nawiązującym do treści książki.</h2>
-<p>Wprowadzenie mówiące ogólnie o tym czym jest ta książka</p>
-<p>Opis fabuły/treści z <b>wyróżnionymi</b> słowami kluczowymi (wykorzystaj dostępne informacje aby poznać fabułę, staraj się nie wymyślać szczegółów, których nie jesteś pewny)</p>
-<p>Wartości i korzyści dla czytelnika</p>
-<p>Podsumowanie opinii czytelników (opisz co się podobało czytelnikom w danej pozycji, co chwalą itd.)</p>
-<h3>Przekonujący call to action</h3>
-
-Wykorzystuje opinie czytelników, aby:
-- Podkreślić najczęściej wymieniane zalety książki
-- Wzmocnić wiarygodność opisu
-- Dodać emocje i autentyczność
-
-Formatowanie:
-- Używaj tagów HTML: <h2>, <p>, <b>, <h3>
-- Wyróżniaj kluczowe frazy za pomocą <b>
-- Nie używaj znaczników Markdown, tylko HTML
-- Nie dodawaj komentarzy ani wyjaśnień, tylko sam opis
-
-Styl:
-- Opis ma być angażujący, ale profesjonalny
-- Używaj słownictwa dostosowanego do gatunku książki
-- Unikaj powtórzeń
-- Zachowaj spójność tonu
-
-Przykład formatu:
-
-<h2>nagłówek</h2>
-<p>dwa akapity</p>
-<p>akapit</p>
-<p>akapit</p>
-<h3>CTA</h3>
-"""
-
-default_prompt_zabawki = """Jako autor opisów w księgarni internetowej, twoim zdaniem jest przygotowanie rzetelnego, zoptymalizowanego opisu produktu o tytule "{taniaksiazka_title}". Oto informacje, na których powinieneś bazować: {taniaksiazka_details} {taniaksiazka_description}. Stwórz angażujący opis w HTML z wykorzystaniem:<h2>, <p>, <b>, <ul>, <li>. Opis powinien:
-
-Zaczyna się od nagłówka <h2> z kreatywnym hasłem, które oddaje emocje i charakter zabawki oraz wskazuje na grupę docelową, np. dla dzieci w wieku 3-7 lat lub dla entuzjastów interaktywnych zabawek.
-1. Zawiera sekcje:
-    <p>Wprowadzenie, które przedstawia zabawkę, jej funkcjonalność, przeznaczenie oraz główne cechy, takie jak bezpieczeństwo i rozwój kreatywności.</p>
-    <p>Opis działania lub interakcji z <b>wyróżnionymi</b> słowami kluczowymi, podkreślającymi unikalne elementy, takie jak interaktywność, edukacyjność i doskonała zabawa.</p>
-    <p>Korzyści dla dzieci, np. rozwój wyobraźni, zdolności manualnych oraz wspomaganie nauki poprzez zabawę.</p>
-    <p>Podsumowanie, które zachęca do zakupu i podkreśla, dlaczego ta zabawka jest wyjątkowa.</p>
-    <h3>Przekonujący call to action</h3>
-2. Wykorzystuje pobrane informacje, aby:
-    - Podkreślić najważniejsze cechy zabawki
-    - Wzmocnić wiarygodność opisu poprzez konkretne przykłady
-3. Formatowanie:
-  - Używaj tagów HTML: <h2>, <p>, <b>, <h3>
-  - Wyróżniaj kluczowe frazy za pomocą <b>
-  - Nie używaj znaczników Markdown, tylko HTML
-  - Nie dodawaj komentarzy ani wyjaśnień, tylko sam opis
-4. Styl:
-  - Opis ma być angażujący, ale profesjonalny
-  - Używaj słownictwa dostosowanego do odbiorców poszukujących zabawek
-  - Unikaj powtórzeń
-  - Zachowaj spójność tonu
-Przykład formatu:
-
-<h2>nagłówek</h2>
-<p>dwa akapity</p>
-<p>akapit</p>
-<p>akapit</p>
-<h3>CTA</h3>
-"""
+def generate_meta_tags(product_data):
+    try:
+        title = product_data.get('title', '')
+        details = product_data.get('details', '')
+        description = product_data.get('description', '')
+        prompt_meta = f"""Jako doświadczony copywriter SEO, stwórz meta title oraz meta description dla produktu o tytule "{title}" bazując na następujących danych: {details} {description}. Meta title powinien zaczynać się od silnego słowa kluczowego, zawierać do 60 znaków, a meta description powinien być jednym zdaniem informacyjnym, zawierającym do 160 znaków. Podaj wynik w formacie:
+Meta title: [treść]
+Meta description: [treść]"""
+        messages = [
+            {"role": "system", "content": "Jesteś doświadczonym copywriterem SEO."},
+            {"role": "user", "content": prompt_meta}
+        ]
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=messages,
+            temperature=0.7,
+            max_tokens=200
+        )
+        result = response.choices[0].message.content
+        meta_title = ""
+        meta_description = ""
+        for line in result.splitlines():
+            if line.lower().startswith("meta title:"):
+                meta_title = line[len("meta title:"):].strip()
+            elif line.lower().startswith("meta description:"):
+                meta_description = line[len("meta description:"):].strip()
+        return meta_title, meta_description
+    except Exception as e:
+        st.error(f"Błąd generowania metatagów: {str(e)}")
+        return "", ""
 
 # ------------------------#
-# Sidebar – wybór promptu
+# Prompty — pełne
+# ------------------------#
+
+default_prompt_taniaksiazka = """Jako autor opisów w księgarni internetowej, twoim zadaniem jest przygotowanie rzetelnego, zoptymalizowanego opisu produktu o tytule "{taniaksiazka_title}". Oto informacje, na których powinieneś bazować: {taniaksiazka_details} {taniaksiazka_description}. Stwórz angażujący opis w HTML z wykorzystaniem: <h2>, <p>, <b>, <ul>, <li>.
+
+Opis powinien zawierać:
+1. Nagłówek <h2> z kreatywnym hasłem nawiązującym do tematu.
+2. Wprowadzenie <p> czym jest ten produkt, dla kogo jest przeznaczony.
+3. Szczegółowy opis z <b>wyróżnionymi</b> słowami kluczowymi.
+4. Korzyści i zalety.
+5. Podsumowanie z wezwaniem do działania <h3>.
+
+Używaj tylko HTML. Nie dodawaj komentarzy ani wyjaśnień. Nie wymyślaj informacji, jeśli nie są dostępne w opisie lub szczegółach."""
+
+system_prompt_tk = "Jesteś doświadczonym copywriterem specjalizującym się w opisach produktów księgarni online. Piszesz atrakcyjne i poprawne opisy w HTML."
+
+# ------------------------#
+# Sidebar
 # ------------------------#
 
 selected_prompt = st.sidebar.selectbox("Wybierz prompt", [
-    "TK - Podręczniki", 
-    "TK - gry planszowe", 
-    "TK - beletrystyka", 
-    "TK - Zabawki",
-    "TK - Podręczniki - Manual"
+    "TK - Podręczniki",
+    "TK - gry planszowe",
+    "TK - beletrystyka",
+    "TK - Zabawki"
 ])
 
 # ------------------------#
-# Główna część aplikacji
+# Główna część
 # ------------------------#
 
-st.title('Generator Opisów')
+st.title('Generator Opisów Produktów (TaniaKsiazka)')
+
 client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
 
-if selected_prompt == "TK - Podręczniki - Manual":
-    with st.form("manual_form"):
-        book_info = st.text_area('Informacje o książce:')
-        submit_manual = st.form_submit_button("Generuj opis")
-    if submit_manual:
-        if book_info.strip():
-            book_data_manual = {
-                'title': book_info,
-                'details': book_info,
-                'description': book_info
-            }
-            new_description = generate_description_taniaksiazka(book_data_manual, default_prompt_taniaksiazka)
-            st.markdown("### Wygenerowany opis:")
-            st.markdown(new_description, unsafe_allow_html=True)
+with st.form("url_form"):
+    urls_input = st.text_area('Wprowadź adresy URL (po jednym w linii):')
+    generate_meta = st.checkbox("Generuj też metatagi")
+    submit_button = st.form_submit_button("Uruchom")
+
+if submit_button:
+    if urls_input:
+        urls = [url.strip() for url in urls_input.split('\n') if url.strip()]
+        results = []
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+
+        for idx, url in enumerate(urls):
+            status_text.info(f'Przetwarzanie {idx + 1}/{len(urls)}...')
+            progress_bar.progress((idx + 1) / len(urls))
+
+            book_data = get_taniaksiazka_data(url)
+            if book_data.get('error'):
+                st.error(f"Błąd dla {url}: {book_data['error']}")
+                st.stop()  # Zatrzymanie w razie błędu
+            new_description = generate_description(book_data, default_prompt_taniaksiazka, system_prompt_tk)
+
+            meta_title, meta_description = ("", "")
+            if generate_meta:
+                meta_title, meta_description = generate_meta_tags(book_data)
+
+            results.append({
+                'URL': url,
+                'Tytuł': book_data.get('title', ''),
+                'Szczegóły': book_data.get('details', ''),
+                'Opis oryginalny': book_data.get('description', ''),
+                'Nowy opis': new_description,
+                'Meta title': meta_title,
+                'Meta description': meta_description
+            })
+
+            time.sleep(3)
+
+        if results:
+            df = pd.DataFrame(results)
+            st.dataframe(df, use_container_width=True)
+
+            for row in results:
+                with st.expander(f"Pełny oryginalny opis — {row['Tytuł']}"):
+                    st.markdown(row['Opis oryginalny'], unsafe_allow_html=True)
+                with st.expander(f"Nowy opis — {row['Tytuł']}"):
+                    st.markdown(row['Nowy opis'], unsafe_allow_html=True)
+
+            csv = df.to_csv(index=False).encode('utf-8')
+            st.download_button(
+                label="Pobierz dane",
+                data=csv,
+                file_name='wygenerowane_opisy.csv',
+                mime='text/csv'
+            )
         else:
-            st.warning("Proszę wprowadzić informacje.")
-else:
-    with st.form("url_form"):
-        urls_input = st.text_area('Wprowadź adresy URL (po jednym w linii):')
-        submit_button = st.form_submit_button("Uruchom")
-    if submit_button:
-        if urls_input:
-            urls = [url.strip() for url in urls_input.split('\n') if url.strip()]
-            results = []
-            progress_bar = st.progress(0)
-            status_text = st.empty()
-            for idx, url in enumerate(urls):
-                status_text.info(f'Przetwarzanie {idx+1}/{len(urls)}...')
-                progress_bar.progress((idx + 1) / len(urls))
-                url_lower = url.lower()
-                if "taniaksiazka.pl" in url_lower:
-                    book_data = get_taniaksiazka_data(url)
-                    if book_data.get('error'):
-                        st.error(f"Błąd dla {url}: {book_data['error']}")
-                        st.stop()
-                    if selected_prompt == "TK - Podręczniki":
-                        prompt_used = default_prompt_taniaksiazka
-                    elif selected_prompt == "TK - gry planszowe":
-                        prompt_used = default_prompt_gry_planszowe
-                    elif selected_prompt == "TK - beletrystyka":
-                        prompt_used = default_prompt_beletrystyka
-                    elif selected_prompt == "TK - Zabawki":
-                        prompt_used = default_prompt_zabawki
-                    else:
-                        st.error("Nieobsługiwany prompt.")
-                        st.stop()
-                    new_description = generate_description_taniaksiazka(book_data, prompt_used)
-                    results.append({
-                        'URL': url,
-                        'Tytuł': book_data.get('title', ''),
-                        'Szczegóły': book_data.get('details', ''),
-                        'Opis oryginalny': book_data.get('description', ''),
-                        'Nowy opis': new_description
-                    })
-                else:
-                    st.error(f"Nieobsługiwana domena: {url}")
-                    st.stop()
-                time.sleep(3)
-            if results:
-                df = pd.DataFrame(results)
-                st.dataframe(df, use_container_width=True)
-                csv = df.to_csv(index=False).encode('utf-8')
-                st.download_button("Pobierz dane", data=csv, file_name="wygenerowane_opisy.csv", mime="text/csv")
-            else:
-                st.warning("Nie udało się wygenerować żadnych opisów.")
-        else:
-            st.warning("Proszę wprowadzić adresy URL.")
+            st.warning("Nie udało się wygenerować żadnych opisów.")
+    else:
+        st.warning("Proszę wprowadzić adresy URL.")
