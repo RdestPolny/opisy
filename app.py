@@ -60,8 +60,8 @@ def get_taniaksiazka_data(url):
     """
     Pobiera dane ze strony taniaksiazka.pl:
       - Tytuł (z <h1>)
-      - Szczegóły (z <div id="szczegoly">, element <ul class="bullet">)
-      - Opis (z <div class="desc-container"> lub <div id="product-description">)
+      - Szczegóły (z <div id="szczegoly"> lub <div class="product-features">)
+      - Opis (najpierw z <article>, potem fallbacki)
     """
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36',
@@ -72,11 +72,11 @@ def get_taniaksiazka_data(url):
         response.raise_for_status()
         soup = bs(response.text, 'html.parser')
         
-        # Pobieramy tytuł z <h1>
+        # Tytuł
         title_tag = soup.find('h1')
         title = title_tag.get_text(strip=True) if title_tag else ''
         
-        # Pobieramy szczegóły – szukamy diva o id "szczegoly" lub class "product-features"
+        # Szczegóły
         details_text = ""
         details_div = soup.find("div", id="szczegoly") or soup.find("div", class_="product-features")
         if details_div:
@@ -86,11 +86,16 @@ def get_taniaksiazka_data(url):
                 details_list = [li.get_text(separator=" ", strip=True) for li in li_elements]
                 details_text = "\n".join(details_list)
         
-        # Pobieramy opis – nowy selektor: class="desc-container", fallback: id="product-description"
+        # Opis — najpierw <article>
         description_text = ""
-        description_div = soup.find("div", class_="desc-container") or soup.find("div", id="product-description")
+        description_div = soup.find("article")
         if description_div:
             description_text = description_div.get_text(separator="\n", strip=True)
+        else:
+            # Fallback: desc-container lub product-description
+            description_div = soup.find("div", class_="desc-container") or soup.find("div", id="product-description")
+            if description_div:
+                description_text = description_div.get_text(separator="\n", strip=True)
         
         return {
             'title': title,
@@ -105,6 +110,7 @@ def get_taniaksiazka_data(url):
             'description': '',
             'error': f"Błąd pobierania: {str(e)}"
         }
+
 
 
 def generate_description_lubimyczytac(book_data, prompt_template):
