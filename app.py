@@ -61,7 +61,7 @@ def get_taniaksiazka_data(url):
     Pobiera dane ze strony taniaksiazka.pl:
       - Tytuł (z <h1>)
       - Szczegóły (z <div id="szczegoly"> lub <div class="product-features">)
-      - Opis (najpierw z <article>, potem fallbacki)
+      - Opis (z <div class="desc-content"><article>)
     """
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36',
@@ -86,16 +86,13 @@ def get_taniaksiazka_data(url):
                 details_list = [li.get_text(separator=" ", strip=True) for li in li_elements]
                 details_text = "\n".join(details_list)
         
-        # Opis — najpierw <article>
+        # Opis – główny selektor: <div class="desc-content"><article>
         description_text = ""
-        description_div = soup.find("article")
-        if description_div:
-            description_text = description_div.get_text(separator="\n", strip=True)
-        else:
-            # Fallback: desc-container lub product-description
-            description_div = soup.find("div", class_="desc-container") or soup.find("div", id="product-description")
-            if description_div:
-                description_text = description_div.get_text(separator="\n", strip=True)
+        desc_container = soup.find("div", class_="desc-content")
+        if desc_container:
+            article = desc_container.find("article")
+            if article:
+                description_text = article.get_text(separator="\n", strip=True)
         
         return {
             'title': title,
@@ -110,6 +107,7 @@ def get_taniaksiazka_data(url):
             'description': '',
             'error': f"Błąd pobierania: {str(e)}"
         }
+
 
 
 
