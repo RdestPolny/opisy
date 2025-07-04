@@ -110,33 +110,217 @@ Meta description: [treść]"""
 # Prompty — pełne
 # ------------------------#
 
-prompt_romans = """Jako copywriter, przygotuj angażujący opis w HTML dla książki "{taniaksiazka_title}". Dane: {taniaksiazka_details} {taniaksiazka_description}. 
-Użyj <h2>, <p>, <b>, <ul>, <li>. Zadbaj o romantyczny, emocjonalny ton. 
-Sekcje: nagłówek <h2>, wprowadzenie <p>, opis fabuły <p> z <b>ważnymi</b> słowami, korzyści, podsumowanie i call to action <h3>. 
-Używaj tylko HTML."""
+prompt_romans = """Jako autor opisów w księgarni internetowej, twoim zadaniem jest przygotowanie rzetelnego, zoptymalizowanego opisu produktu o tytule "{taniaksiazka_title}". Oto informacje, na których powinieneś bazować: {taniaksiazka_details} {taniaksiazka_description}. Stwórz angażujący opis w HTML z wykorzystaniem:<h2>, <p>, <b>, <ul>, <li>.
 
-prompt_kryminal = """Przygotuj opis w HTML dla książki kryminalnej "{taniaksiazka_title}". Dane: {taniaksiazka_details} {taniaksiazka_description}. 
-Styl: mroczny, pełen napięcia. Sekcje: <h2>, <p>, <b>. Uwzględnij intrygę, zagadki i nieoczywiste zwroty. 
-Na końcu <h3> zachęta do zakupu."""
+Opis powinien:
 
-prompt_reportaz = """Stwórz opis w HTML dla książki reportażowej "{taniaksiazka_title}". Dane: {taniaksiazka_details} {taniaksiazka_description}. 
-Ton: rzetelny, wiarygodny, oparty na faktach. Użyj <h2>, <p>, <b>. Opisz, czego czytelnik się dowie i dlaczego warto przeczytać. 
-Dodaj <h3> call to action."""
+1. Zawierać sekcje:
+   <h2> z romantycznym hasłem nawiązującym do miłości, emocji i relacji.</h2>
+   <p>Wprowadzenie o tym, czym jest ta historia miłosna, dla kogo jest przeznaczona.</p>
+   <p>Opis fabuły z <b>wyróżnionymi</b> słowami kluczowymi, podkreślającymi uczucia i zwroty akcji.</p>
+   <p>Korzyści emocjonalne dla czytelnika — jakie wartości daje książka.</p>
+   <p>Podsumowanie zbudowane na emocjach.</p>
+   <h3>Przekonujący call to action</h3>
+2. Wykorzystuje pobrane informacje, aby:
+   - Podkreślić główne zalety książki
+   - Wzmocnić wiarygodność opisu
+3. Formatowanie:
+   - Używaj tagów HTML: <h2>, <p>, <b>, <h3>
+   - Wyróżniaj najważniejsze frazy za pomocą <b>
+   - Nie używaj znaczników Markdown, tylko HTML
+   - Nie dodawaj komentarzy ani wyjaśnień
+4. Styl:
+   - Opis ma być romantyczny, emocjonalny i wciągający
+   - Dostosowany do czytelników romansów
+   - Unikaj powtórzeń
+   - Zachowaj spójność tonu
+5. Przykład formatu:
 
-prompt_young_adult = """Napisz w HTML opis książki Young Adult "{taniaksiazka_title}". Dane: {taniaksiazka_details} {taniaksiazka_description}. 
-Ton: lekki, dynamiczny, zrozumiały dla młodzieży. Sekcje: <h2>, <p>, <b>, <h3>. 
-Podkreśl przygodę, emocje i rozwój bohaterów."""
+```html
+<h2>nagłówek</h2>
+<p>dwa akapity</p>
+<p>akapit</p>
+<p>akapit</p>
+<h3>CTA</h3>
+"""
+prompt_kryminal = """Jako autor opisów w księgarni internetowej, twoim zadaniem jest przygotowanie rzetelnego, wciągającego opisu produktu o tytule "{taniaksiazka_title}". Oto informacje, na których powinieneś bazować: {taniaksiazka_details} {taniaksiazka_description}. Stwórz opis w HTML z wykorzystaniem:<h2>, <p>, <b>, <ul>, <li>.
 
-prompt_beletrystyka = """Napisz opis w HTML dla beletrystyki "{taniaksiazka_title}". Dane: {taniaksiazka_details} {taniaksiazka_description}. 
-Ton: uniwersalny, literacki. Sekcje: <h2>, <p>, <b>, <h3>. Uwzględnij fabułę, tematykę i wartość emocjonalną."""
+Opis powinien:
 
-prompt_fantastyka = """Przygotuj opis w HTML dla książki fantasy "{taniaksiazka_title}". Dane: {taniaksiazka_details} {taniaksiazka_description}. 
-Ton: epicki, pełen magii i przygód. Użyj <h2>, <p>, <b>, <h3>. Opisz świat, magię i bohaterów."""
+1. Zawierać sekcje:
+   <h2> z intrygującym hasłem budującym napięcie.</h2>
+   <p>Wprowadzenie do tajemniczej historii, dla kogo książka jest przeznaczona.</p>
+   <p>Opis fabuły z <b>wyróżnionymi</b> elementami zagadki, niespodziewanych zwrotów i napięcia.</p>
+   <p>Korzyści dla miłośników kryminałów — adrenalina, emocje, dedukcja.</p>
+   <p>Podsumowanie i wzbudzenie ciekawości.</p>
+   <h3>Przekonujący call to action</h3>
+2. Wykorzystuje pobrane informacje, aby:
+   - Podkreślić główne atuty książki
+   - Zbudować napięcie
+3. Formatowanie:
+   - Używaj tagów HTML: <h2>, <p>, <b>, <h3>
+   - Wyróżniaj kluczowe frazy
+   - Nie używaj Markdown
+   - Nie dodawaj komentarzy ani wyjaśnień
+4. Styl:
+   - Mroczny, tajemniczy, wciągający
+   - Dostosowany do fanów kryminałów
+   - Unikaj powtórzeń
+5. Przykład formatu:
 
-prompt_scifi = """Napisz opis w HTML dla książki science fiction "{taniaksiazka_title}". Dane: {taniaksiazka_details} {taniaksiazka_description}. 
-Ton: futurystyczny, inspirujący. Sekcje: <h2>, <p>, <b>, <h3>. Skup się na technologii, przyszłości i odkrywaniu nieznanego."""
+```html
+<h2>nagłówek</h2>
+<p>dwa akapity</p>
+<p>akapit</p>
+<p>akapit</p>
+<h3>CTA</h3>
+"""
+prompt_reportaz = """Jako autor opisów w księgarni internetowej, twoim zadaniem jest przygotowanie rzetelnego, przekonującego opisu produktu o tytule "{taniaksiazka_title}". Oto informacje: {taniaksiazka_details} {taniaksiazka_description}. Stwórz opis w HTML z wykorzystaniem:<h2>, <p>, <b>, <ul>, <li>.
 
-system_prompt = "Jesteś doświadczonym copywriterem specjalizującym się w tworzeniu opisów książek w HTML."
+Opis powinien:
+
+1. Zawierać sekcje:
+   <h2> z hasłem oddającym prawdziwą historię lub główny temat.</h2>
+   <p>Wprowadzenie mówiące o kontekście książki, dla kogo jest przeznaczona.</p>
+   <p>Opis zawartości z <b>wyróżnionymi</b> faktami i tematami, które porusza.</p>
+   <p>Korzyści — wiedza, głębsze spojrzenie na świat.</p>
+   <p>Podsumowanie i zachęta do refleksji.</p>
+   <h3>Call to action</h3>
+2. Wykorzystuje dane, aby:
+   - Podkreślić unikalność reportażu
+   - Wzmocnić autentyczność
+3. Formatowanie:
+   - Tylko HTML
+   - Wyróżniaj ważne słowa
+   - Nie używaj Markdown
+   - Bez komentarzy
+4. Styl:
+   - Rzetelny, autentyczny, informacyjny
+   - Unikaj powtórzeń
+   - Zachowaj spójność tonu
+5. Przykład formatu:
+
+```html
+<h2>nagłówek</h2>
+<p>dwa akapity</p>
+<p>akapit</p>
+<p>akapit</p>
+<h3>CTA</h3>
+"""
+prompt_young_adult = """Jako autor opisów w księgarni internetowej, twoim zadaniem jest przygotowanie angażującego opisu książki "{taniaksiazka_title}". Informacje: {taniaksiazka_details} {taniaksiazka_description}. Stwórz opis w HTML.
+
+Opis powinien:
+
+1. Zawierać sekcje:
+   <h2> z chwytliwym hasłem dla młodzieży.</h2>
+   <p>Wprowadzenie do świata książki, grupy docelowej.</p>
+   <p>Opis fabuły z <b>wyróżnionymi</b> przygodami, emocjami i wątkami rozwojowymi.</p>
+   <p>Korzyści — rozrywka, inspiracja, rozwój postaci.</p>
+   <p>Podsumowanie w energetycznym tonie.</p>
+   <h3>Przekonujący call to action</h3>
+2. Wykorzystuje dane, aby:
+   - Pokazać dynamikę fabuły
+   - Wzmocnić autentyczność
+3. Formatowanie:
+   - Tylko HTML
+   - Wyróżniaj ważne frazy
+4. Styl:
+   - Lekki, nowoczesny, młodzieżowy
+   - Unikaj powtórzeń
+   - Zachowaj spójność
+5. Przykład formatu:
+
+```html
+<h2>nagłówek</h2>
+<p>dwa akapity</p>
+<p>akapit</p>
+<p>akapit</p>
+<h3>CTA</h3>
+"""
+prompt_beletrystyka = """Jako autor opisów w księgarni internetowej, twoim zadaniem jest przygotowanie rzetelnego opisu książki "{taniaksiazka_title}". Informacje: {taniaksiazka_details} {taniaksiazka_description}. Stwórz opis w HTML.
+
+Opis powinien:
+
+1. Zawierać sekcje:
+   <h2> z literackim hasłem oddającym klimat książki.</h2>
+   <p>Wprowadzenie do fabuły, ogólny kontekst.</p>
+   <p>Opis treści z <b>wyróżnionymi</b> wątkami i tematami przewodnimi.</p>
+   <p>Korzyści emocjonalne i intelektualne.</p>
+   <p>Podsumowanie, refleksja.</p>
+   <h3>Call to action</h3>
+2. Wykorzystuje dane, aby:
+   - Podkreślić wartość literacką
+3. Formatowanie:
+   - HTML
+   - Wyróżniaj kluczowe frazy
+4. Styl:
+   - Literacki, spójny
+   - Unikaj powtórzeń
+5. Przykład formatu:
+
+```html
+<h2>nagłówek</h2>
+<p>dwa akapity</p>
+<p>akapit</p>
+<p>akapit</p>
+<h3>CTA</h3>
+"""
+prompt_fantastyka = """Jako autor opisów w księgarni internetowej, twoim zadaniem jest przygotowanie epickiego opisu książki fantasy "{taniaksiazka_title}". Informacje: {taniaksiazka_details} {taniaksiazka_description}. Stwórz opis w HTML.
+
+Opis powinien:
+
+1. Zawierać sekcje:
+   <h2> z magicznym hasłem zachęcającym do podróży po fantastycznych światach.</h2>
+   <p>Wprowadzenie do świata fantasy, klimatu książki.</p>
+   <p>Opis przygód i bohaterów z <b>wyróżnionymi</b> elementami magii i niezwykłości.</p>
+   <p>Korzyści — ucieczka od codzienności, rozwój wyobraźni.</p>
+   <p>Podsumowanie z mistycznym akcentem.</p>
+   <h3>Call to action</h3>
+2. Wykorzystuje dane, aby:
+   - Oddać klimat fantasy
+3. Formatowanie:
+   - HTML
+   - Wyróżniaj kluczowe frazy
+4. Styl:
+   - Epicki, pełen magii
+   - Spójny, bez powtórzeń
+5. Przykład formatu:
+
+```html
+<h2>nagłówek</h2>
+<p>dwa akapity</p>
+<p>akapit</p>
+<p>akapit</p>
+<h3>CTA</h3>
+"""
+prompt_scifi = """Jako autor opisów w księgarni internetowej, twoim zadaniem jest przygotowanie futurystycznego opisu książki science fiction "{taniaksiazka_title}". Informacje: {taniaksiazka_details} {taniaksiazka_description}. Stwórz opis w HTML.
+
+Opis powinien:
+
+1. Zawierać sekcje:
+   <h2> z hasłem o przyszłości, odkryciach i technologiach.</h2>
+   <p>Wprowadzenie do świata sci-fi, kontekstu książki.</p>
+   <p>Opis fabuły i technologii z <b>wyróżnionymi</b> futurystycznymi elementami.</p>
+   <p>Korzyści — inspiracja, rozbudzenie wyobraźni.</p>
+   <p>Podsumowanie, wzbudzenie ciekawości o przyszłość.</p>
+   <h3>Call to action</h3>
+2. Wykorzystuje dane, aby:
+   - Oddać klimat sci-fi
+3. Formatowanie:
+   - HTML
+   - Wyróżniaj ważne frazy
+4. Styl:
+   - Futurystyczny, dynamiczny
+   - Spójny, bez powtórzeń
+5. Przykład formatu:
+
+```html
+<h2>nagłówek</h2>
+<p>dwa akapity</p>
+<p>akapit</p>
+<p>akapit</p>
+<h3>CTA</h3>
+"""
 
 # ------------------------#
 # Sidebar
