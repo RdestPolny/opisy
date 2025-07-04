@@ -3,50 +3,11 @@ import pandas as pd
 import requests
 from bs4 import BeautifulSoup as bs
 import time
-import random
 from openai import OpenAI
 
 # ------------------------#
-# Definicje funkcji – globalne
+# Definicje funkcji — globalne
 # ------------------------#
-
-def get_lubimyczytac_data(url):
-    MOBILE_USER_AGENTS = [
-        "Mozilla/5.0 (Linux; Android 10; SM-A505F) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/83.0.4103.106 Mobile Safari/537.36",
-        "Mozilla/5.0 (iPhone; CPU iPhone OS 13_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/13.1.1 Mobile/15E148 Safari/604.1",
-        "Mozilla/5.0 (Linux; Android 9; SAMSUNG SM-G960F) AppleWebKit/537.36 (KHTML, like Gecko) SamsungBrowser/10.1 Chrome/71.0.3578.99 Mobile Safari/537.36",
-        "Mozilla/5.0 (iPhone; CPU iPhone OS 14_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.0 Mobile/15E148 Safari/604.1"
-    ]
-    headers = {
-        'User-Agent': random.choice(MOBILE_USER_AGENTS),
-        'Accept-Language': 'pl-PL,pl;q=0.9,en-US;q=0.8,en;q=0.7',
-    }
-    try:
-        response = requests.get(url, headers=headers, timeout=30)
-        response.raise_for_status()
-        soup = bs(response.text, 'html.parser')
-        title_tag = soup.find('h1', class_='book__title')
-        title = title_tag.get_text(strip=True) if title_tag else ''
-        description_div = soup.find('div', id='book-description')
-        description = description_div.get_text(strip=True) if description_div else ''
-        reviews = []
-        for review in soup.select('p.expandTextNoJS.p-expanded.js-expanded'):
-            text = review.get_text(strip=True)
-            if len(text) > 50:
-                reviews.append(text)
-        return {
-            'title': title,
-            'description': description,
-            'reviews': "\n\n---\n\n".join(reviews) if reviews else '',
-            'error': None
-        }
-    except Exception as e:
-        return {
-            'title': '',
-            'description': '',
-            'reviews': '',
-            'error': f"Błąd pobierania: {str(e)}"
-        }
 
 def get_taniaksiazka_data(url):
     headers = {
@@ -149,35 +110,53 @@ Meta description: [treść]"""
 # Prompty — pełne
 # ------------------------#
 
-default_prompt_taniaksiazka = """Jako autor opisów w księgarni internetowej, twoim zadaniem jest przygotowanie rzetelnego, zoptymalizowanego opisu produktu o tytule "{taniaksiazka_title}". Oto informacje, na których powinieneś bazować: {taniaksiazka_details} {taniaksiazka_description}. Stwórz angażujący opis w HTML z wykorzystaniem: <h2>, <p>, <b>, <ul>, <li>.
+prompt_romans = """Jako copywriter, przygotuj angażujący opis w HTML dla książki "{taniaksiazka_title}". Dane: {taniaksiazka_details} {taniaksiazka_description}. 
+Użyj <h2>, <p>, <b>, <ul>, <li>. Zadbaj o romantyczny, emocjonalny ton. 
+Sekcje: nagłówek <h2>, wprowadzenie <p>, opis fabuły <p> z <b>ważnymi</b> słowami, korzyści, podsumowanie i call to action <h3>. 
+Używaj tylko HTML."""
 
-Opis powinien zawierać:
-1. Nagłówek <h2> z kreatywnym hasłem nawiązującym do tematu.
-2. Wprowadzenie <p> czym jest ten produkt, dla kogo jest przeznaczony.
-3. Szczegółowy opis z <b>wyróżnionymi</b> słowami kluczowymi.
-4. Korzyści i zalety.
-5. Podsumowanie z wezwaniem do działania <h3>.
+prompt_kryminal = """Przygotuj opis w HTML dla książki kryminalnej "{taniaksiazka_title}". Dane: {taniaksiazka_details} {taniaksiazka_description}. 
+Styl: mroczny, pełen napięcia. Sekcje: <h2>, <p>, <b>. Uwzględnij intrygę, zagadki i nieoczywiste zwroty. 
+Na końcu <h3> zachęta do zakupu."""
 
-Używaj tylko HTML. Nie dodawaj komentarzy ani wyjaśnień. Nie wymyślaj informacji, jeśli nie są dostępne w opisie lub szczegółach."""
+prompt_reportaz = """Stwórz opis w HTML dla książki reportażowej "{taniaksiazka_title}". Dane: {taniaksiazka_details} {taniaksiazka_description}. 
+Ton: rzetelny, wiarygodny, oparty na faktach. Użyj <h2>, <p>, <b>. Opisz, czego czytelnik się dowie i dlaczego warto przeczytać. 
+Dodaj <h3> call to action."""
 
-system_prompt_tk = "Jesteś doświadczonym copywriterem specjalizującym się w opisach produktów księgarni online. Piszesz atrakcyjne i poprawne opisy w HTML."
+prompt_young_adult = """Napisz w HTML opis książki Young Adult "{taniaksiazka_title}". Dane: {taniaksiazka_details} {taniaksiazka_description}. 
+Ton: lekki, dynamiczny, zrozumiały dla młodzieży. Sekcje: <h2>, <p>, <b>, <h3>. 
+Podkreśl przygodę, emocje i rozwój bohaterów."""
+
+prompt_beletrystyka = """Napisz opis w HTML dla beletrystyki "{taniaksiazka_title}". Dane: {taniaksiazka_details} {taniaksiazka_description}. 
+Ton: uniwersalny, literacki. Sekcje: <h2>, <p>, <b>, <h3>. Uwzględnij fabułę, tematykę i wartość emocjonalną."""
+
+prompt_fantastyka = """Przygotuj opis w HTML dla książki fantasy "{taniaksiazka_title}". Dane: {taniaksiazka_details} {taniaksiazka_description}. 
+Ton: epicki, pełen magii i przygód. Użyj <h2>, <p>, <b>, <h3>. Opisz świat, magię i bohaterów."""
+
+prompt_scifi = """Napisz opis w HTML dla książki science fiction "{taniaksiazka_title}". Dane: {taniaksiazka_details} {taniaksiazka_description}. 
+Ton: futurystyczny, inspirujący. Sekcje: <h2>, <p>, <b>, <h3>. Skup się na technologii, przyszłości i odkrywaniu nieznanego."""
+
+system_prompt = "Jesteś doświadczonym copywriterem specjalizującym się w tworzeniu opisów książek w HTML."
 
 # ------------------------#
 # Sidebar
 # ------------------------#
 
-selected_prompt = st.sidebar.selectbox("Wybierz prompt", [
-    "TK - Podręczniki",
-    "TK - gry planszowe",
-    "TK - beletrystyka",
-    "TK - Zabawki"
+selected_prompt = st.sidebar.selectbox("Wybierz kategorię", [
+    "Romans",
+    "Kryminał",
+    "Reportaż",
+    "Young Adult",
+    "Beletrystyka",
+    "Fantastyka",
+    "Sci-fi"
 ])
 
 # ------------------------#
 # Główna część
 # ------------------------#
 
-st.title('Generator Opisów Produktów (TaniaKsiazka)')
+st.title('Generator Opisów Książek (TaniaKsiazka)')
 
 client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
 
@@ -193,6 +172,24 @@ if submit_button:
         progress_bar = st.progress(0)
         status_text = st.empty()
 
+        # Wybór promptu
+        if selected_prompt == "Romans":
+            prompt_used = prompt_romans
+        elif selected_prompt == "Kryminał":
+            prompt_used = prompt_kryminal
+        elif selected_prompt == "Reportaż":
+            prompt_used = prompt_reportaz
+        elif selected_prompt == "Young Adult":
+            prompt_used = prompt_young_adult
+        elif selected_prompt == "Beletrystyka":
+            prompt_used = prompt_beletrystyka
+        elif selected_prompt == "Fantastyka":
+            prompt_used = prompt_fantastyka
+        elif selected_prompt == "Sci-fi":
+            prompt_used = prompt_scifi
+        else:
+            prompt_used = prompt_beletrystyka
+
         for idx, url in enumerate(urls):
             status_text.info(f'Przetwarzanie {idx + 1}/{len(urls)}...')
             progress_bar.progress((idx + 1) / len(urls))
@@ -201,7 +198,8 @@ if submit_button:
             if book_data.get('error'):
                 st.error(f"Błąd dla {url}: {book_data['error']}")
                 st.stop()  # Zatrzymanie w razie błędu
-            new_description = generate_description(book_data, default_prompt_taniaksiazka, system_prompt_tk)
+
+            new_description = generate_description(book_data, prompt_used, system_prompt)
 
             meta_title, meta_description = ("", "")
             if generate_meta:
