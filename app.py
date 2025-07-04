@@ -7,7 +7,7 @@ from openai import OpenAI
 
 # ------------- POBIERANIE DANYCH ------------- #
 
-def get_taniaksiazka_data(url):
+def get_book_data(url):
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36',
         'Accept-Language': 'pl-PL,pl;q=0.9,en-US;q=0.8,en;q=0.7',
@@ -26,10 +26,33 @@ def get_taniaksiazka_data(url):
                 li_elements = ul.find_all("li")
                 details_list = [li.get_text(separator=" ", strip=True) for li in li_elements]
                 details_text = "\n".join(details_list)
+        
+        # Pobieranie pełnego opisu z zagnieżdżonych struktur
         description_text = ""
-        description_div = soup.find("div", class_="desc-container") or soup.find("div", id="product-description")
+        description_div = soup.find("div", class_="desc-container")
         if description_div:
-            description_text = description_div.get_text(separator="\n", strip=True)
+            # Szukamy głębiej w strukturze - artykuł z pełnym opisem
+            article = description_div.find("article")
+            if article:
+                # Jeśli jest zagnieżdżony artykuł, bierzemy go
+                nested_article = article.find("article")
+                if nested_article:
+                    description_text = nested_article.get_text(separator="\n", strip=True)
+                else:
+                    description_text = article.get_text(separator="\n", strip=True)
+            else:
+                # Fallback - jeśli nie ma artykułu, bierzemy cały div
+                description_text = description_div.get_text(separator="\n", strip=True)
+        
+        # Dodatkowe sprawdzenie dla alternatywnych struktur
+        if not description_text:
+            alt_desc_div = soup.find("div", id="product-description")
+            if alt_desc_div:
+                description_text = alt_desc_div.get_text(separator="\n", strip=True)
+        
+        # Czyszczenie tekstu z nadmiarowych białych znaków
+        description_text = " ".join(description_text.split())
+        
         if not description_text:
             return {
                 'title': title,
@@ -56,9 +79,9 @@ def get_taniaksiazka_data(url):
 def generate_description(book_data, prompt_template, client):
     try:
         prompt_filled = prompt_template.format(
-            taniaksiazka_title=book_data.get('title', ''),
-            taniaksiazka_details=book_data.get('details', ''),
-            taniaksiazka_description=book_data.get('description', '')
+            book_title=book_data.get('title', ''),
+            book_details=book_data.get('details', ''),
+            book_description=book_data.get('description', '')
         )
         messages = [
             {"role": "system", "content": "Jesteś profesjonalnym copywriterem. Tworzysz wyłącznie poprawne, atrakcyjne opisy książek do księgarni internetowej. Każdy opis ma być zgodny z poleceniem i formą HTML, nie dodawaj nic od siebie."},
@@ -108,7 +131,7 @@ Meta description: [treść]"""
 
 # ------------- PROMPTY DO GATUNKÓW ------------- #
 
-prompt_romans = """Jako autor opisów w księgarni internetowej, twoim zadaniem jest przygotowanie rzetelnego, zoptymalizowanego opisu produktu o tytule "{taniaksiazka_title}". Oto informacje, na których powinieneś bazować: {taniaksiazka_details} {taniaksiazka_description}. Stwórz angażujący opis w HTML z wykorzystaniem:<h2>, <p>, <b>, <ul>, <li>.
+prompt_romans = """Jako autor opisów w księgarni internetowej, twoim zadaniem jest przygotowanie rzetelnego, zoptymalizowanego opisu produktu o tytule "{book_title}". Oto informacje, na których powinieneś bazować: {book_details} {book_description}. Stwórz angażujący opis w HTML z wykorzystaniem:<h2>, <p>, <b>, <ul>, <li>.
 
 Opis powinien:
 
@@ -141,7 +164,7 @@ Opis powinien:
 <h3>CTA</h3>
 """
 
-prompt_kryminal = """Jako autor opisów w księgarni internetowej, twoim zadaniem jest przygotowanie rzetelnego, wciągającego opisu produktu o tytule "{taniaksiazka_title}". Oto informacje, na których powinieneś bazować: {taniaksiazka_details} {taniaksiazka_description}. Stwórz opis w HTML z wykorzystaniem:<h2>, <p>, <b>, <ul>, <li>.
+prompt_kryminal = """Jako autor opisów w księgarni internetowej, twoim zadaniem jest przygotowanie rzetelnego, wciągającego opisu produktu o tytule "{book_title}". Oto informacje, na których powinieneś bazować: {book_details} {book_description}. Stwórz opis w HTML z wykorzystaniem:<h2>, <p>, <b>, <ul>, <li>.
 
 Opis powinien:
 
@@ -176,7 +199,7 @@ Przykład formatu:
 <h3>CTA</h3>
 """
 
-prompt_reportaz = """Jako autor opisów w księgarni internetowej, twoim zadaniem jest przygotowanie rzetelnego, przekonującego opisu produktu o tytule "{taniaksiazka_title}". Oto informacje: {taniaksiazka_details} {taniaksiazka_description}. Stwórz opis w HTML z wykorzystaniem:<h2>, <p>, <b>, <ul>, <li>.
+prompt_reportaz = """Jako autor opisów w księgarni internetowej, twoim zadaniem jest przygotowanie rzetelnego, przekonującego opisu produktu o tytule "{book_title}". Oto informacje: {book_details} {book_description}. Stwórz opis w HTML z wykorzystaniem:<h2>, <p>, <b>, <ul>, <li>.
 
 Opis powinien:
 
@@ -211,7 +234,7 @@ Przykład formatu:
 <h3>CTA</h3>
 """
 
-prompt_young_adult = """Jako autor opisów w księgarni internetowej, twoim zadaniem jest przygotowanie angażującego opisu książki "{taniaksiazka_title}". Informacje: {taniaksiazka_details} {taniaksiazka_description}. Stwórz opis w HTML.
+prompt_young_adult = """Jako autor opisów w księgarni internetowej, twoim zadaniem jest przygotowanie angażującego opisu książki "{book_title}". Informacje: {book_details} {book_description}. Stwórz opis w HTML.
 
 Opis powinien:
 
@@ -244,7 +267,7 @@ Przykład formatu:
 <h3>CTA</h3>
 """
 
-prompt_beletrystyka = """Jako autor opisów w księgarni internetowej, twoim zadaniem jest przygotowanie rzetelnego opisu książki "{taniaksiazka_title}". Informacje: {taniaksiazka_details} {taniaksiazka_description}. Stwórz opis w HTML.
+prompt_beletrystyka = """Jako autor opisów w księgarni internetowej, twoim zadaniem jest przygotowanie rzetelnego opisu książki "{book_title}". Informacje: {book_details} {book_description}. Stwórz opis w HTML.
 
 Opis powinien:
 
@@ -275,7 +298,7 @@ Przykład formatu:
 <h3>CTA</h3>
 """
 
-prompt_fantastyka = """Jako autor opisów w księgarni internetowej, twoim zadaniem jest przygotowanie epickiego opisu książki fantasy "{taniaksiazka_title}". Informacje: {taniaksiazka_details} {taniaksiazka_description}. Stwórz opis w HTML.
+prompt_fantastyka = """Jako autor opisów w księgarni internetowej, twoim zadaniem jest przygotowanie epickiego opisu książki fantasy "{book_title}". Informacje: {book_details} {book_description}. Stwórz opis w HTML.
 
 Opis powinien:
 
@@ -306,7 +329,7 @@ Przykład formatu:
 <h3>CTA</h3>
 """
 
-prompt_scifi = """Jako autor opisów w księgarni internetowej, twoim zadaniem jest przygotowanie futurystycznego opisu książki science fiction "{taniaksiazka_title}". Informacje: {taniaksiazka_details} {taniaksiazka_description}. Stwórz opis w HTML.
+prompt_scifi = """Jako autor opisów w księgarni internetowej, twoim zadaniem jest przygotowanie futurystycznego opisu książki science fiction "{book_title}". Informacje: {book_details} {book_description}. Stwórz opis w HTML.
 
 Opis powinien:
 
@@ -351,7 +374,7 @@ prompts = {
 
 st.set_page_config(page_title="Generator opisów książek", page_icon="📚", layout="wide")
 
-st.title('📚 Generator opisów książek na podstawie TaniaKsiazka.pl')
+st.title('📚 Generator opisów książek')
 st.markdown("---")
 
 # Sprawdzenie czy klucz API jest dostępny
@@ -375,9 +398,9 @@ col1, col2 = st.columns([1, 1])
 with col1:
     st.header("📝 Dane wejściowe")
     url = st.text_input(
-        "URL strony z TaniaKsiazka.pl:",
-        placeholder="https://www.taniaksiazka.pl/...",
-        help="Wklej pełny URL strony produktu z TaniaKsiazka.pl"
+        "URL strony produktu:",
+        placeholder="https://przykład.com/książka",
+        help="Wklej pełny URL strony produktu"
     )
     
     generate_meta = st.checkbox("Generuj meta title i meta description", value=True)
@@ -385,11 +408,9 @@ with col1:
     if st.button("🚀 Generuj opis", type="primary", use_container_width=True):
         if not url:
             st.error("❌ Podaj URL strony produktu!")
-        elif not url.startswith("https://www.taniaksiazka.pl/"):
-            st.warning("⚠️ URL powinien prowadzić do strony TaniaKsiazka.pl")
         else:
             with st.spinner("Pobieram dane ze strony..."):
-                book_data = get_taniaksiazka_data(url)
+                book_data = get_book_data(url)
                 
                 if book_data['error']:
                     st.error(f"❌ {book_data['error']}")
@@ -402,7 +423,10 @@ with col1:
                     if book_data['details']:
                         st.write(f"**Szczegóły:** {book_data['details'][:200]}...")
                     if book_data['description']:
-                        st.write(f"**Opis:** {book_data['description'][:200]}...")
+                        # Pokazujemy więcej tekstu dla weryfikacji
+                        full_desc = book_data['description']
+                        st.write(f"**Opis:** {full_desc[:500]}...")
+                        st.write(f"**Długość opisu:** {len(full_desc)} znaków")
                     
                     # Generowanie opisu
                     with st.spinner("Generuję opis..."):
