@@ -374,6 +374,12 @@ prompts = {
 
 st.set_page_config(page_title="Generator opisów książek", page_icon="📚", layout="wide")
 
+# Inicjalizacja session state
+if 'selected_prompt' not in st.session_state:
+    st.session_state.selected_prompt = "Romans"
+if 'show_preview' not in st.session_state:
+    st.session_state.show_preview = False
+
 st.title('📚 Generator opisów książek')
 st.markdown("---")
 
@@ -389,8 +395,11 @@ st.sidebar.header("🎯 Ustawienia")
 selected_prompt = st.sidebar.selectbox(
     "Wybierz gatunek książki:",
     list(prompts.keys()),
-    index=0
+    index=list(prompts.keys()).index(st.session_state.selected_prompt)
 )
+
+# Aktualizacja session state
+st.session_state.selected_prompt = selected_prompt
 
 # Główny interfejs
 col1, col2 = st.columns([1, 1])
@@ -403,9 +412,24 @@ with col1:
         help="Wklej pełny URL strony produktu"
     )
     
-    generate_meta = st.checkbox("Generuj meta title i meta description", value=True)
+    generate_meta = st.checkbox("Generuj meta title i meta description", value=False)
     
-    if st.button("🚀 Generuj opis", type="primary", use_container_width=True):
+    # Przyciski
+    col_btn1, col_btn2 = st.columns([1, 1])
+    
+    with col_btn1:
+        generate_button = st.button("🚀 Generuj opis", type="primary", use_container_width=True)
+    
+    with col_btn2:
+        if st.button("🔄 Generuj kolejny", use_container_width=True):
+            # Wyczyść dane ale zostaw wybrany prompt
+            keys_to_remove = [key for key in st.session_state.keys() if key not in ['selected_prompt']]
+            for key in keys_to_remove:
+                del st.session_state[key]
+            st.session_state.show_preview = False
+            st.rerun()
+    
+    if generate_button:
         if not url:
             st.error("❌ Podaj URL strony produktu!")
         else:
@@ -426,7 +450,7 @@ with col1:
                         # Pokazujemy więcej tekstu dla weryfikacji
                         full_desc = book_data['description']
                         st.write(f"**Opis:** {full_desc[:500]}...")
-                        st.write(f"**Długość opisu:** {len(full_desc)} znaków")
+                        st.write(f"**Długość pobranego opisu:** {len(full_desc)} znaków")
                     
                     # Generowanie opisu
                     with st.spinner("Generuję opis..."):
@@ -436,6 +460,7 @@ with col1:
                         if generated_desc:
                             st.session_state['generated_description'] = generated_desc
                             st.session_state['book_title'] = book_data['title']
+                            st.session_state.show_preview = False
                             
                             # Generowanie metatagów
                             if generate_meta:
@@ -451,13 +476,24 @@ with col2:
         st.subheader(f"📖 {st.session_state.get('book_title', 'Opis książki')}")
         st.subheader(f"🎭 Gatunek: {selected_prompt}")
         
-        # Podgląd HTML
-        st.markdown("**Podgląd:**")
-        st.markdown(st.session_state['generated_description'], unsafe_allow_html=True)
-        
-        # Kod HTML do skopiowania
+        # Kod HTML do skopiowania (najpierw)
         st.markdown("**Kod HTML:**")
-        st.code(st.session_state['generated_description'], language='html')
+        html_code = st.session_state['generated_description']
+        st.code(html_code, language='html')
+        
+        # Przycisk do skopiowania HTML
+        if st.button("📋 Skopiuj kod HTML", use_container_width=True):
+            st.code(html_code, language='html')
+            st.success("✅ Kod HTML jest gotowy do skopiowania z pola powyżej!")
+        
+        # Przycisk podglądu
+        if st.button("👁️ Podgląd", use_container_width=True):
+            st.session_state.show_preview = not st.session_state.show_preview
+        
+        # Podgląd HTML (po naciśnięciu przycisku)
+        if st.session_state.show_preview:
+            st.markdown("**Podgląd:**")
+            st.markdown(st.session_state['generated_description'], unsafe_allow_html=True)
         
         # Metatagi
         if 'meta_title' in st.session_state and 'meta_description' in st.session_state:
@@ -470,10 +506,6 @@ with col2:
             meta_code = f"""<title>{st.session_state['meta_title']}</title>
 <meta name="description" content="{st.session_state['meta_description']}">"""
             st.code(meta_code, language='html')
-        
-        # Przycisk do skopiowania
-        if st.button("📋 Skopiuj opis HTML", use_container_width=True):
-            st.success("✅ Opis skopiowany do schowka!")
             
     else:
         st.info("👈 Podaj URL i kliknij 'Generuj opis' aby rozpocząć")
