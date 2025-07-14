@@ -84,7 +84,7 @@ def generate_description(book_data, prompt_template, client):
             book_description=book_data.get('description', '')
         )
         messages = [
-            {"role": "system", "content": "Jesteś profesjonalnym copywriterem. Tworzysz wyłącznie poprawne, atrakcyjne opisy książek do księgarni internetowej. Każdy opis ma być zgodny z poleceniem i formą HTML, nie dodawaj nic od siebie."},
+            {"role": "system", "content": "Jesteś profesjonalnym copywriterem. Tworzysz wyłącznie poprawne, atrakcyjne opisy książek i produktów do księgarni internetowej. Każdy opis ma być zgodny z poleceniem i formą HTML, nie dodawaj nic od siebie."},
             {"role": "user", "content": prompt_filled}
         ]
         response = client.chat.completions.create(
@@ -131,101 +131,67 @@ Meta description: [treść]"""
 
 # ------------- PROMPTY DO GATUNKÓW ------------- #
 
-prompt_romans = """Jako autor opisów w księgarni internetowej, twoim zadaniem jest przygotowanie rzetelnego, zoptymalizowanego opisu produktu o tytule "{book_title}". Oto informacje, na których powinieneś bazować: {book_details} {book_description}. Stwórz angażujący opis w HTML z wykorzystaniem:<h2>, <p>, <b>, <ul>, <li>.
-
-Opis powinien:
-
-1. Zawierać sekcje:
-   <h2> z romantycznym hasłem nawiązującym do miłości, emocji i relacji.</h2>
-   <p>Wprowadzenie o tym, czym jest ta historia miłosna, dla kogo jest przeznaczona.</p>
-   <p>Opis fabuły z <b>wyróżnionymi</b> słowami kluczowymi, podkreślającymi uczucia i zwroty akcji.</p>
-   <p>Korzyści emocjonalne dla czytelnika — jakie wartości daje książka.</p>
-   <p>Podsumowanie zbudowane na emocjach.</p>
-   <h3>Przekonujący call to action</h3>
+prompt_romans = """Jako autor opisów w księgarni internetowej, twoim zadaniem jest przygotowanie rzetelnego, zoptymalizowanego opisu produktu o tytule "{book_title}". Oto informacje, na których powinieneś bazować: {book_details} {book_description}. Stwórz angażujący opis w HTML z wykorzystaniem: <h2>, <p>, <b>, <ul>, <li>. Opis powinien:
+Zaczyna się od nagłówka <h2> z kreatywnym hasłem, które oddaje emocje i charakter książki oraz odwołuje się do miłośników historii o miłości i wzruszających relacji.
+1. Zawiera sekcje:
+ <p>Wprowadzenie, które przedstawia książkę, jej gatunek (np. romans współczesny, historyczny, obyczajowy), ogólną tematykę i klimat (np. pełen emocji, namiętny, wzruszający, pełen czułości i zaskoczeń), główne cechy, takie jak chemia między bohaterami, intensywne uczucia i wyjątkowa atmosfera. Dodatkowo zaznacz, do jakiego czytelnika jest skierowana — np. dla osób, które chcą przeżyć historię pełną miłości, wzruszeń i emocji.</p>
+ <p>Opis fabuły z <b>wyróżnionymi</b> słowami kluczowymi, podkreślającymi unikalne elementy, takie jak miłosne napięcia, nieoczekiwane zwroty akcji, przeszkody na drodze do szczęścia, pełne pasji relacje czy poruszające historie bohaterów. (Trzymaj się informacji zawartych w dotychczasowym opisie książki, jeśli nie masz szczegółowych danych o fabule, unikaj zdradzania najważniejszych momentów.)</p>
+ <p>Podsumowanie, które zachęca do zakupu i podkreśla, dlaczego ta książka romans wyróżnia się na tle innych — np. dzięki wyjątkowym postaciom, pełnym pasji relacjom lub zaskakującej fabule.</p>
+ <h3>Przekonujący call to action, który zachęca do sięgnięcia po książkę i natychmiastowego zamówienia.</h3>
 2. Wykorzystuje pobrane informacje, aby:
-   - Podkreślić główne zalety książki
-   - Wzmocnić wiarygodność opisu
+- Podkreślić najważniejsze cechy książki
+- Wzmocnić wiarygodność opisu poprzez konkretne przykłady
 3. Formatowanie:
-   - Używaj tagów HTML: <h2>, <p>, <b>, <h3>
-   - Wyróżniaj najważniejsze frazy za pomocą <b>
-   - Nie używaj znaczników Markdown, tylko HTML
-   - Nie dodawaj komentarzy ani wyjaśnień
-4. Styl:
-   - Opis ma być romantyczny, emocjonalny i wciągający
-   - Dostosowany do czytelników romansów
-   - Unikaj powtórzeń
-   - Zachowaj spójność tonu
-5. Przykład formatu:
-
-<h2>nagłówek</h2>
-<p>dwa akapity</p>
-<p>akapit</p>
-<p>akapit</p>
-<h3>CTA</h3>
-"""
-
-prompt_kryminal = """Jako autor opisów w księgarni internetowej, twoim zadaniem jest przygotowanie rzetelnego, wciągającego opisu produktu o tytule "{book_title}". Oto informacje, na których powinieneś bazować: {book_details} {book_description}. Stwórz opis w HTML z wykorzystaniem:<h2>, <p>, <b>, <ul>, <li>.
-
-Opis powinien:
-
-Zawierać sekcje:
-<h2> z intrygującym hasłem budującym napięcie.</h2>
-<p>Wprowadzenie do tajemniczej historii, dla kogo książka jest przeznaczona.</p>
-<p>Opis fabuły z <b>wyróżnionymi</b> elementami zagadki, niespodziewanych zwrotów i napięcia.</p>
-<p>Korzyści dla miłośników kryminałów — adrenalina, emocje, dedukcja.</p>
-<p>Podsumowanie i wzbudzenie ciekawości.</p>
-<h3>Przekonujący call to action</h3>
-
-Wykorzystuje pobrane informacje, aby:
-- Podkreślić główne atuty książki
-- Zbudować napięcie
-
-Formatowanie:
 - Używaj tagów HTML: <h2>, <p>, <b>, <h3>
-- Wyróżniaj kluczowe frazy
-- Nie używaj Markdown
-- Nie dodawaj komentarzy ani wyjaśnień
-
-Styl:
-- Mroczny, tajemniczy, wciągający
-- Dostosowany do fanów kryminałów
-- Unikaj powtórzeń
-
-Przykład formatu:
-<h2>nagłówek</h2>
-<p>dwa akapity</p>
-<p>akapit</p>
-<p>akapit</p>
-<h3>CTA</h3>
-"""
-
-prompt_reportaz = """Jako autor opisów w księgarni internetowej, twoim zadaniem jest przygotowanie rzetelnego, przekonującego opisu produktu o tytule "{book_title}". Oto informacje: {book_details} {book_description}. Stwórz opis w HTML z wykorzystaniem:<h2>, <p>, <b>, <ul>, <li>.
-
-Opis powinien:
-
-Zawierać sekcje:
-<h2> z hasłem oddającym prawdziwą historię lub główny temat.</h2>
-<p>Wprowadzenie mówiące o kontekście książki, dla kogo jest przeznaczona.</p>
-<p>Opis zawartości z <b>wyróżnionymi</b> faktami i tematami, które porusza.</p>
-<p>Korzyści — wiedza, głębsze spojrzenie na świat.</p>
-<p>Podsumowanie i zachęta do refleksji.</p>
-<h3>Call to action</h3>
-
-Wykorzystuje dane, aby:
-- Podkreślić unikalność reportażu
-- Wzmocnić autentyczność
-
-Formatowanie:
-- Tylko HTML
-- Wyróżniaj ważne słowa
-- Nie używaj Markdown
-- Bez komentarzy
-
-Styl:
-- Rzetelny, autentyczny, informacyjny
+- Wyróżniaj kluczowe frazy za pomocą <b>
+- Nie używaj znaczników Markdown, tylko HTML
+- Nie dodawaj komentarzy ani wyjaśnień, tylko sam opis
+4. Styl:
+- Opis powinien być emocjonalny, pełen uczuć i wciągający
+- Używaj języka, który podkreśla miłość, namiętność i wzruszenia
+- Akcentuj relacje między bohaterami, ich emocje, konflikty i rozwój uczuć
+- Unikaj ogólników — skup się na unikalnych aspektach relacji i historii (jeśli masz takie informacje)
+- Pisząc, miej w głowie czytelnika, który szuka historii pełnej miłości, czułości i wielkich emocji
+- Nie bój się podkreślać silnych uczuć: ekscytacji, smutku, nadziei, tęsknoty, radości
+- Zachowaj profesjonalny, ale ciepły i angażujący ton
 - Unikaj powtórzeń
 - Zachowaj spójność tonu
+5. Osoba, do której kierowany jest opis:
+Opis książki romans kierowany jest do czytelnika, który pragnie poczuć magię miłości i przeżyć historię pełną emocji. To osoba wrażliwa, romantyczna, często marzycielska, która szuka w literaturze wzruszeń, pięknych relacji i niezapomnianych momentów. Lubi historie, które pozwalają oderwać się od codzienności, wciągnąć się w losy bohaterów i poczuć całą gamę uczuć — od radości po smutek i nadzieję.
+Przykład formatu:
+<h2>nagłówek</h2>
+<p>dwa akapity</p>
+<p>akapit</p>
+<h3>CTA</h3>
+"""
 
+prompt_kryminal = """Jako autor opisów w księgarni internetowej, twoim zadaniem jest przygotowanie rzetelnego, zoptymalizowanego opisu produktu o tytule "{book_title}". Oto informacje, na których powinieneś bazować: {book_details} {book_description}. Stwórz angażujący opis w HTML z wykorzystaniem:<h2>, <p>, <b>, <ul>, <li>. Opis powinien:
+Zaczyna się od nagłówka <h2> z kreatywnym hasłem, które oddaje emocje i charakter książki oraz odwołuje się do miłośników kryminałów.
+1. Zawiera sekcje:
+   <p>Wprowadzenie, które przedstawia książkę, jej gatunek (kryminał, thriller psychologiczny itp.), ogólną tematykę i klimat (np. mroczny, pełen napięcia, psychologiczny), główne cechy, takie jak intensywne zwroty akcji, wciągająca fabuła oraz psychologiczna głębia postaci. Dodatkowo zaznacz, do jakiego czytelnika jest skierowana — np. dla osób szukających historii pełnych intryg i emocji.</p>
+   <p>Opis fabuły z <b>wyróżnionymi</b> słowami kluczowymi, podkreślającymi unikalne elementy, takie jak napięcie, tajemnica, zwroty akcji oraz psychologiczne rozgrywki między bohaterami. (Trzymaj się informacji zawartych w dotychczasowym opisie książki, jeśli nie masz szczegółowych danych o fabule, unikaj dokładnych spojlerów fabularnych, żeby nie psuć wrażeń czytelnikowi.)</p>
+   <p>Podsumowanie, które zachęca do zakupu i podkreśla, dlaczego ta książka kryminalna wyróżnia się na tle innych tytułów — np. dzięki mistrzowsko budowanemu napięciu, nieprzewidywalnej fabule czy wyjątkowo wyrazistym postaciom.</p>
+   <h3>Przekonujący call to action, który skłania do sięgnięcia po książkę i natychmiastowego zamówienia.</h3>
+2. Wykorzystuje pobrane informacje, aby:
+    - Podkreślić najważniejsze cechy książki
+    - Wzmocnić wiarygodność opisu poprzez konkretne przykłady
+3. Formatowanie:
+  - Używaj tagów HTML: <h2>, <p>, <b>, <h3>
+  - Wyróżniaj kluczowe frazy za pomocą <b>
+  - Nie używaj znaczników Markdown, tylko HTML
+  - Nie dodawaj komentarzy ani wyjaśnień, tylko sam opis
+4. Styl:
+- Opis powinien być angażujący i intrygujący
+- Używaj języka, który buduje atmosferę tajemnicy i zagadki — operuj słowami kojarzącymi się z intrygą, niepewnością, odkrywaniem sekretów. 
+- Akcentuj elementy psychologiczne — odwołuj się do motywacji bohaterów, ich emocji i dylematów moralnych
+- Unikaj ogólników — skup się na konkretnych zwrotach akcji, wątkach, unikalnym klimacie danej książki (jeśli masz takie informacje). 
+- Pisząc, miej w głowie dorosłego czytelnika , który szuka książki pozwalającej oderwać się od rzeczywistości i zanurzyć w fascynującą historię.
+- Nie bój się podkreślać silnych emocji: napięcia, dreszczyku, zaskoczenia, a czasem grozy 
+- Zachowaj profesjonalny, ale żywy ton 
+- Unikaj powtórzeń
+- Zachowaj spójność tonu
+5. Osoba do której kierowany jest opis:
+Opis książki kierowany jest do dorosłego czytelnika, który uwielbia rozwiązywać zagadki i zanurzać się w historie pełne intryg oraz nieoczywistych zwrotów akcji. To osoba ciekawska, poszukująca książek, które odrywają ją od codzienności i pozwalają wejść w mroczny, pełen sekretów świat. Ceni wciągającą, dynamiczną fabułę oraz głęboką psychologię postaci, dzięki której może śledzić motywacje bohaterów i zgłębiać ich moralne dylematy. Czytelnik ten oczekuje od kryminału intensywnych emocji, napięcia i poczucia uczestnictwa w niebezpiecznej, ale fascynującej grze.
 Przykład formatu:
 <h2>nagłówek</h2>
 <p>dwa akapity</p>
@@ -234,35 +200,70 @@ Przykład formatu:
 <h3>CTA</h3>
 """
 
-prompt_young_adult = """Jako autor opisów w księgarni internetowej, twoim zadaniem jest przygotowanie angażującego opisu książki "{book_title}". Informacje: {book_details} {book_description}. Stwórz opis w HTML.
-
-Opis powinien:
-
-Zawierać sekcje:
-<h2> z chwytliwym hasłem dla młodzieży.</h2>
-<p>Wprowadzenie do świata książki, grupy docelowej.</p>
-<p>Opis fabuły z <b>wyróżnionymi</b> przygodami, emocjami i wątkami rozwojowymi.</p>
-<p>Korzyści — rozrywka, inspiracja, rozwój postaci.</p>
-<p>Podsumowanie w energetycznym tonie.</p>
-<h3>Przekonujący call to action</h3>
-
-Wykorzystuje dane, aby:
-- Pokazać dynamikę fabuły
-- Wzmocnić autentyczność
-
-Formatowanie:
-- Tylko HTML
-- Wyróżniaj ważne frazy
-
-Styl:
-- Lekki, nowoczesny, młodzieżowy
+prompt_reportaz = """Jako autor opisów w księgarni internetowej, twoim zadaniem jest przygotowanie rzetelnego, zoptymalizowanego opisu produktu o tytule "{book_title}". Oto informacje, na których powinieneś bazować: {book_details} {book_description}. Stwórz angażujący opis w HTML z wykorzystaniem: <h2>, <p>, <b>, <ul>, <li>. Opis powinien:
+Zaczyna się od nagłówka <h2> z kreatywnym hasłem, które oddaje emocje i charakter książki oraz odwołuje się do miłośników prawdziwych historii i czytelników ciekawych świata.
+1. Zawiera sekcje:
+ <p>Wprowadzenie, które przedstawia książkę, jej gatunek (reportaż literacki, dziennikarski, historyczny itp.), ogólną tematykę i klimat (np. poruszający, odkrywczy, wnikliwy), główne cechy, takie jak prawdziwość historii, rzetelność źródeł, dogłębna analiza i unikalna perspektywa autora. Dodatkowo zaznacz, do jakiego czytelnika jest skierowana — np. dla osób, które chcą zrozumieć świat i ludzi w sposób bardziej świadomy i pogłębiony.</p>
+ <p>Opis treści z <b>wyróżnionymi</b> słowami kluczowymi, podkreślającymi unikalne elementy, takie jak autentyczność, szczegółowość, odwaga autora, nieznane fakty, lokalne konteksty czy historie ludzkie. (Trzymaj się informacji zawartych w dotychczasowym opisie książki, jeśli nie masz szczegółowych danych, unikaj zdradzania pełnej treści, aby nie odbierać czytelnikowi wrażeń.)</p>
+ <p>Podsumowanie, które zachęca do zakupu i podkreśla, dlaczego ten reportaż wyróżnia się na tle innych — np. dzięki wyjątkowemu stylowi autora, unikalnym rozmówcom, trudnym tematom lub nowatorskiemu ujęciu znanych zagadnień.</p>
+ <h3>Przekonujący call to action, który zachęca do sięgnięcia po książkę i natychmiastowego zamówienia.</h3>
+2. Wykorzystuje pobrane informacje, aby:
+- Podkreślić najważniejsze cechy książki
+- Wzmocnić wiarygodność opisu poprzez konkretne przykłady
+3. Formatowanie:
+- Używaj tagów HTML: <h2>, <p>, <b>, <h3>
+- Wyróżniaj kluczowe frazy za pomocą <b>
+- Nie używaj znaczników Markdown, tylko HTML
+- Nie dodawaj komentarzy ani wyjaśnień, tylko sam opis
+4. Styl:
+- Opis powinien być wciągający, ale rzetelny i pełen szacunku do przedstawianych historii
+- Używaj języka, który podkreśla autentyczność, prawdziwość i odwagę autora
+- Akcentuj wartość merytoryczną — pokazuj głębię, analityczne podejście i unikalne spojrzenie na temat
+- Unikaj ogólników — skup się na konkretnych aspektach reportażu, które wyróżniają książkę (jeśli masz takie informacje)
+- Pisząc, miej w głowie czytelnika, który szuka książki poszerzającej wiedzę, wywołującej refleksje i przedstawiającej świat w sposób nieoczywisty
+- Nie bój się podkreślać emocji: poruszenia, zaskoczenia, czasem gniewu czy smutku — ale zawsze z wyczuciem
+- Zachowaj profesjonalny, ale jednocześnie zaangażowany i świadomy ton
 - Unikaj powtórzeń
-- Zachowaj spójność
-
+- Zachowaj spójność tonu
+5. Osoba, do której kierowany jest opis:
+Opis reportażu kierowany jest do czytelnika, który ceni prawdziwe, oparte na faktach historie i chce lepiej rozumieć świat wokół siebie. To osoba świadoma, ciekawa, często zainteresowana tematami społecznymi, politycznymi, kulturowymi lub historycznymi. Lubi książki, które skłaniają do refleksji i zmieniają sposób patrzenia na ludzi i wydarzenia. Czytelnik reportaży szuka głębi, autentycznych przeżyć i nowych perspektyw, które pozwolą mu zobaczyć rzeczywistość w bardziej złożony i prawdziwy sposób.
 Przykład formatu:
 <h2>nagłówek</h2>
 <p>dwa akapity</p>
 <p>akapit</p>
+<h3>CTA</h3>
+"""
+
+prompt_young_adult = """Jako autor opisów w księgarni internetowej, twoim zadaniem jest przygotowanie rzetelnego, zoptymalizowanego opisu produktu o tytule "{book_title}". Oto informacje, na których powinieneś bazować: {book_details} {book_description}. Stwórz angażujący opis w HTML z wykorzystaniem: <h2>, <p>, <b>, <ul>, <li>. Opis powinien:
+Zaczyna się od nagłówka <h2> z kreatywnym hasłem, które oddaje emocje i charakter książki oraz odwołuje się do młodszych czytelników i miłośników historii pełnych emocji, przygód i młodzieńczych dylematów.
+1. Zawiera sekcje:
+ <p>Wprowadzenie, które przedstawia książkę, jej gatunek (np. young adult fantasy, young adult romance, dystopia, contemporary), ogólną tematykę i klimat (np. pełen emocji, przygód, młodzieńczych rozterek i relacji), główne cechy, takie jak dynamiczna akcja, wyraziste postacie oraz silne emocje. Dodatkowo zaznacz, do jakiego czytelnika jest skierowana — np. dla osób szukających historii, z którymi mogą się utożsamić i które poruszają aktualne, ważne tematy.</p>
+ <p>Opis fabuły z <b>wyróżnionymi</b> słowami kluczowymi, podkreślającymi unikalne elementy, takie jak pierwsze miłości, bunt, odkrywanie siebie, przyjaźnie, konflikty rodzinne czy walka o marzenia. (Trzymaj się informacji zawartych w dotychczasowym opisie książki, jeśli nie masz szczegółowych danych o fabule, unikaj zdradzania najważniejszych zwrotów akcji.)</p>
+ <p>Podsumowanie, które zachęca do zakupu i podkreśla, dlaczego ta książka young adult wyróżnia się na tle innych — np. dzięki wyjątkowej atmosferze, wiarygodnym postaciom czy odważnemu poruszaniu ważnych tematów dla młodych ludzi.</p>
+ <h3>Przekonujący call to action, który zachęca do sięgnięcia po książkę i natychmiastowego zamówienia.</h3>
+2. Wykorzystuje pobrane informacje, aby:
+- Podkreślić najważniejsze cechy książki
+- Wzmocnić wiarygodność opisu poprzez konkretne przykłady
+3. Formatowanie:
+- Używaj tagów HTML: <h2>, <p>, <b>, <h3>
+- Wyróżniaj kluczowe frazy za pomocą <b>
+- Nie używaj znaczników Markdown, tylko HTML
+- Nie dodawaj komentarzy ani wyjaśnień, tylko sam opis
+4. Styl:
+- Opis powinien być dynamiczny, pełen emocji i energii
+- Używaj języka, który jest bliski młodszym czytelnikom, lekki, ale jednocześnie angażujący i wyrazisty
+- Akcentuj uczucia, relacje i rozwój bohaterów — ich wybory, marzenia i dylematy
+- Unikaj ogólników — skup się na unikalnych doświadczeniach, które mogą zainteresować młodego czytelnika (jeśli masz takie informacje)
+- Pisząc, miej w głowie czytelnika, który szuka historii, z którymi może się utożsamić, które go poruszą i zainspirują
+- Nie bój się podkreślać emocji: radości, smutku, ekscytacji, gniewu, buntu
+- Zachowaj profesjonalny, ale świeży i przystępny ton
+- Unikaj powtórzeń
+- Zachowaj spójność tonu
+5. Osoba, do której kierowany jest opis:
+Opis książki young adult kierowany jest do młodego czytelnika, zazwyczaj w wieku nastoletnim lub wczesnej dorosłości, który szuka historii pełnych emocji, przygód i odkrywania siebie. To osoba wrażliwa, ciekawa świata, poszukująca odpowiedzi na ważne pytania i chcąca poczuć, że nie jest sama w swoich przeżyciach. Ceni książki, które pokazują prawdziwe relacje, poruszają aktualne tematy i inspirują do bycia sobą oraz do podejmowania odważnych decyzji.
+Przykład formatu:
+<h2>nagłówek</h2>
+<p>dwa akapity</p>
 <p>akapit</p>
 <h3>CTA</h3>
 """
@@ -298,33 +299,36 @@ Przykład formatu:
 <h3>CTA</h3>
 """
 
-prompt_fantastyka = """Jako autor opisów w księgarni internetowej, twoim zadaniem jest przygotowanie epickiego opisu książki fantasy "{book_title}". Informacje: {book_details} {book_description}. Stwórz opis w HTML.
-
-Opis powinien:
-
-Zawierać sekcje:
-<h2> z magicznym hasłem zachęcającym do podróży po fantastycznych światach.</h2>
-<p>Wprowadzenie do świata fantasy, klimatu książki.</p>
-<p>Opis przygód i bohaterów z <b>wyróżnionymi</b> elementami magii i niezwykłości.</p>
-<p>Korzyści — ucieczka od codzienności, rozwój wyobraźni.</p>
-<p>Podsumowanie z mistycznym akcentem.</p>
-<h3>Call to action</h3>
-
-Wykorzystuje dane, aby:
-- Oddać klimat fantasy
-
-Formatowanie:
-- HTML
-- Wyróżniaj kluczowe frazy
-
-Styl:
-- Epicki, pełen magii
-- Spójny, bez powtórzeń
-
+prompt_fantastyka = """Jako autor opisów w księgarni internetowej, twoim zadaniem jest przygotowanie rzetelnego, zoptymalizowanego opisu produktu o tytule "{book_title}". Oto informacje, na których powinieneś bazować: {book_details} {book_description}. Stwórz angażujący opis w HTML z wykorzystaniem: <h2>, <p>, <b>, <ul>, <li>. Opis powinien:
+Zaczyna się od nagłówka <h2> z kreatywnym hasłem, które oddaje emocje i charakter książki oraz odwołuje się do miłośników fantastyki i czytelników szukających niezwykłych światów.
+1. Zawiera sekcje:
+ <p>Wprowadzenie, które przedstawia książkę, jej gatunek (fantasy, science fiction, urban fantasy itp.), ogólną tematykę i klimat (np. epicki, magiczny, mroczny, pełen przygód), główne cechy, takie jak wykreowany świat, niezwykłe postacie, rozbudowane uniwersum oraz motywy przewodnie. Dodatkowo zaznacz, do jakiego czytelnika jest skierowana — np. dla osób szukających odskoczni od rzeczywistości i fascynujących podróży do innych światów.</p>
+ <p>Opis fabuły z <b>wyróżnionymi</b> słowami kluczowymi, podkreślającymi unikalne elementy, takie jak magia, niezwykłe moce, rozległe uniwersa, konflikty między rasami lub światami oraz epickie przygody. (Trzymaj się informacji zawartych w dotychczasowym opisie książki, jeśli nie masz szczegółowych danych o fabule, unikaj zdradzania kluczowych zwrotów akcji.)</p>
+ <p>Podsumowanie, które zachęca do zakupu i podkreśla, dlaczego ta książka fantasy wyróżnia się na tle innych — np. dzięki oryginalnej wizji autora, zaskakującym zwrotom akcji, czy unikalnemu systemowi magii lub kreacji świata.</p>
+ <h3>Przekonujący call to action, który zachęca do sięgnięcia po książkę i natychmiastowego zamówienia.</h3>
+2. Wykorzystuje pobrane informacje, aby:
+- Podkreślić najważniejsze cechy książki
+- Wzmocnić wiarygodność opisu poprzez konkretne przykłady
+3. Formatowanie:
+- Używaj tagów HTML: <h2>, <p>, <b>, <h3>
+- Wyróżniaj kluczowe frazy za pomocą <b>
+- Nie używaj znaczników Markdown, tylko HTML
+- Nie dodawaj komentarzy ani wyjaśnień, tylko sam opis
+4. Styl:
+- Opis powinien być angażujący, pełen emocji i obrazowy
+- Używaj języka, który pobudza wyobraźnię, buduje atmosferę przygody i magii
+- Akcentuj unikalność świata przedstawionego, niezwykłość bohaterów i epickość opowieści
+- Unikaj ogólników — skup się na konkretnych elementach świata, magii czy konfliktach (jeśli masz takie informacje)
+- Pisząc, miej w głowie czytelnika, który kocha fantastyczne światy, epickie przygody i chce całkowicie oderwać się od codzienności
+- Nie bój się podkreślać emocji: ekscytacji, wzruszenia, podziwu czy niepokoju
+- Zachowaj profesjonalny, ale dynamiczny i barwny ton
+- Unikaj powtórzeń
+- Zachowaj spójność tonu
+5. Osoba, do której kierowany jest opis:
+Opis książki fantasy kierowany jest do czytelnika, który pragnie uciec od rzeczywistości i zanurzyć się w całkowicie nowym, wykreowanym świecie. To osoba pełna wyobraźni, otwarta na niezwykłe przygody, magiczne moce i epickie konflikty. Ceni oryginalność, bogactwo detali i rozbudowaną mitologię. Czytelnik ten szuka emocji, które pozwalają mu poczuć się częścią historii — przeżywać losy bohaterów, odkrywać tajemnice i wyruszać w podróże, o których w prawdziwym życiu można tylko marzyć.
 Przykład formatu:
 <h2>nagłówek</h2>
 <p>dwa akapity</p>
-<p>akapit</p>
 <p>akapit</p>
 <h3>CTA</h3>
 """
@@ -360,14 +364,82 @@ Przykład formatu:
 <h3>CTA</h3>
 """
 
+prompt_gry_planszowe = """Jako autor opisów w księgarni internetowej, twoim zadaniem jest przygotowanie rzetelnego, zoptymalizowanego opisu produktu o tytule "{book_title}". Oto informacje, na których powinieneś bazować: {book_details} {book_description}. Stwórz angażujący opis w HTML z wykorzystaniem:<h2>, <p>, <b>, <ul>, <li>. Opis powinien:
+Zaczyna się od nagłówka <h2> z kreatywnym hasłem, które oddaje emocje i charakter gry planszowej oraz wskazuje na grupę docelową, np. dla miłośników strategii i rozgrywek rodzinnych.
+1. Zawiera sekcje:
+    <p>Wprowadzenie, które przedstawia grę, jej tematykę, mechanikę (jeśli masz na jej temat informacje w pobranych danych) oraz główne cechy, takie jak czas rozgrywki i poziom trudności.</p>
+    <p>Opis rozgrywki z <b>wyróżnionymi</b> słowami kluczowymi, podkreślającymi unikalne elementy, takie jak interakcja, strategia i rywalizacja. (trzymaj się informacji jakie pobrałeś z dotychczasowego opisu, jeśli nie wiesz jaka jest mechanika lub na czym polegają zasady, to nie pisz o nich szczegółowo, żeby nie wprowadzić nikogo w błąd)</p>
+    <p>Korzyści dla graczy, np. rozwój umiejętności logicznego myślenia, budowanie relacji rodzinnych oraz doskonała zabawa.</p>
+    <p>Podsumowanie, które zachęca do zakupu i podkreśla, dlaczego ta gra planszowa jest wyjątkowa.</p>
+    <h3>Przekonujący call to action</h3>
+2. Wykorzystuje pobrane informacje, aby:
+    - Podkreślić najważniejsze cechy gry planszowej
+    - Wzmocnić wiarygodność opisu poprzez konkretne przykłady
+3. Formatowanie:
+  - Używaj tagów HTML: <h2>, <p>, <b>, <h3>
+  - Wyróżniaj kluczowe frazy za pomocą <b>
+  - Nie używaj znaczników Markdown, tylko HTML
+  - Nie dodawaj komentarzy ani wyjaśnień, tylko sam opis
+4. Styl:
+  - Opis ma być angażujący, ale profesjonalny
+  - Używaj słownictwa dostosowanego do miłośników gier planszowych
+  - Unikaj powtórzeń
+  - Zachowaj spójność tonu
+5. Osoba do której kierowany jest opis:
+Osoba, która dopiero zaczyna swoją przygodę z planszówkami i nie jest zaznajomiona z światem gier planszowych, ktoś kto poszukuję planszówek na prezent np. rodzic kupujący planszówkę dla dziecka.
+Przykład formatu:
+<h2>nagłówek</h2>
+<p>dwa akapity</p>
+<p>akapit</p>
+<p>akapit</p>
+<h3>CTA</h3>
+"""
+
+prompt_biografie = """Jako autor opisów w księgarni internetowej, twoim zadaniem jest przygotowanie rzetelnego, zoptymalizowanego opisu produktu o tytule "{book_title}". Oto informacje, na których powinieneś bazować: {book_details} {book_description}. Stwórz angażający opis w HTML z wykorzystaniem: <h2>, <p>, <b>, <ul>, <li>. Opis powinien:
+Zaczyna się od nagłówka <h2> z kreatywnym hasłem, które oddaje emocje i charakter książki oraz odwołuje się do miłośników historii prawdziwych i inspirujących opowieści.
+1. Zawiera sekcje:
+ <p>Wprowadzenie, które przedstawia książkę, jej gatunek (biografia, autobiografia, wspomnienia), ogólną tematykę i klimat (np. inspirujący, motywujący, szczery), główne cechy, takie jak autentyczność historii, dokładność przedstawienia faktów, osobisty charakter opowieści. Dodatkowo zaznacz, do jakiego czytelnika jest skierowana — np. dla osób szukających prawdziwych historii pełnych wartościowych lekcji i inspiracji.</p>
+ <p>Opis życia bohatera z <b>wyróżnionymi</b> słowami kluczowymi, podkreślającymi unikalne elementy, takie jak przełomowe momenty, sukcesy i porażki, inspirujące wybory oraz wpływ na innych. (Trzymaj się informacji zawartych w dotychczasowym opisie książki, jeśli nie masz szczegółowych danych, unikaj zbyt dużej ilości szczegółów, żeby nie zdradzać całej historii.)</p>
+ <p>Podsumowanie, które zachęca do zakupu i podkreśla, dlaczego ta biografia wyróżnia się na tle innych — np. dzięki wyjątkowej szczerości, głębokiemu przedstawieniu postaci lub nieznanym dotąd faktom.</p>
+ <h3>Przekonujący call to action, który zachęca do sięgnięcia po książkę i natychmiastowego zamówienia.</h3>
+2. Wykorzystuje pobrane informacje, aby:
+- Podkreślić najważniejsze cechy książki
+- Wzmocnić wiarygodność opisu poprzez konkretne przykłady
+3. Formatowanie:
+- Używaj tagów HTML: <h2>, <p>, <b>, <h3>
+- Wyróżniaj kluczowe frazy za pomocą <b>
+- Nie używaj znaczników Markdown, tylko HTML
+- Nie dodawaj komentarzy ani wyjaśnień, tylko sam opis
+4. Styl:
+- Opis powinien być angażujący, ale rzetelny i autentyczny
+- Używaj języka, który podkreśla prawdziwość historii, inspiruje i budzi emocje
+- Akcentuj elementy związane z psychologią postaci, drogą do sukcesu i wyciąganymi lekcjami
+- Unikaj ogólników — skup się na konkretnych momentach i doświadczeniach (jeśli masz takie informacje)
+- Pisząc, miej w głowie czytelnika, który szuka autentycznych, wartościowych historii i pragnie dowiedzieć się więcej o życiu innych
+- Nie bój się podkreślać emocji: wzruszeń, momentów przełomowych, triumfów i porażek
+- Zachowaj profesjonalny, ale bliski i inspirujący ton
+- Unikaj powtórzeń
+- Zachowaj spójność tonu
+5. Osoba, do której kierowany jest opis:
+Opis książki biograficznej kierowany jest do dorosłego czytelnika, który ceni prawdziwe, autentyczne historie i pragnie dowiedzieć się więcej o życiu innych ludzi. To osoba ciekawa świata i ludzi, szukająca inspiracji i motywacji, gotowa uczyć się na doświadczeniach innych i odkrywać kulisy sukcesów oraz porażek. Taki czytelnik oczekuje wartościowych lekcji, głębokiej psychologii postaci i możliwości wniknięcia w nieznane dotąd aspekty życia znanych osób.
+Przykład formatu:
+<h2>nagłówek</h2>
+<p>dwa akapity</p>
+<p>akapit</p>
+<h3>CTA</h3>
+"""
+
+# Zaktualizowany i posortowany słownik z promptami
 prompts = {
-    "Romans": prompt_romans,
+    "Beletrystyka": prompt_beletrystyka,
+    "Biografie": prompt_biografie,
+    "Fantastyka": prompt_fantastyka,
+    "Gry planszowe": prompt_gry_planszowe,
     "Kryminał": prompt_kryminal,
     "Reportaż": prompt_reportaz,
-    "Young Adult": prompt_young_adult,
-    "Beletrystyka": prompt_beletrystyka,
-    "Fantastyka": prompt_fantastyka,
+    "Romans": prompt_romans,
     "Sci-fi": prompt_scifi,
+    "Young Adult": prompt_young_adult,
 }
 
 # ------------- STREAMLIT INTERFEJS ------------- #
@@ -376,11 +448,11 @@ st.set_page_config(page_title="Generator opisów książek", page_icon="📚", l
 
 # Inicjalizacja session state
 if 'selected_prompt' not in st.session_state:
-    st.session_state.selected_prompt = "Romans"
+    st.session_state.selected_prompt = "Romans" # Możesz zmienić na dowolny domyślny gatunek
 if 'show_preview' not in st.session_state:
     st.session_state.show_preview = False
 
-st.title('📚 Generator opisów książek')
+st.title('📚 Generator opisów produktów')
 st.markdown("---")
 
 # Sprawdzenie czy klucz API jest dostępny
@@ -392,10 +464,16 @@ client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
 
 # Sidebar z opcjami
 st.sidebar.header("🎯 Ustawienia")
+# Upewniamy się, że domyślna wartość jest na liście
+default_prompt = st.session_state.selected_prompt
+prompt_keys = list(prompts.keys())
+if default_prompt not in prompt_keys:
+    default_prompt = prompt_keys[0] # Ustaw pierwszy element jako domyślny, jeśli poprzedni zniknął
+
 selected_prompt = st.sidebar.selectbox(
-    "Wybierz gatunek książki:",
-    list(prompts.keys()),
-    index=list(prompts.keys()).index(st.session_state.selected_prompt)
+    "Wybierz kategorię produktu:",
+    prompt_keys,
+    index=prompt_keys.index(default_prompt)
 )
 
 # Aktualizacja session state
@@ -408,7 +486,7 @@ with col1:
     st.header("📝 Dane wejściowe")
     url = st.text_input(
         "URL strony produktu:",
-        placeholder="https://przykład.com/książka",
+        placeholder="https://przykład.com/książka-lub-gra",
         help="Wklej pełny URL strony produktu"
     )
     
@@ -445,11 +523,13 @@ with col1:
                     st.subheader("📊 Pobrane dane")
                     st.write(f"**Tytuł:** {book_data['title']}")
                     if book_data['details']:
-                        st.write(f"**Szczegóły:** {book_data['details'][:200]}...")
+                        st.write(f"**Szczegóły:**")
+                        st.text_area("Szczegóły", book_data['details'], height=100, disabled=True)
                     if book_data['description']:
                         # Pokazujemy więcej tekstu dla weryfikacji
                         full_desc = book_data['description']
-                        st.write(f"**Opis:** {full_desc[:500]}...")
+                        st.write(f"**Opis (pierwsze 500 znaków):**")
+                        st.text_area("Opis", full_desc[:500] + "...", height=150, disabled=True)
                         st.write(f"**Długość pobranego opisu:** {len(full_desc)} znaków")
                     
                     # Generowanie opisu
@@ -473,8 +553,8 @@ with col2:
     st.header("📄 Wygenerowany opis")
     
     if 'generated_description' in st.session_state:
-        st.subheader(f"📖 {st.session_state.get('book_title', 'Opis książki')}")
-        st.subheader(f"🎭 Gatunek: {selected_prompt}")
+        st.subheader(f"📖 {st.session_state.get('book_title', 'Opis produktu')}")
+        st.subheader(f"🎭 Kategoria: {selected_prompt}")
         
         # Kod HTML do skopiowania (najpierw)
         st.markdown("**Kod HTML:**")
@@ -483,15 +563,17 @@ with col2:
         
         # Przycisk do skopiowania HTML
         if st.button("📋 Skopiuj kod HTML", use_container_width=True):
-            st.code(html_code, language='html')
+            # Streamlit nie ma bezpośredniej funkcji kopiowania do schowka,
+            # więc wyświetlenie kodu w st.code jest najlepszym rozwiązaniem.
             st.success("✅ Kod HTML jest gotowy do skopiowania z pola powyżej!")
         
         # Przycisk podglądu
-        if st.button("👁️ Podgląd", use_container_width=True):
+        if st.button("👁️ Pokaż/Ukryj podgląd", use_container_width=True):
             st.session_state.show_preview = not st.session_state.show_preview
         
         # Podgląd HTML (po naciśnięciu przycisku)
         if st.session_state.show_preview:
+            st.markdown("---")
             st.markdown("**Podgląd:**")
             st.markdown(st.session_state['generated_description'], unsafe_allow_html=True)
         
@@ -512,5 +594,5 @@ with col2:
 
 # Stopka
 st.markdown("---")
-st.markdown("🔧 **Narzędzie do generowania opisów książek** | Wykorzystuje OpenAI GPT-4o-mini")
-st.markdown("💡 **Wskazówka:** Wybierz odpowiedni gatunek z menu bocznego dla najlepszych rezultatów")
+st.markdown("🔧 **Narzędzie do generowania opisów produktów** | Wykorzystuje OpenAI GPT-4o-mini")
+st.markdown("💡 **Wskazówka:** Wybierz odpowiednią kategorię z menu bocznego dla najlepszych rezultatów")
