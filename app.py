@@ -428,18 +428,64 @@ Przykład formatu:
 <p>akapit</p>
 <h3>CTA</h3>
 """
+### Nowe definicje promptów dla dodatkowych kategorii
 
-# Zaktualizowany i posortowany słownik z promptami
+prompt_metodyka = '''Jako autor opisów w księgarni internetowej, twoim zadaniem jest przygotowanie rzetelnego, zoptymalizowanego opisu produktu o tytule "{book_title}" z zakresu metodyki i pedagogiki. Oto informacje, na których powinieneś bazować: {book_details} {book_description}. Stwórz angażujący opis w HTML z użyciem: <h2>, <p>, <b>, <ul>, <li>. Opis powinien:
+- Zawierać <h2> z hasłem akcentującym praktyczne podejście i wartość metodyczną.
+- Mieć sekcję <p> przedstawiającą cel książki, jej grupę docelową (nauczyciele, trenerzy, edukatorzy) i korzyści z zastosowania opisanych metod.
+- Mieć <ul> z <li> najważniejszymi cechami metodyki, takimi jak: organizacja zajęć, innowacyjne techniki dydaktyczne, przykłady ćwiczeń.
+- Zakończyć <p> podsumowaniem, podkreślającym praktyczność i wpływ na efektywność nauczania.
+- Zawierać <h3> CTA zachęcające do zakupu i wdrożenia nowych rozwiązań metodycznych.
+'''  
+
+prompt_edukacyjne = '''Jako doświadczony copywriter w księgarni internetowej, przygotuj opis edukacyjnej książki pod tytułem "{book_title}". Dane do wykorzystania: {book_details} {book_description}. Użyj HTML: <h2>, <p>, <b>, <ul>, <li>. Opis powinien:
+- Rozpoczynać się od <h2> z hasłem podkreślającym rozwój umiejętności i zdobywanie wiedzy.
+- Sekcja <p> opisująca tematykę i grupę wiekową czytelników (dzieci, młodzież, dorośli).
+- <ul> zawierające kluczowe korzyści edukacyjne: rozwój logicznego myślenia, kreatywności, umiejętności językowych itp.
+- <p> z informacją o formacie książki (ćwiczenia, testy, ilustracje), oraz jej unikalnych atutach.
+- <h3> CTA zachęcające do nauki i samodoskonalenia.
+'''
+
+prompt_lektury = '''Jako autor opisów w księgarni internetowej, twoim zadaniem jest stworzenie opisu klasycznej lektury szkolnej o tytule "{book_title}". Wykorzystaj: {book_details} {book_description}. Format HTML: <h2>, <p>, <b>. Opis powinien:
+- Zaczynać się od <h2> z literackim hasłem oddającym esencję utworu.
+- <p> wprowadzające w kontekst historyczno-kulturowy dzieła.
+- <p> omawiające główne wątki i motywy (<b>miłość</b>, <b>konflikt</b>, <b>wartości</b>).
+- <p> podsumowujące, dlaczego warto przeczytać tę lekturę i jakie lekcje daje.
+- <h3> CTA zapraszające do odkrycia ponadczasowego dzieła.
+'''
+
+prompt_zabawki = '''Jako copywriter w księgarni internetowej, twoim zadaniem jest przygotowanie atrakcyjnego opisu zabawki o nazwie "{book_title}". Dane: {book_details} {book_description}. Format HTML: <h2>, <p>, <b>, <ul>, <li>. Opis powinien:
+- Mieć <h2> z hasłem przyciągającym uwagę rodziców i dzieci.
+- <p> opisujące rodzaj zabawki, zalecany wiek i sposób zabawy.
+- <ul> z <li> głównymi cechami: bezpieczeństwo, rozwój umiejętności, materiał, łatwość montażu.
+- <p> podkreślający korzyści dla rozwoju dziecka.
+- <h3> CTA zachęcające do zakupu jako idealnego prezentu.
+'''
+
+prompt_komiksy = '''Jako autor opisów w księgarni internetowej, twoim zadaniem jest stworzenie angażującego opisu komiksu "{book_title}". Wykorzystaj: {book_details} {book_description}. Użyj HTML: <h2>, <p>, <b>, <ul>, <li>. Opis powinien:
+- Rozpoczynać się od <h2> z dynamicznym hasłem oddającym klimat opowieści.
+- <p> prezentujące gatunek (superbohaterski, manga, humorystyczny), styl graficzny i głównych bohaterów.
+- <ul> z <li> opisującymi: fabułę, grafikę, format (liczba stron, kolor).
+- <p> podsumowujące unikalne atuty: narracja obrazkowa, kolekcjonerska wartość.
+- <h3> CTA zachęcające do zanurzenia się w świecie ilustracji.
+'''
+
+### Zaktualizowany i posortowany słownik z promptami
 prompts = {
     "Beletrystyka": prompt_beletrystyka,
     "Biografie": prompt_biografie,
+    "Edukacyjne": prompt_edukacyjne,
     "Fantastyka": prompt_fantastyka,
     "Gry planszowe": prompt_gry_planszowe,
+    "Komiksy": prompt_komiksy,
     "Kryminał": prompt_kryminal,
+    "Lektury": prompt_lektury,
+    "Metodyka": prompt_metodyka,
     "Reportaż": prompt_reportaz,
     "Romans": prompt_romans,
     "Sci-fi": prompt_scifi,
     "Young Adult": prompt_young_adult,
+    "Zabawki": prompt_zabawki,
 }
 
 # ------------- STREAMLIT INTERFEJS ------------- #
