@@ -10,6 +10,12 @@ import json
 st.set_page_config(page_title="Generator opisów książek", page_icon="📚", layout="wide")
 
 # ------------- AKENEO API ------------- #
+def akeneo_get_attribute(code, token):
+    url = _akeneo_root() + f"/api/rest/v1/attributes/{code}"
+    r = requests.get(url, headers={"Authorization": f"Bearer {token}"}, timeout=30)
+    r.raise_for_status()
+    return r.json()
+    
 def _akeneo_root():
     base = st.secrets["AKENEO_BASE_URL"].rstrip("/")
     # spodziewamy się .../api/rest/v1
@@ -40,29 +46,37 @@ def akeneo_product_exists(sku, token):
 
 def akeneo_update_description(sku, html_description, channel, locale="pl_PL"):
     token = akeneo_get_token()
+
+    # nie tworzymy nowego produktu – tylko update istniejącego
     if not akeneo_product_exists(sku, token):
         raise ValueError(f"Produkt o SKU '{sku}' nie istnieje w Akeneo.")
 
-    url = _akeneo_root() + f"/api/rest/v1/products/{sku}"
-    payload = {
-        "values": {
-            "description": [
-                {
-                    "locale": locale,
-                    "scope": channel,
-                    "data": html_description
-                }
-            ]
-        }
+    # sprawdź konfigurację atrybutu, żeby poprawnie ustawić scope/locale
+    attr = akeneo_get_attribute("description", token)
+    is_scopable = bool(attr.get("scopable", False))
+    is_localizable = bool(attr.get("localizable", False))
+
+    value_obj = {
+        "data": html_description,
+        # Dla atrybutu scopable wymagany jest scope; dla nie-scopable -> null
+        "scope": channel if is_scopable else None,
+        # Dla atrybutu nie-lokalizowalnego locale MUSI być null
+        "locale": locale if is_localizable else None,
     }
+
+    url = _akeneo_root() + f"/api/rest/v1/products/{sku}"
+    payload = {"values": {"description": [value_obj]}}
+
     headers = {
         "Authorization": f"Bearer {token}",
         "Content-Type": "application/json",
         "Accept": "application/json",
     }
     r = requests.patch(url, headers=headers, data=json.dumps(payload), timeout=30)
+
     if r.status_code in (200, 204):
         return True
+
     try:
         detail = r.json()
     except Exception:
