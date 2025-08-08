@@ -5,9 +5,22 @@ from bs4 import BeautifulSoup as bs
 import time
 from openai import OpenAI
 import json
+import re
 
 # ------------- USTAWIENIA STRONY ------------- #
 st.set_page_config(page_title="Generator opisów książek", page_icon="📚", layout="wide")
+
+def strip_code_fences(text: str) -> str:
+    if not text:
+        return text
+    # dopasuj cały blok ```[html] ... ```
+    m = re.match(r"^\s*```(?:html|HTML)?\s*([\s\S]*?)\s*```\s*$", text)
+    if m:
+        return m.group(1).strip()
+    # albo usuń ewentualne pojedyncze płotki na początku/końcu
+    text = re.sub(r"^\s*```(?:html|HTML)?\s*", "", text)
+    text = re.sub(r"\s*```\s*$", "", text)
+    return text.strip()
 
 # ------------- AKENEO API ------------- #
 def akeneo_get_attribute(code, token):
@@ -651,7 +664,8 @@ with col1:
 
                     with st.spinner("Generuję opis..."):
                         selected_prompt_template = prompts[selected_prompt]
-                        generated_desc = generate_description(book_data, selected_prompt_template, client)
+                        generated_desc_raw = generate_description(book_data, selected_prompt_template, client)
+                        generated_desc = strip_code_fences(generated_desc_raw)
                         if generated_desc:
                             st.session_state['generated_description'] = generated_desc
                             st.session_state['book_title'] = book_data['title']
