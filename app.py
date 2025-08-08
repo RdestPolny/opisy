@@ -4,9 +4,72 @@ import requests
 from bs4 import BeautifulSoup as bs
 import time
 from openai import OpenAI
+import json
+
+# ------------- USTAWIENIA STRONY ------------- #
+st.set_page_config(page_title="Generator opisów książek", page_icon="📚", layout="wide")
+
+# ------------- AKENEO API ------------- #
+def _akeneo_root():
+    base = st.secrets["AKENEO_BASE_URL"].rstrip("/")
+    # spodziewamy się .../api/rest/v1
+    if base.endswith("/api/rest/v1"):
+        return base[:-len("/api/rest/v1")]
+    return base
+
+def akeneo_get_token():
+    token_url = _akeneo_root() + "/api/oauth/v1/token"
+    auth = (st.secrets["AKENEO_CLIENT_ID"], st.secrets["AKENEO_SECRET"])
+    data = {
+        "grant_type": "password",
+        "username": st.secrets["AKENEO_USERNAME"],
+        "password": st.secrets["AKENEO_PASSWORD"],
+    }
+    r = requests.post(token_url, auth=auth, data=data, timeout=30)
+    r.raise_for_status()
+    return r.json()["access_token"]
+
+def akeneo_product_exists(sku, token):
+    url = _akeneo_root() + f"/api/rest/v1/products/{sku}"
+    r = requests.get(url, headers={"Authorization": f"Bearer {token}"}, timeout=30)
+    if r.status_code == 200:
+        return True
+    if r.status_code == 404:
+        return False
+    r.raise_for_status()
+
+def akeneo_update_description(sku, html_description, channel, locale="pl_PL"):
+    token = akeneo_get_token()
+    if not akeneo_product_exists(sku, token):
+        raise ValueError(f"Produkt o SKU '{sku}' nie istnieje w Akeneo.")
+
+    url = _akeneo_root() + f"/api/rest/v1/products/{sku}"
+    payload = {
+        "values": {
+            "description": [
+                {
+                    "locale": locale,
+                    "scope": channel,
+                    "data": html_description
+                }
+            ]
+        }
+    }
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+    }
+    r = requests.patch(url, headers=headers, data=json.dumps(payload), timeout=30)
+    if r.status_code in (200, 204):
+        return True
+    try:
+        detail = r.json()
+    except Exception:
+        detail = r.text
+    raise RuntimeError(f"Akeneo zwróciło {r.status_code}: {detail}")
 
 # ------------- POBIERANIE DANYCH ------------- #
-
 def get_book_data(url):
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36',
@@ -16,8 +79,10 @@ def get_book_data(url):
         response = requests.get(url, headers=headers, timeout=30)
         response.raise_for_status()
         soup = bs(response.text, 'html.parser')
+
         title_tag = soup.find('h1')
         title = title_tag.get_text(strip=True) if title_tag else ''
+
         details_text = ""
         details_div = soup.find("div", id="szczegoly") or soup.find("div", class_="product-features")
         if details_div:
@@ -26,33 +91,27 @@ def get_book_data(url):
                 li_elements = ul.find_all("li")
                 details_list = [li.get_text(separator=" ", strip=True) for li in li_elements]
                 details_text = "\n".join(details_list)
-        
-        # Pobieranie pełnego opisu z zagnieżdżonych struktur
+
         description_text = ""
         description_div = soup.find("div", class_="desc-container")
         if description_div:
-            # Szukamy głębiej w strukturze - artykuł z pełnym opisem
             article = description_div.find("article")
             if article:
-                # Jeśli jest zagnieżdżony artykuł, bierzemy go
                 nested_article = article.find("article")
                 if nested_article:
                     description_text = nested_article.get_text(separator="\n", strip=True)
                 else:
                     description_text = article.get_text(separator="\n", strip=True)
             else:
-                # Fallback - jeśli nie ma artykułu, bierzemy cały div
                 description_text = description_div.get_text(separator="\n", strip=True)
-        
-        # Dodatkowe sprawdzenie dla alternatywnych struktur
+
         if not description_text:
             alt_desc_div = soup.find("div", id="product-description")
             if alt_desc_div:
                 description_text = alt_desc_div.get_text(separator="\n", strip=True)
-        
-        # Czyszczenie tekstu z nadmiarowych białych znaków
+
         description_text = " ".join(description_text.split())
-        
+
         if not description_text:
             return {
                 'title': title,
@@ -75,7 +134,6 @@ def get_book_data(url):
         }
 
 # ------------- GENEROWANIE OPISU ------------- #
-
 def generate_description(book_data, prompt_template, client):
     try:
         prompt_filled = prompt_template.format(
@@ -130,7 +188,6 @@ Meta description: [treść]"""
         return "", ""
 
 # ------------- PROMPTY DO GATUNKÓW ------------- #
-
 prompt_romans = """Jako autor opisów w księgarni internetowej, twoim zadaniem jest przygotowanie rzetelnego, zoptymalizowanego opisu produktu o tytule "{book_title}". Oto informacje, na których powinieneś bazować: {book_details} {book_description}. Stwórz angażujący opis w HTML z wykorzystaniem: <h2>, <p>, <b>, <ul>, <li>. Opis powinien:
 Zaczyna się od nagłówka <h2> z kreatywnym hasłem, które oddaje emocje i charakter książki oraz odwołuje się do miłośników historii o miłości i wzruszających relacji.
 1. Zawiera sekcje:
@@ -428,7 +485,6 @@ Przykład formatu:
 <p>akapit</p>
 <h3>CTA</h3>
 """
-### Nowe definicje promptów dla dodatkowych kategorii
 
 prompt_metodyka = '''Jako autor opisów w księgarni internetowej, twoim zadaniem jest przygotowanie rzetelnego, zoptymalizowanego opisu produktu o tytule "{book_title}" z zakresu metodyki i pedagogiki. Oto informacje, na których powinieneś bazować: {book_details} {book_description}. Stwórz angażujący opis w HTML z użyciem: <h2>, <p>, <b>, <ul>, <li>. Opis powinien:
 - Zawierać <h2> z hasłem akcentującym praktyczne podejście i wartość metodyczną.
@@ -470,7 +526,6 @@ prompt_komiksy = '''Jako autor opisów w księgarni internetowej, twoim zadaniem
 - <h3> CTA zachęcające do zanurzenia się w świecie ilustracji.
 '''
 
-### Zaktualizowany i posortowany słownik z promptami
 prompts = {
     "Beletrystyka": prompt_beletrystyka,
     "Biografie": prompt_biografie,
@@ -488,107 +543,106 @@ prompts = {
     "Zabawki": prompt_zabawki,
 }
 
-# ------------- STREAMLIT INTERFEJS ------------- #
-
-st.set_page_config(page_title="Generator opisów książek", page_icon="📚", layout="wide")
-
-# Inicjalizacja session state
+# ------------- INICJALIZACJA STANU ------------- #
 if 'selected_prompt' not in st.session_state:
-    st.session_state.selected_prompt = "Romans" # Możesz zmienić na dowolny domyślny gatunek
+    st.session_state.selected_prompt = "Romans"
 if 'show_preview' not in st.session_state:
     st.session_state.show_preview = False
 
-st.title('📚 Generator opisów produktów')
-st.markdown("---")
-
-# Sprawdzenie czy klucz API jest dostępny
+# ------------- WALIDACJA SEKRETÓW ------------- #
 if "OPENAI_API_KEY" not in st.secrets:
-    st.error("❌ Brak klucza API OpenAI w secrets. Skonfiguruj klucz API w ustawieniach aplikacji.")
+    st.error("❌ Brak klucza API OpenAI w secrets. Skonfiguruj OPENAI_API_KEY.")
     st.stop()
+
+required_akeneo_secrets = ["AKENEO_BASE_URL","AKENEO_CLIENT_ID","AKENEO_SECRET","AKENEO_USERNAME","AKENEO_PASSWORD"]
+missing = [k for k in required_akeneo_secrets if k not in st.secrets]
+if missing:
+    st.warning(f"⚠️ Brak konfiguracji Akeneo w secrets: {', '.join(missing)}. Wysyłka do PIM będzie niedostępna.")
 
 client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
 
-# Sidebar z opcjami
+# ------------- UI ------------- #
+st.title('📚 Generator opisów produktów')
+st.markdown("---")
+
 st.sidebar.header("🎯 Ustawienia")
-# Upewniamy się, że domyślna wartość jest na liście
-default_prompt = st.session_state.selected_prompt
 prompt_keys = list(prompts.keys())
-if default_prompt not in prompt_keys:
-    default_prompt = prompt_keys[0] # Ustaw pierwszy element jako domyślny, jeśli poprzedni zniknął
+default_prompt = st.session_state.selected_prompt if st.session_state.selected_prompt in prompt_keys else prompt_keys[0]
 
 selected_prompt = st.sidebar.selectbox(
     "Wybierz kategorię produktu:",
     prompt_keys,
     index=prompt_keys.index(default_prompt)
 )
-
-# Aktualizacja session state
 st.session_state.selected_prompt = selected_prompt
 
-# Główny interfejs
+channel = st.sidebar.selectbox(
+    "Kanał (scope) do zapisu w PIM:",
+    ["Bookland", "B2B"],
+    index=0
+)
+locale = st.sidebar.text_input(
+    "Locale:",
+    value=st.secrets.get("AKENEO_DEFAULT_LOCALE", "pl_PL")
+)
+
 col1, col2 = st.columns([1, 1])
 
 with col1:
     st.header("📝 Dane wejściowe")
     url = st.text_input(
         "URL strony produktu:",
-        placeholder="https://przykład.com/książka-lub-gra",
+        placeholder="https://przyklad.com/ksiazka-lub-gra",
         help="Wklej pełny URL strony produktu"
     )
-    
+    sku = st.text_input(
+        "SKU w PIM (identifier):",
+        placeholder="np. BL-12345",
+        help="Kod identyfikatora produktu w Akeneo"
+    )
+
     generate_meta = st.checkbox("Generuj meta title i meta description", value=False)
-    
-    # Przyciski
+
     col_btn1, col_btn2 = st.columns([1, 1])
-    
     with col_btn1:
         generate_button = st.button("🚀 Generuj opis", type="primary", use_container_width=True)
-    
     with col_btn2:
         if st.button("🔄 Generuj kolejny", use_container_width=True):
-            # Wyczyść dane ale zostaw wybrany prompt
             keys_to_remove = [key for key in st.session_state.keys() if key not in ['selected_prompt']]
             for key in keys_to_remove:
                 del st.session_state[key]
             st.session_state.show_preview = False
             st.rerun()
-    
+
     if generate_button:
         if not url:
             st.error("❌ Podaj URL strony produktu!")
         else:
             with st.spinner("Pobieram dane ze strony..."):
                 book_data = get_book_data(url)
-                
                 if book_data['error']:
                     st.error(f"❌ {book_data['error']}")
                 else:
                     st.success("✅ Dane pobrane pomyślnie!")
-                    
-                    # Wyświetlenie pobranych danych
                     st.subheader("📊 Pobrane dane")
                     st.write(f"**Tytuł:** {book_data['title']}")
                     if book_data['details']:
-                        st.write(f"**Szczegóły:**")
+                        st.write("**Szczegóły:**")
                         st.text_area("Szczegóły", book_data['details'], height=100, disabled=True)
                     if book_data['description']:
-                        # Pokazujemy więcej tekstu dla weryfikacji
                         full_desc = book_data['description']
-                        st.write(f"**Opis (pierwsze 500 znaków):**")
-                        st.text_area("Opis", full_desc[:500] + "...", height=150, disabled=True)
+                        st.write("**Opis (pierwsze 500 znaków):**")
+                        st.text_area("Opis", (full_desc[:500] + "...") if len(full_desc) > 500 else full_desc, height=150, disabled=True)
                         st.write(f"**Długość pobranego opisu:** {len(full_desc)} znaków")
-                    
-                    # Generowanie opisu
+
                     with st.spinner("Generuję opis..."):
                         selected_prompt_template = prompts[selected_prompt]
                         generated_desc = generate_description(book_data, selected_prompt_template, client)
-                        
                         if generated_desc:
                             st.session_state['generated_description'] = generated_desc
                             st.session_state['book_title'] = book_data['title']
                             st.session_state.show_preview = False
-                            
-                            # Generowanie metatagów
+
                             if generate_meta:
                                 with st.spinner("Generuję metatagi..."):
                                     meta_title, meta_description = generate_meta_tags(book_data, client)
@@ -597,48 +651,59 @@ with col1:
 
 with col2:
     st.header("📄 Wygenerowany opis")
-    
+
     if 'generated_description' in st.session_state:
         st.subheader(f"📖 {st.session_state.get('book_title', 'Opis produktu')}")
         st.subheader(f"🎭 Kategoria: {selected_prompt}")
-        
-        # Kod HTML do skopiowania (najpierw)
+
         st.markdown("**Kod HTML:**")
         html_code = st.session_state['generated_description']
         st.code(html_code, language='html')
-        
-        # Przycisk do skopiowania HTML
+
         if st.button("📋 Skopiuj kod HTML", use_container_width=True):
-            # Streamlit nie ma bezpośredniej funkcji kopiowania do schowka,
-            # więc wyświetlenie kodu w st.code jest najlepszym rozwiązaniem.
             st.success("✅ Kod HTML jest gotowy do skopiowania z pola powyżej!")
-        
-        # Przycisk podglądu
+
         if st.button("👁️ Pokaż/Ukryj podgląd", use_container_width=True):
             st.session_state.show_preview = not st.session_state.show_preview
-        
-        # Podgląd HTML (po naciśnięciu przycisku)
+
         if st.session_state.show_preview:
             st.markdown("---")
             st.markdown("**Podgląd:**")
             st.markdown(st.session_state['generated_description'], unsafe_allow_html=True)
-        
-        # Metatagi
+
         if 'meta_title' in st.session_state and 'meta_description' in st.session_state:
             st.markdown("---")
             st.subheader("🏷️ Metatagi SEO")
             st.write(f"**Meta Title:** {st.session_state['meta_title']}")
             st.write(f"**Meta Description:** {st.session_state['meta_description']}")
-            
-            # Kod metatagów
             meta_code = f"""<title>{st.session_state['meta_title']}</title>
 <meta name="description" content="{st.session_state['meta_description']}">"""
             st.code(meta_code, language='html')
-            
+
+        st.markdown("---")
+        # --- wysyłka do PIM ---
+        pim_disabled = len(missing) > 0 if 'missing' in locals() else False
+        if st.button("✅ Zaakceptuj i wyślij do PIM", use_container_width=True, type="primary", disabled=pim_disabled):
+            if pim_disabled:
+                st.error("❌ Konfiguracja Akeneo niepełna. Uzupełnij sekrety i odśwież aplikację.")
+            elif not sku:
+                st.error("❌ Podaj SKU produktu (identifier) przed wysyłką do PIM.")
+            else:
+                try:
+                    ok = akeneo_update_description(
+                        sku=sku.strip(),
+                        html_description=st.session_state['generated_description'],
+                        channel=channel,
+                        locale=locale.strip() or "pl_PL"
+                    )
+                    if ok:
+                        st.success(f"✅ Opis zapisany w Akeneo dla SKU: {sku} (kanał: {channel}, locale: {locale}).")
+                except Exception as e:
+                    st.error(f"❌ Błąd zapisu do Akeneo: {e}")
     else:
         st.info("👈 Podaj URL i kliknij 'Generuj opis' aby rozpocząć")
 
-# Stopka
+# ------------- STOPKA ------------- #
 st.markdown("---")
 st.markdown("🔧 **Narzędzie do generowania opisów produktów** | Wykorzystuje OpenAI GPT-4o-mini")
 st.markdown("💡 **Wskazówka:** Wybierz odpowiednią kategorię z menu bocznego dla najlepszych rezultatów")
