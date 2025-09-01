@@ -13,9 +13,11 @@ st.set_page_config(page_title="Generator opisów książek", page_icon="📚", l
 def strip_code_fences(text: str) -> str:
     if not text:
         return text
+    # dopasuj cały blok ```[html] ... ```
     m = re.match(r"^\s*```(?:html|HTML)?\s*([\s\S]*?)\s*```\s*$", text)
     if m:
         return m.group(1).strip()
+    # albo usuń ewentualne pojedyncze płotki na początku/końcu
     text = re.sub(r"^\s*```(?:html|HTML)?\s*", "", text)
     text = re.sub(r"\s*```\s*$", "", text)
     return text.strip()
@@ -29,6 +31,7 @@ def akeneo_get_attribute(code, token):
     
 def _akeneo_root():
     base = st.secrets["AKENEO_BASE_URL"].rstrip("/")
+    # spodziewamy się .../api/rest/v1
     if base.endswith("/api/rest/v1"):
         return base[:-len("/api/rest/v1")]
     return base
@@ -107,7 +110,7 @@ def get_book_data(url):
         if desc_div:
             description_text = desc_div.get_text(separator="\n", strip=True)
         
-        # Metoda 2: Starsza struktura oparta na klasie "desc-container"
+        # Metoda 2: Starsza struktura (np. Tania Książka) oparta na klasie "desc-container"
         if not description_text:
             desc_div = soup.find("div", class_="desc-container")
             if desc_div:
@@ -176,7 +179,7 @@ def generate_description(book_data, prompt_template, client):
             temperature=0.7,
             max_tokens=2000
         )
-        return response.choices[0].message.content
+        return response.choices.message.content
     except Exception as e:
         st.error(f"Błąd generowania opisu: {str(e)}")
         return ""
@@ -199,7 +202,7 @@ Meta description: [treść]"""
             temperature=0.7,
             max_tokens=200
         )
-        result = response.choices[0].message.content
+        result = response.choices.message.content
         meta_title = ""
         meta_description = ""
         for line in result.splitlines():
@@ -493,7 +496,7 @@ Zaczyna się od nagłówka <h2> z kreatywnym hasłem, które oddaje emocje i cha
 - Nie używaj znaczników Markdown, tylko HTML
 - Nie dodawaj komentarzy ani wyjaśnień, tylko sam opis
 4. Styl:
-- Opis powinien być angażający, ale rzetelny i autentyczny
+- Opis powinien być angażujący, ale rzetelny i autentyczny
 - Używaj języka, który podkreśla prawdziwość historii, inspiruje i budzi emocje
 - Akcentuj elementy związane z psychologią postaci, drogą do sukcesu i wyciąganymi lekcjami
 - Unikaj ogólników — skup się na konkretnych momentach i doświadczeniach (jeśli masz takie informacje)
@@ -592,7 +595,7 @@ st.markdown("---")
 
 st.sidebar.header("🎯 Ustawienia")
 prompt_keys = list(prompts.keys())
-default_prompt = st.session_state.selected_prompt if st.session_state.selected_prompt in prompt_keys else prompt_keys[0]
+default_prompt = st.session_state.selected_prompt if st.session_state.selected_prompt in prompt_keys else prompt_keys
 
 selected_prompt = st.sidebar.selectbox(
     "Wybierz kategorię produktu:",
@@ -611,7 +614,7 @@ locale = st.sidebar.text_input(
     value=st.secrets.get("AKENEO_DEFAULT_LOCALE", "pl_PL")
 )
 
-col1, col2 = st.columns([1, 1])
+col1, col2 = st.columns()
 
 with col1:
     st.header("📝 Dane wejściowe")
@@ -628,7 +631,7 @@ with col1:
 
     generate_meta = st.checkbox("Generuj meta title i meta description", value=False)
 
-    col_btn1, col_btn2 = st.columns([1, 1])
+    col_btn1, col_btn2 = st.columns()
     with col_btn1:
         generate_button = st.button("🚀 Generuj opis", type="primary", use_container_width=True)
     with col_btn2:
@@ -731,4 +734,4 @@ with col2:
 # ------------- STOPKA ------------- #
 st.markdown("---")
 st.markdown("🔧 **Narzędzie do generowania opisów produktów** | Wykorzystuje OpenAI GPT-4o-mini")
-st.markdown("💡 **Wskazówka:** Wybierz odpowiednią kategorię z menu bocznego dla najlepszych rezultatów")```
+st.markdown("💡 **Wskazówka:** Wybierz odpowiednią kategorię z menu bocznego dla najlepszych rezultatów")
