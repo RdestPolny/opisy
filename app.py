@@ -160,25 +160,43 @@ def generate_dynamic_prompt(product_data, client):
         description = product_data.get('description', '')
         
         system_prompt = "Jesteś światowej klasy strategiem treści i prompt engineerem specjalizującym się w e-commerce."
-        user_prompt = f"""Jesteś ekspertem od e-commerce i prompt engineeringu. Twoim zadaniem jest analiza poniższych danych produktu, aby zidentyfikować jego kategorię (np. książka - romans, kryminał, fantastyka; zabawka edukacyjna; gra planszowa strategiczna itp.).
-
-Na podstawie tej analizy, stwórz szczegółowy prompt dla innego AI, które jest profesjonalnym copywriterem. Ten prompt ma posłużyć do wygenerowania kompletnego opisu produktu w formacie HTML.
-
-**Krytyczne wymagania dla promptu, który stworzysz:**
-1.  **Struktura HTML:** Prompt musi jasno nakazać użycie następującej struktury:
-    - Zaczyna się od nagłówka `<h2>` z chwytliwym, kreatywnym hasłem dopasowanym do kategorii produktu.
-    - Zawiera kilka akapitów `<p>` opisujących produkt, jego cechy i korzyści.
-    - Używa tagów `<b>` do wyróżnienia najważniejszych słów kluczowych i fraz.
-    - Kończy się nagłówkiem `<h3>` z przekonującym wezwaniem do działania (Call To Action).
-2.  **Ton i Styl:** Prompt musi określić ton i styl pisania, odpowiedni dla zidentyfikowanej kategorii produktu i jego grupy docelowej (np. emocjonalny dla romansu, budujący napięcie dla kryminału, edukacyjny i przyjazny dla zabawki).
-3.  **Wykorzystanie Danych:** Prompt musi instruować, aby copywriter bazował na dostarczonych danych: `{{book_title}}`, `{{book_details}}`, `{{book_description}}`.
-4.  **Format Wyjściowy:** Zwróć TYLKO I WYŁĄCZNIE tekst promptu, bez żadnych dodatkowych komentarzy, wstępów czy formatowania typu "```prompt ... ```".
-
-**Dane produktu do analizy:**
-Tytuł: "{title}"
-Opis: "{description[:1000]}..."
-
-Wygeneruj teraz prompt dla copywritera AI."""
+        
+        # ZAKTUALIZOWANY PROMPT UŻYTKOWNIKA
+        user_prompt = f"""
+# Rola i Cel Asystenta
+- Pomaga w analizie danych produktu e-commerce i generowaniu promptów dla AI copywritera w języku polskim.
+# Instrukcje
+- Przeanalizuj podane dane produktu, aby zidentyfikować jego kategorię (np. książka – romans, kryminał, fantastyka; zabawka edukacyjna; gra planszowa strategiczna).
+- Stwórz profesjonalny prompt dla AI copywritera, który na jego podstawie wygeneruje kompletny, atrakcyjny opis produktu w HTML.
+# Przebieg działania
+Rozpocznij od krótkiej listy kontrolnej (3-7 punktów) obejmującej: (1) analizę danych produktu, (2) rozpoznanie kategorii, (3) dostosowanie tonu i stylu, (4) wygenerowanie zgodnego promptu, (5) końcową weryfikację struktury i wymagań.
+# Wymagania dotyczące promptu
+1. **Struktura HTML:**
+- Rozpocznij nagłówkiem `<h2>` z chwytliwym, kreatywnym hasłem dopasowanym do kategorii produktu.
+- Umieść kilka akapitów `<p>`, opisujących produkt, jego cechy i korzyści.
+- Wyróżnij najważniejsze słowa i frazy tagiem `<b>`.
+- Zakończ nagłówkiem `<h3>` z przekonującym wezwaniem do działania (Call To Action).
+2. **Ton i styl:**
+- Dobierz ton i styl opisu do kategorii produktu oraz odbiorców (np. emocjonalny dla romansu, pełen napięcia dla kryminału, edukacyjny i przyjazny dla zabawek).
+3. **Wykorzystanie danych:**
+- Prompt powinien wyraźnie polecić copywriterowi wykorzystanie następujących danych: `{{book_title}}`, `{{book_details}}`, `{{book_description}}`.
+4. **Format wyjściowy:**
+- Zwróć tylko i wyłącznie tekst promptu, bez dodatkowych komentarzy, nagłówków czy formatowania typu "```prompt ... ```".
+# Kontekst
+- Dane produktu do analizy:
+- Tytuł: "{title}"
+- Opis: "{description[:1000]}..."
+# Kroki rozumowania
+- Wywnioskuj kategorię produktu na podstawie jego cech i opisu.
+- Zbuduj prompt zgodny ze wszystkimi powyższymi wymaganiami.
+- Przekaż wyłącznie tekst promptu, bez zbędnych dodatków.
+# Weryfikacja po wykonaniu promptu
+Po wygenerowaniu promptu, sprawdź w 1-2 zdaniach, czy struktura HTML oraz ton, styl i wykorzystanie danych są zgodne z wymaganiami. Jeżeli wynik nie spełnia wszystkich wymogów, popraw prompt przed zakończeniem zadania.
+# Poziom szczegółowości
+- Wypowiedzi asystenta powinny być rzeczowe i kompletne, bez zbędnego wodolejstwa.
+# Kryteria zakończenia
+- Uznaj zadanie za zakończone po wygenerowaniu poprawnego promptu zgodnego z powyższymi wytycznymi.
+"""
 
         full_input = f"{system_prompt}\n\n{user_prompt}"
         
