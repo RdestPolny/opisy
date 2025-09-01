@@ -160,7 +160,7 @@ def generate_brief(product_data, client):
         
         user_prompt = f"""
 # Rola i Cel
-- Przeanalizuj dane produktu e-commerce i wygeneruj profesjonalny brief dla AI copywritera w języku polskim.
+- Przeanalizuj dane produktu e-commerce i wygeneruj profesjonalny brief dla AI copywritera.
 # Instrukcje
 - Zidentyfikuj kategorię produktu (np. książka – romans, kryminał; zabawka edukacyjna; gra planszowa).
 - Stwórz brief, który posłuży do wygenerowania kompletnego, atrakcyjnego opisu produktu w HTML.
@@ -172,7 +172,8 @@ def generate_brief(product_data, client):
     - Nagłówek `<h3>` z wezwaniem do działania (Call To Action).
 2. **Ton i styl:** Brief musi określić ton i styl opisu dopasowany do kategorii i odbiorców (np. emocjonalny dla romansu, pełen napięcia dla kryminału, przyjazny dla zabawek).
 3. **Wykorzystanie danych:** W briefie umieść instrukcję dla copywritera, aby bazował na dostarczonych mu później tytule, szczegółach i opisie produktu. **WAŻNE: NIE umieszczaj w briefie placeholderów typu `{{book_title}}`.**
-4. **Format wyjściowy:** Zwróć tylko i wyłącznie tekst briefu, bez dodatkowych komentarzy, nagłówków czy formatowania.
+4. **Język:** Brief musi kategorycznie nakazać copywriterowi pisanie wyłącznie w języku polskim, bez mieszania języków.
+5. **Format wyjściowy:** Zwróć tylko i wyłącznie tekst briefu, bez dodatkowych komentarzy, nagłówków czy formatowania.
 # Kontekst
 - Dane produktu do analizy:
 - Tytuł: "{title}"
@@ -197,8 +198,12 @@ def generate_description(book_data, generated_brief, client):
     Etap 2: Generuje opis produktu na podstawie dostarczonego briefu i surowych danych.
     """
     try:
-        system_prompt = """Jesteś profesjonalnym copywriterem e-commerce. Twoim jedynym zadaniem jest napisanie opisu produktu w formacie HTML, ściśle trzymając się wytycznych z poniższego briefu oraz wykorzystując dostarczone dane produktu.
-NIE komentuj briefu. NIE pisz o tym, co zamierzasz zrobić. Po prostu wykonaj polecenia i zwróć wyłącznie gotowy kod HTML."""
+        system_prompt = """Jesteś profesjonalnym copywriterem e-commerce. Twoim jedynym zadaniem jest napisanie opisu produktu na podstawie dostarczonych instrukcji.
+
+--- KRYTYCZNE ZASADY ---
+1.  **JĘZYK:** Używaj WYŁĄCZNIE języka polskiego. Absolutnie nie wolno mieszać języków ani wstawiać pojedynczych słów z rosyjskiego, ukraińskiego czy jakiegokolwiek innego języka (poza angielskim). Cały tekst musi być w 100% po polsku.
+2.  **FORMAT:** Zwróć wyłącznie gotowy kod HTML, zgodnie ze strukturą opisaną w briefie.
+3.  **ZADANIE:** Twoim zadaniem jest napisanie opisu, a NIE komentowanie briefu. Nie pisz o tym, co robisz. Po prostu wykonaj polecenia."""
 
         raw_data_context = f"""
 --- DANE PRODUKTU DO WYKORZYSTANIA ---
@@ -226,7 +231,7 @@ def generate_meta_tags(product_data, client):
         details = product_data.get('details', '')
         description = product_data.get('description', '')
         
-        system_prompt = "Jesteś doświadczonym copywriterem SEO."
+        system_prompt = "Jesteś doświadczonym copywriterem SEO. Pisz wyłącznie po polsku."
         user_prompt = f"""Stwórz meta title oraz meta description dla produktu o tytule "{title}" bazując na danych: {details} {description}. 
 Meta title: do 60 znaków, zaczynający się od słowa kluczowego.
 Meta description: do 160 znaków, jedno zdanie informacyjne.
