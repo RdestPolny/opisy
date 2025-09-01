@@ -149,7 +149,7 @@ def get_book_data(url):
             'error': f"Błąd pobierania: {str(e)}"
         }
 
-# ------------- NOWA LOGIKA GENEROWANIA OPISU ------------- #
+# ------------- NOWA LOGIKA GENEROWANIA OPISU (ZGODNA Z GPT-5 RESPONSES API) ------------- #
 
 def generate_dynamic_prompt(product_data, client):
     """
@@ -159,7 +159,8 @@ def generate_dynamic_prompt(product_data, client):
         title = product_data.get('title', '')
         description = product_data.get('description', '')
         
-        meta_prompt = f"""Jesteś ekspertem od e-commerce i prompt engineeringu. Twoim zadaniem jest analiza poniższych danych produktu, aby zidentyfikować jego kategorię (np. książka - romans, kryminał, fantastyka; zabawka edukacyjna; gra planszowa strategiczna itp.).
+        system_prompt = "Jesteś światowej klasy strategiem treści i prompt engineerem specjalizującym się w e-commerce."
+        user_prompt = f"""Jesteś ekspertem od e-commerce i prompt engineeringu. Twoim zadaniem jest analiza poniższych danych produktu, aby zidentyfikować jego kategorię (np. książka - romans, kryminał, fantastyka; zabawka edukacyjna; gra planszowa strategiczna itp.).
 
 Na podstawie tej analizy, stwórz szczegółowy prompt dla innego AI, które jest profesjonalnym copywriterem. Ten prompt ma posłużyć do wygenerowania kompletnego opisu produktu w formacie HTML.
 
@@ -179,18 +180,15 @@ Opis: "{description[:1000]}..."
 
 Wygeneruj teraz prompt dla copywritera AI."""
 
-        messages = [
-            {"role": "system", "content": "Jesteś światowej klasy strategiem treści i prompt engineerem specjalizującym się w e-commerce."},
-            {"role": "user", "content": meta_prompt}
-        ]
+        full_input = f"{system_prompt}\n\n{user_prompt}"
         
-        response = client.chat.completions.create(
+        response = client.responses.create(
             model="gpt-5-nano",
-            messages=messages,
-            temperature=0.5,
-            max_completion_tokens=1000 # POPRAWKA
+            input=full_input,
+            reasoning={"effort": "minimal"},
+            text={"verbosity": "low"}
         )
-        return response.choices[0].message.content
+        return response.output_text
     except Exception as e:
         st.error(f"Błąd generowania dynamicznego promptu: {str(e)}")
         return ""
@@ -200,22 +198,22 @@ def generate_description(book_data, dynamic_prompt, client):
     Etap 2: Generuje opis produktu na podstawie dynamicznie stworzonego promptu.
     """
     try:
-        prompt_filled = dynamic_prompt.format(
+        system_prompt = "Jesteś profesjonalnym copywriterem. Tworzysz wyłącznie poprawne, atrakcyjne opisy książek i produktów do księgarni internetowej. Każdy opis ma być zgodny z poleceniem i formą HTML, nie dodawaj nic od siebie."
+        user_prompt = dynamic_prompt.format(
             book_title=book_data.get('title', ''),
             book_details=book_data.get('details', ''),
             book_description=book_data.get('description', '')
         )
-        messages = [
-            {"role": "system", "content": "Jesteś profesjonalnym copywriterem. Tworzysz wyłącznie poprawne, atrakcyjne opisy książek i produktów do księgarni internetowej. Każdy opis ma być zgodny z poleceniem i formą HTML, nie dodawaj nic od siebie."},
-            {"role": "user", "content": prompt_filled}
-        ]
-        response = client.chat.completions.create(
+        
+        full_input = f"{system_prompt}\n\n{user_prompt}"
+
+        response = client.responses.create(
             model="gpt-5-nano",
-            messages=messages,
-            temperature=0.7,
-            max_completion_tokens=2000 # POPRAWKA
+            input=full_input,
+            reasoning={"effort": "low"},
+            text={"verbosity": "medium"}
         )
-        return response.choices[0].message.content
+        return response.output_text
     except Exception as e:
         st.error(f"Błąd generowania opisu: {str(e)}")
         return ""
@@ -225,20 +223,21 @@ def generate_meta_tags(product_data, client):
         title = product_data.get('title', '')
         details = product_data.get('details', '')
         description = product_data.get('description', '')
-        prompt_meta = f"""Jako doświadczony copywriter SEO, stwórz meta title oraz meta description dla produktu o tytule "{title}" bazując na następujących danych: {details} {description}. Meta title powinien zaczynać się od silnego słowa kluczowego, zawierać do 60 znaków, a meta description powinien być jednym zdaniem informacyjnym, zawierającym do 160 znaków. Podaj wynik w formacie:
+        
+        system_prompt = "Jesteś doświadczonym copywriterem SEO."
+        user_prompt = f"""Jako doświadczony copywriter SEO, stwórz meta title oraz meta description dla produktu o tytule "{title}" bazując na następujących danych: {details} {description}. Meta title powinien zaczynać się od silnego słowa kluczowego, zawierać do 60 znaków, a meta description powinien być jednym zdaniem informacyjnym, zawierającym do 160 znaków. Podaj wynik w formacie:
 Meta title: [treść]
 Meta description: [treść]"""
-        messages = [
-            {"role": "system", "content": "Jesteś doświadczonym copywriterem SEO."},
-            {"role": "user", "content": prompt_meta}
-        ]
-        response = client.chat.completions.create(
+
+        full_input = f"{system_prompt}\n\n{user_prompt}"
+
+        response = client.responses.create(
             model="gpt-5-nano",
-            messages=messages,
-            temperature=0.7,
-            max_completion_tokens=200 # POPRAWKA
+            input=full_input,
+            reasoning={"effort": "minimal"},
+            text={"verbosity": "low"}
         )
-        result = response.choices[0].message.content
+        result = response.output_text
         meta_title = ""
         meta_description = ""
         for line in result.splitlines():
@@ -265,7 +264,7 @@ missing = [k for k in required_akeneo_secrets if k not in st.secrets]
 if missing:
     st.warning(f"⚠️ Brak konfiguracji Akeneo w secrets: {', '.join(missing)}. Wysyłka do PIM będzie niedostępna.")
 
-client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
+client = OpenAI() # Zgodnie z dokumentacją, klucz jest pobierany automatycznie ze zmiennej środowiskowej/sekretów
 
 # ------------- UI ------------- #
 st.title('📚 Inteligentny Generator Opisów Produktów')
@@ -305,7 +304,7 @@ with col1:
         generate_button = st.button("🚀 Generuj opis", type="primary", use_container_width=True)
     with col_btn2:
         if st.button("🔄 Generuj kolejny", use_container_width=True):
-            keys_to_remove = [key for key in st.session_state.keys() if key != 'some_persistent_key'] # zachowaj co potrzebne
+            keys_to_remove = [key for key in st.session_state.keys() if key != 'some_persistent_key']
             for key in keys_to_remove:
                 del st.session_state[key]
             st.session_state.show_preview = False
@@ -330,7 +329,6 @@ with col1:
                     st.text_area("Opis", (full_desc[:500] + "...") if len(full_desc) > 500 else full_desc, height=150, disabled=True)
                 
                 with st.spinner("Analizuję produkt i generuję opis... To może chwilę potrwać."):
-                    # Etap 1: Generowanie dynamicznego promptu
                     st.info("Krok 1: Identyfikacja kategorii i tworzenie dedykowanego promptu...")
                     dynamic_prompt = generate_dynamic_prompt(book_data, client)
                     
@@ -339,7 +337,6 @@ with col1:
                     else:
                         st.session_state['dynamic_prompt'] = dynamic_prompt
                         
-                        # Etap 2: Generowanie opisu na podstawie nowego promptu
                         st.info("Krok 2: Generowanie opisu na podstawie nowego promptu...")
                         generated_desc_raw = generate_description(book_data, dynamic_prompt, client)
                         generated_desc = strip_code_fences(generated_desc_raw)
@@ -356,7 +353,6 @@ with col1:
                                     st.session_state['meta_description'] = meta_description
                             
                             st.success("✅ Opis wygenerowany pomyślnie!")
-
 
 with col2:
     st.header("📄 Wygenerowany opis")
