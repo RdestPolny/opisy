@@ -188,7 +188,7 @@ Wygeneruj teraz prompt dla copywritera AI."""
             model="gpt-5-nano",
             messages=messages,
             temperature=0.5,
-            max_tokens=1000
+            max_completion_tokens=1000 # POPRAWKA
         )
         return response.choices[0].message.content
     except Exception as e:
@@ -213,7 +213,7 @@ def generate_description(book_data, dynamic_prompt, client):
             model="gpt-5-nano",
             messages=messages,
             temperature=0.7,
-            max_tokens=2000
+            max_completion_tokens=2000 # POPRAWKA
         )
         return response.choices[0].message.content
     except Exception as e:
@@ -236,7 +236,7 @@ Meta description: [treść]"""
             model="gpt-5-nano",
             messages=messages,
             temperature=0.7,
-            max_tokens=200
+            max_completion_tokens=200 # POPRAWKA
         )
         result = response.choices[0].message.content
         meta_title = ""
