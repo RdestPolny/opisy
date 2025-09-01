@@ -13,11 +13,9 @@ st.set_page_config(page_title="Generator opisów książek", page_icon="📚", l
 def strip_code_fences(text: str) -> str:
     if not text:
         return text
-    # dopasuj cały blok ```[html] ... ```
     m = re.match(r"^\s*```(?:html|HTML)?\s*([\s\S]*?)\s*```\s*$", text)
     if m:
         return m.group(1).strip()
-    # albo usuń ewentualne pojedyncze płotki na początku/końcu
     text = re.sub(r"^\s*```(?:html|HTML)?\s*", "", text)
     text = re.sub(r"\s*```\s*$", "", text)
     return text.strip()
@@ -31,7 +29,6 @@ def akeneo_get_attribute(code, token):
     
 def _akeneo_root():
     base = st.secrets["AKENEO_BASE_URL"].rstrip("/")
-    # spodziewamy się .../api/rest/v1
     if base.endswith("/api/rest/v1"):
         return base[:-len("/api/rest/v1")]
     return base
@@ -174,7 +171,7 @@ def generate_brief(product_data, client):
     - Wyróżnienia `<b>` dla kluczowych fraz.
     - Nagłówek `<h3>` z wezwaniem do działania (Call To Action).
 2. **Ton i styl:** Brief musi określić ton i styl opisu dopasowany do kategorii i odbiorców (np. emocjonalny dla romansu, pełen napięcia dla kryminału, przyjazny dla zabawek).
-3. **Wykorzystanie danych:** Brief musi polecić wykorzystanie danych: `{{book_title}}`, `{{book_details}}`, `{{book_description}}`.
+3. **Wykorzystanie danych:** W briefie umieść instrukcję dla copywritera, aby bazował na dostarczonych mu później tytule, szczegółach i opisie produktu. **WAŻNE: NIE umieszczaj w briefie placeholderów typu `{{book_title}}`.**
 4. **Format wyjściowy:** Zwróć tylko i wyłącznie tekst briefu, bez dodatkowych komentarzy, nagłówków czy formatowania.
 # Kontekst
 - Dane produktu do analizy:
@@ -197,19 +194,20 @@ def generate_brief(product_data, client):
 
 def generate_description(book_data, generated_brief, client):
     """
-    Etap 2: Generuje opis produktu na podstawie dostarczonego briefu.
+    Etap 2: Generuje opis produktu na podstawie dostarczonego briefu i surowych danych.
     """
     try:
-        system_prompt = """Jesteś profesjonalnym copywriterem e-commerce. Twoim jedynym zadaniem jest napisanie opisu produktu w formacie HTML, ściśle trzymając się wytycznych z poniższego briefu.
-NIE komentuj briefu. NIE pisz o tym, co zamierzasz zrobić. NIE generuj kolejnego briefu. Po prostu wykonaj polecenia i zwróć wyłącznie gotowy kod HTML."""
+        system_prompt = """Jesteś profesjonalnym copywriterem e-commerce. Twoim jedynym zadaniem jest napisanie opisu produktu w formacie HTML, ściśle trzymając się wytycznych z poniższego briefu oraz wykorzystując dostarczone dane produktu.
+NIE komentuj briefu. NIE pisz o tym, co zamierzasz zrobić. Po prostu wykonaj polecenia i zwróć wyłącznie gotowy kod HTML."""
 
-        brief_filled = generated_brief.format(
-            book_title=book_data.get('title', ''),
-            book_details=book_data.get('details', ''),
-            book_description=book_data.get('description', '')
-        )
+        raw_data_context = f"""
+--- DANE PRODUKTU DO WYKORZYSTANIA ---
+Tytuł: {book_data.get('title', '')}
+Szczegóły techniczne: {book_data.get('details', '')}
+Oryginalny opis od wydawcy/producenta: {book_data.get('description', '')}
+"""
         
-        full_input = f"{system_prompt}\n\n--- BRIEF DO WYKONANIA ---\n{brief_filled}"
+        full_input = f"{system_prompt}\n\n--- BRIEF (TWOJE POLECENIA) ---\n{generated_brief}\n\n{raw_data_context}"
 
         response = client.responses.create(
             model="gpt-5-nano",
