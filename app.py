@@ -151,51 +151,35 @@ def get_book_data(url):
 
 # ------------- NOWA LOGIKA GENEROWANIA OPISU (ZGODNA Z GPT-5 RESPONSES API) ------------- #
 
-def generate_dynamic_prompt(product_data, client):
+def generate_brief(product_data, client):
     """
-    Etap 1: Analizuje dane produktu i generuje dedykowany prompt do stworzenia opisu.
+    Etap 1: Analizuje dane produktu i generuje klarowny BRIEF dla copywritera.
     """
     try:
         title = product_data.get('title', '')
         description = product_data.get('description', '')
         
-        system_prompt = "Jesteś światowej klasy strategiem treści i prompt engineerem specjalizującym się w e-commerce."
+        system_prompt = "Jesteś ekspertem-analitykiem e-commerce. Twoim jedynym zadaniem jest analiza danych produktu i wygenerowanie na ich podstawie klarownego, ustrukturyzowanego briefu dla copywritera AI."
         
-        # ZAKTUALIZOWANY PROMPT UŻYTKOWNIKA
         user_prompt = f"""
-# Rola i Cel Asystenta
-- Pomaga w analizie danych produktu e-commerce i generowaniu promptów dla AI copywritera w języku polskim.
+# Rola i Cel
+- Przeanalizuj dane produktu e-commerce i wygeneruj profesjonalny brief dla AI copywritera w języku polskim.
 # Instrukcje
-- Przeanalizuj podane dane produktu, aby zidentyfikować jego kategorię (np. książka – romans, kryminał, fantastyka; zabawka edukacyjna; gra planszowa strategiczna).
-- Stwórz profesjonalny prompt dla AI copywritera, który na jego podstawie wygeneruje kompletny, atrakcyjny opis produktu w HTML.
-# Przebieg działania
-Rozpocznij od krótkiej listy kontrolnej (3-7 punktów) obejmującej: (1) analizę danych produktu, (2) rozpoznanie kategorii, (3) dostosowanie tonu i stylu, (4) wygenerowanie zgodnego promptu, (5) końcową weryfikację struktury i wymagań.
-# Wymagania dotyczące promptu
-1. **Struktura HTML:**
-- Rozpocznij nagłówkiem `<h2>` z chwytliwym, kreatywnym hasłem dopasowanym do kategorii produktu.
-- Umieść kilka akapitów `<p>`, opisujących produkt, jego cechy i korzyści.
-- Wyróżnij najważniejsze słowa i frazy tagiem `<b>`.
-- Zakończ nagłówkiem `<h3>` z przekonującym wezwaniem do działania (Call To Action).
-2. **Ton i styl:**
-- Dobierz ton i styl opisu do kategorii produktu oraz odbiorców (np. emocjonalny dla romansu, pełen napięcia dla kryminału, edukacyjny i przyjazny dla zabawek).
-3. **Wykorzystanie danych:**
-- Prompt powinien wyraźnie polecić copywriterowi wykorzystanie następujących danych: `{{book_title}}`, `{{book_details}}`, `{{book_description}}`.
-4. **Format wyjściowy:**
-- Zwróć tylko i wyłącznie tekst promptu, bez dodatkowych komentarzy, nagłówków czy formatowania typu "```prompt ... ```".
+- Zidentyfikuj kategorię produktu (np. książka – romans, kryminał; zabawka edukacyjna; gra planszowa).
+- Stwórz brief, który posłuży do wygenerowania kompletnego, atrakcyjnego opisu produktu w HTML.
+# Wymagania dotyczące briefu, który stworzysz
+1. **Struktura HTML:** Brief musi nakazać copywriterowi użycie następującej struktury:
+    - Nagłówek `<h2>` z chwytliwym hasłem.
+    - Kilka akapitów `<p>` opisujących produkt.
+    - Wyróżnienia `<b>` dla kluczowych fraz.
+    - Nagłówek `<h3>` z wezwaniem do działania (Call To Action).
+2. **Ton i styl:** Brief musi określić ton i styl opisu dopasowany do kategorii i odbiorców (np. emocjonalny dla romansu, pełen napięcia dla kryminału, przyjazny dla zabawek).
+3. **Wykorzystanie danych:** Brief musi polecić wykorzystanie danych: `{{book_title}}`, `{{book_details}}`, `{{book_description}}`.
+4. **Format wyjściowy:** Zwróć tylko i wyłącznie tekst briefu, bez dodatkowych komentarzy, nagłówków czy formatowania.
 # Kontekst
 - Dane produktu do analizy:
 - Tytuł: "{title}"
 - Opis: "{description[:1000]}..."
-# Kroki rozumowania
-- Wywnioskuj kategorię produktu na podstawie jego cech i opisu.
-- Zbuduj prompt zgodny ze wszystkimi powyższymi wymaganiami.
-- Przekaż wyłącznie tekst promptu, bez zbędnych dodatków.
-# Weryfikacja po wykonaniu promptu
-Po wygenerowaniu promptu, sprawdź w 1-2 zdaniach, czy struktura HTML oraz ton, styl i wykorzystanie danych są zgodne z wymaganiami. Jeżeli wynik nie spełnia wszystkich wymogów, popraw prompt przed zakończeniem zadania.
-# Poziom szczegółowości
-- Wypowiedzi asystenta powinny być rzeczowe i kompletne, bez zbędnego wodolejstwa.
-# Kryteria zakończenia
-- Uznaj zadanie za zakończone po wygenerowaniu poprawnego promptu zgodnego z powyższymi wytycznymi.
 """
 
         full_input = f"{system_prompt}\n\n{user_prompt}"
@@ -208,22 +192,24 @@ Po wygenerowaniu promptu, sprawdź w 1-2 zdaniach, czy struktura HTML oraz ton, 
         )
         return response.output_text
     except Exception as e:
-        st.error(f"Błąd generowania dynamicznego promptu: {str(e)}")
+        st.error(f"Błąd generowania briefu: {str(e)}")
         return ""
 
-def generate_description(book_data, dynamic_prompt, client):
+def generate_description(book_data, generated_brief, client):
     """
-    Etap 2: Generuje opis produktu na podstawie dynamicznie stworzonego promptu.
+    Etap 2: Generuje opis produktu na podstawie dostarczonego briefu.
     """
     try:
-        system_prompt = "Jesteś profesjonalnym copywriterem. Tworzysz wyłącznie poprawne, atrakcyjne opisy książek i produktów do księgarni internetowej. Każdy opis ma być zgodny z poleceniem i formą HTML, nie dodawaj nic od siebie."
-        user_prompt = dynamic_prompt.format(
+        system_prompt = """Jesteś profesjonalnym copywriterem e-commerce. Twoim jedynym zadaniem jest napisanie opisu produktu w formacie HTML, ściśle trzymając się wytycznych z poniższego briefu.
+NIE komentuj briefu. NIE pisz o tym, co zamierzasz zrobić. NIE generuj kolejnego briefu. Po prostu wykonaj polecenia i zwróć wyłącznie gotowy kod HTML."""
+
+        brief_filled = generated_brief.format(
             book_title=book_data.get('title', ''),
             book_details=book_data.get('details', ''),
             book_description=book_data.get('description', '')
         )
         
-        full_input = f"{system_prompt}\n\n{user_prompt}"
+        full_input = f"{system_prompt}\n\n--- BRIEF DO WYKONANIA ---\n{brief_filled}"
 
         response = client.responses.create(
             model="gpt-5-nano",
@@ -243,7 +229,10 @@ def generate_meta_tags(product_data, client):
         description = product_data.get('description', '')
         
         system_prompt = "Jesteś doświadczonym copywriterem SEO."
-        user_prompt = f"""Jako doświadczony copywriter SEO, stwórz meta title oraz meta description dla produktu o tytule "{title}" bazując na następujących danych: {details} {description}. Meta title powinien zaczynać się od silnego słowa kluczowego, zawierać do 60 znaków, a meta description powinien być jednym zdaniem informacyjnym, zawierającym do 160 znaków. Podaj wynik w formacie:
+        user_prompt = f"""Stwórz meta title oraz meta description dla produktu o tytule "{title}" bazując na danych: {details} {description}. 
+Meta title: do 60 znaków, zaczynający się od słowa kluczowego.
+Meta description: do 160 znaków, jedno zdanie informacyjne.
+Format wyjściowy:
 Meta title: [treść]
 Meta description: [treść]"""
 
@@ -282,7 +271,7 @@ missing = [k for k in required_akeneo_secrets if k not in st.secrets]
 if missing:
     st.warning(f"⚠️ Brak konfiguracji Akeneo w secrets: {', '.join(missing)}. Wysyłka do PIM będzie niedostępna.")
 
-client = OpenAI() # Zgodnie z dokumentacją, klucz jest pobierany automatycznie ze zmiennej środowiskowej/sekretów
+client = OpenAI()
 
 # ------------- UI ------------- #
 st.title('📚 Inteligentny Generator Opisów Produktów')
@@ -347,16 +336,16 @@ with col1:
                     st.text_area("Opis", (full_desc[:500] + "...") if len(full_desc) > 500 else full_desc, height=150, disabled=True)
                 
                 with st.spinner("Analizuję produkt i generuję opis... To może chwilę potrwać."):
-                    st.info("Krok 1: Identyfikacja kategorii i tworzenie dedykowanego promptu...")
-                    dynamic_prompt = generate_dynamic_prompt(book_data, client)
+                    st.info("Krok 1: Identyfikacja kategorii i tworzenie briefu...")
+                    generated_brief = generate_brief(book_data, client)
                     
-                    if not dynamic_prompt:
-                        st.error("❌ Nie udało się wygenerować dynamicznego promptu. Przerwanie operacji.")
+                    if not generated_brief:
+                        st.error("❌ Nie udało się wygenerować briefu. Przerwanie operacji.")
                     else:
-                        st.session_state['dynamic_prompt'] = dynamic_prompt
+                        st.session_state['generated_brief'] = generated_brief
                         
-                        st.info("Krok 2: Generowanie opisu na podstawie nowego promptu...")
-                        generated_desc_raw = generate_description(book_data, dynamic_prompt, client)
+                        st.info("Krok 2: Generowanie opisu na podstawie briefu...")
+                        generated_desc_raw = generate_description(book_data, generated_brief, client)
                         generated_desc = strip_code_fences(generated_desc_raw)
                         
                         if generated_desc:
@@ -378,9 +367,9 @@ with col2:
     if 'generated_description' in st.session_state:
         st.subheader(f"📖 {st.session_state.get('book_title', 'Opis produktu')}")
         
-        if 'dynamic_prompt' in st.session_state:
-            with st.expander("🕵️ Zobacz prompt użyty do generacji"):
-                st.text(st.session_state['dynamic_prompt'])
+        if 'generated_brief' in st.session_state:
+            with st.expander("🕵️ Zobacz brief użyty do generacji"):
+                st.text(st.session_state['generated_brief'])
 
         st.markdown("**Kod HTML:**")
         html_code = st.session_state['generated_description']
