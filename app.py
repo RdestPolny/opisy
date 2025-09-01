@@ -96,7 +96,7 @@ def akeneo_update_description(sku, html_description, channel, locale="pl_PL"):
         detail = r.text
     raise RuntimeError(f"Akeneo zwróciło {r.status_code}: {detail}")
 
-# ------------- POBIERANIE DANYCH ------------- #
+# ------------- POBIERANIE DANYCH (ZAKTUALIZOWANA FUNKCJA) ------------- #
 def get_book_data(url):
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36',
@@ -107,36 +107,53 @@ def get_book_data(url):
         response.raise_for_status()
         soup = bs(response.text, 'html.parser')
 
-        title_tag = soup.find('h1')
-        title = title_tag.get_text(strip=True) if title_tag else ''
+        title = ''
+        details_text = ''
+        description_text = ''
 
-        details_text = ""
-        details_div = soup.find("div", id="szczegoly") or soup.find("div", class_="product-features")
-        if details_div:
-            ul = details_div.find("ul", class_="bullet") or details_div.find("ul")
-            if ul:
-                li_elements = ul.find_all("li")
-                details_list = [li.get_text(separator=" ", strip=True) for li in li_elements]
-                details_text = "\n".join(details_list)
+        # NOWA LOGIKA DLA SMYK.COM
+        if 'smyk.com' in url:
+            title_tag = soup.find('h1', {'data-testid': 'product-name'})
+            title = title_tag.get_text(strip=True) if title_tag else ''
 
-        description_text = ""
-        description_div = soup.find("div", class_="desc-container")
-        if description_div:
-            article = description_div.find("article")
-            if article:
-                nested_article = article.find("article")
-                if nested_article:
-                    description_text = nested_article.get_text(separator="\n", strip=True)
-                else:
-                    description_text = article.get_text(separator="\n", strip=True)
-            else:
+            # Pobieranie opisu z podanej struktury HTML
+            description_div = soup.find("div", {"data-testid": "box-attributes__simple"})
+            if description_div:
                 description_text = description_div.get_text(separator="\n", strip=True)
+            
+            # Na smyk.com szczegóły są częścią głównego opisu, więc `details_text` pozostaje pusty.
 
-        if not description_text:
-            alt_desc_div = soup.find("div", id="product-description")
-            if alt_desc_div:
-                description_text = alt_desc_div.get_text(separator="\n", strip=True)
+        # ISTNIEJĄCA LOGIKA DLA INNYCH STRON
+        else:
+            title_tag = soup.find('h1')
+            title = title_tag.get_text(strip=True) if title_tag else ''
 
+            details_div = soup.find("div", id="szczegoly") or soup.find("div", class_="product-features")
+            if details_div:
+                ul = details_div.find("ul", class_="bullet") or details_div.find("ul")
+                if ul:
+                    li_elements = ul.find_all("li")
+                    details_list = [li.get_text(separator=" ", strip=True) for li in li_elements]
+                    details_text = "\n".join(details_list)
+
+            description_div = soup.find("div", class_="desc-container")
+            if description_div:
+                article = description_div.find("article")
+                if article:
+                    nested_article = article.find("article")
+                    if nested_article:
+                        description_text = nested_article.get_text(separator="\n", strip=True)
+                    else:
+                        description_text = article.get_text(separator="\n", strip=True)
+                else:
+                    description_text = description_div.get_text(separator="\n", strip=True)
+
+            if not description_text:
+                alt_desc_div = soup.find("div", id="product-description")
+                if alt_desc_div:
+                    description_text = alt_desc_div.get_text(separator="\n", strip=True)
+
+        # Wspólne przetwarzanie i zwracanie wyniku
         description_text = " ".join(description_text.split())
 
         if not description_text:
@@ -318,7 +335,7 @@ Przykład formatu:
 <h3>CTA</h3>
 """
 
-prompt_young_adult = """Jako autor opisów w księgarni internetowej, twoim zadaniem jest przygotowanie rzetelnego, zoptymalizowanego opisu produktu o tytule "{book_title}". Oto informacje, na których powinieneś bazować: {book_details} {book_description}. Stwórz angażujący opis w HTML z wykorzystaniem: <h2>, <p>, <b>, <ul>, <li>. Opis powinien:
+prompt_young_adult = """Jako autor opisów w księgarni internetowej, twoim zadaniem jest przygotowanie rzetelnego, zoptymalizowanego opisu produktu o tytule "{book_title}". Oto informacje, na których powinieneś bazować: {book_details} {book_description}. Stwórz angażający opis w HTML z wykorzystaniem: <h2>, <p>, <b>, <ul>, <li>. Opis powinien:
 Zaczyna się od nagłówka <h2> z kreatywnym hasłem, które oddaje emocje i charakter książki oraz odwołuje się do młodszych czytelników i miłośników historii pełnych emocji, przygód i młodzieńczych dylematów.
 1. Zawiera sekcje:
  <p>Wprowadzenie, które przedstawia książkę, jej gatunek (np. young adult fantasy, young adult romance, dystopia, contemporary), ogólną tematykę i klimat (np. pełen emocji, przygód, młodzieńczych rozterek i relacji), główne cechy, takie jak dynamiczna akcja, wyraziste postacie oraz silne emocje. Dodatkowo zaznacz, do jakiego czytelnika jest skierowana — np. dla osób szukających historii, z którymi mogą się utożsamić i które poruszają aktualne, ważne tematy.</p>
@@ -479,7 +496,7 @@ Przykład formatu:
 <h3>CTA</h3>
 """
 
-prompt_biografie = """Jako autor opisów w księgarni internetowej, twoim zadaniem jest przygotowanie rzetelnego, zoptymalizowanego opisu produktu o tytule "{book_title}". Oto informacje, na których powinieneś bazować: {book_details} {book_description}. Stwórz angażający opis w HTML z wykorzystaniem: <h2>, <p>, <b>, <ul>, <li>. Opis powinien:
+prompt_biografie = """Jako autor opisów w księgarni internetowej, twoim zadaniem jest przygotowanie rzetelnego, zoptymalizowanego opisu produktu o tytule "{book_title}". Oto informacje, na których powinieneś bazować: {book_details} {book_description}. Stwórz angażujący opis w HTML z wykorzystaniem: <h2>, <p>, <b>, <ul>, <li>. Opis powinien:
 Zaczyna się od nagłówka <h2> z kreatywnym hasłem, które oddaje emocje i charakter książki oraz odwołuje się do miłośników historii prawdziwych i inspirujących opowieści.
 1. Zawiera sekcje:
  <p>Wprowadzenie, które przedstawia książkę, jej gatunek (biografia, autobiografia, wspomnienia), ogólną tematykę i klimat (np. inspirujący, motywujący, szczery), główne cechy, takie jak autentyczność historii, dokładność przedstawienia faktów, osobisty charakter opowieści. Dodatkowo zaznacz, do jakiego czytelnika jest skierowana — np. dla osób szukających prawdziwych historii pełnych wartościowych lekcji i inspiracji.</p>
