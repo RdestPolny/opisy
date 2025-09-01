@@ -168,7 +168,7 @@ def generate_brief(product_data, client):
 1. **Struktura HTML:** Brief musi nakazać copywriterowi użycie następującej struktury:
     - Nagłówek `<h2>` z chwytliwym hasłem.
     - Kilka akapitów `<p>` opisujących produkt.
-    - Wyróżnienia `<b>` dla kluczowych fraz.
+    - Wyróżnienia `<b>` dla kluczowych fraz w treści (nie używaj '*' do pogrubień).
     - Nagłówek `<h3>` z wezwaniem do działania (Call To Action).
 2. **Ton i styl:** Brief musi określić ton i styl opisu dopasowany do kategorii i odbiorców (np. emocjonalny dla romansu, pełen napięcia dla kryminału, przyjazny dla zabawek).
 3. **Wykorzystanie danych:** W briefie umieść instrukcję dla copywritera, aby bazował na dostarczonych mu później tytule, szczegółach i opisie produktu. **WAŻNE: NIE umieszczaj w briefie placeholderów typu `{{book_title}}`.**
