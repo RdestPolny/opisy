@@ -179,7 +179,7 @@ def generate_description(book_data, prompt_template, client):
             temperature=0.7,
             max_tokens=2000
         )
-        return response.choices.message.content
+        return response.choices[0].message.content
     except Exception as e:
         st.error(f"Błąd generowania opisu: {str(e)}")
         return ""
@@ -202,7 +202,7 @@ Meta description: [treść]"""
             temperature=0.7,
             max_tokens=200
         )
-        result = response.choices.message.content
+        result = response.choices[0].message.content
         meta_title = ""
         meta_description = ""
         for line in result.splitlines():
@@ -276,7 +276,7 @@ Zaczyna się od nagłówka <h2> z kreatywnym hasłem, które oddaje emocje i cha
 - Unikaj powtórzeń
 - Zachowaj spójność tonu
 5. Osoba do której kierowany jest opis:
-Opis książki kierowany jest do dorosłego czytelnika, który uwielbia rozwiązywać zagadki i zanurzać się w historie pełne intryg oraz nieoczywistych zwrotów akcji. To osoba ciekawska, poszukująca książek, które odrywają ją od codzienności i pozwalają wejść w mroczny, pełen sekretów świat. Ceni wciągającą, dynamiczną fabułę oraz głęboką psychologię postaci, dzięki której może śledzić motywacje bohaterów i zgłębiać ich moralne dylematy. Czytelnik ten oczekuje od kryminału intensywnych emocji, napięcia i poczucia uczestnictwa w niebezpiecznej, ale fascynującej grze.
+Opis książki kierowany jest do dorosłego czytelnika, który uwielbia rozwiązywać zagadki i zanurzać się w historie pełne intryg oraz nieoczywistych zwrotów akcji. To osoba ciekawska, poszukująca książek, które odrywają ją od codzienności i pozwalają wejsć w mroczny, pełen sekretów świat. Ceni wciągającą, dynamiczną fabułę oraz głęboką psychologię postaci, dzięki której może śledzić motywacje bohaterów i zgłębiać ich moralne dylematy. Czytelnik ten oczekuje od kryminału intensywnych emocji, napięcia i poczucia uczestnictwa w niebezpiecznej, ale fascynującej grze.
 Przykład formatu:
 <h2>nagłówek</h2>
 <p>dwa akapity</p>
@@ -400,7 +400,7 @@ Zaczyna się od nagłówka <h2> z kreatywnym hasłem, które oddaje emocje i cha
 - Nie używaj znaczników Markdown, tylko HTML
 - Nie dodawaj komentarzy ani wyjaśnień, tylko sam opis
 4. Styl:
-- Opis powinien być angażujący, pełen emocji i obrazowy
+- Opis powinien być angażający, pełen emocji i obrazowy
 - Używaj języka, który pobudza wyobraźnię, buduje atmosferę przygody i magii
 - Akcentuj unikalność świata przedstawionego, niezwykłość bohaterów i epickość opowieści
 - Unikaj ogólników — skup się na konkretnych elementach świata, magii czy konfliktach (jeśli masz takie informacje)
@@ -595,7 +595,7 @@ st.markdown("---")
 
 st.sidebar.header("🎯 Ustawienia")
 prompt_keys = list(prompts.keys())
-default_prompt = st.session_state.selected_prompt if st.session_state.selected_prompt in prompt_keys else prompt_keys
+default_prompt = st.session_state.selected_prompt if st.session_state.selected_prompt in prompt_keys else prompt_keys[0]
 
 selected_prompt = st.sidebar.selectbox(
     "Wybierz kategorię produktu:",
@@ -614,7 +614,7 @@ locale = st.sidebar.text_input(
     value=st.secrets.get("AKENEO_DEFAULT_LOCALE", "pl_PL")
 )
 
-col1, col2 = st.columns()
+col1, col2 = st.columns([1, 1])
 
 with col1:
     st.header("📝 Dane wejściowe")
@@ -631,7 +631,7 @@ with col1:
 
     generate_meta = st.checkbox("Generuj meta title i meta description", value=False)
 
-    col_btn1, col_btn2 = st.columns()
+    col_btn1, col_btn2 = st.columns([1, 1])
     with col_btn1:
         generate_button = st.button("🚀 Generuj opis", type="primary", use_container_width=True)
     with col_btn2:
@@ -734,4 +734,4 @@ with col2:
 # ------------- STOPKA ------------- #
 st.markdown("---")
 st.markdown("🔧 **Narzędzie do generowania opisów produktów** | Wykorzystuje OpenAI GPT-4o-mini")
-st.markdown("💡 **Wskazówka:** Wybierz odpowiednią kategorię z menu bocznego dla najlepszych rezultatów")
+st.markdown("💡 **Wskazówka:** Wybierz odpowiednią kategorię z menu bocznego dla najlepszych rezultatów")```
