@@ -59,33 +59,44 @@ def akeneo_product_exists(sku, token):
 
 def akeneo_update_description(sku, html_description, channel, locale="pl_PL"):
     token = akeneo_get_token()
+
+    # nie tworzymy nowego produktu – tylko update istniejącego
     if not akeneo_product_exists(sku, token):
         raise ValueError(f"Produkt o SKU '{sku}' nie istnieje w Akeneo.")
+
+    # sprawdź konfigurację atrybutu, żeby poprawnie ustawić scope/locale
     attr = akeneo_get_attribute("description", token)
     is_scopable = bool(attr.get("scopable", False))
     is_localizable = bool(attr.get("localizable", False))
+
     value_obj = {
         "data": html_description,
+        # Dla atrybutu scopable wymagany jest scope; dla nie-scopable -> null
         "scope": channel if is_scopable else None,
+        # Dla atrybutu nie-lokalizowalnego locale MUSI być null
         "locale": locale if is_localizable else None,
     }
+
     url = _akeneo_root() + f"/api/rest/v1/products/{sku}"
     payload = {"values": {"description": [value_obj]}}
+
     headers = {
         "Authorization": f"Bearer {token}",
         "Content-Type": "application/json",
         "Accept": "application/json",
     }
     r = requests.patch(url, headers=headers, data=json.dumps(payload), timeout=30)
+
     if r.status_code in (200, 204):
         return True
+
     try:
         detail = r.json()
     except Exception:
         detail = r.text
     raise RuntimeError(f"Akeneo zwróciło {r.status_code}: {detail}")
 
-# ------------- POBIERANIE DANYCH (ULEPSZONA WERSJA) ------------- #
+# ------------- POBIERANIE DANYCH ------------- #
 def get_book_data(url):
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36',
@@ -96,47 +107,36 @@ def get_book_data(url):
         response.raise_for_status()
         soup = bs(response.text, 'html.parser')
 
-        # --- Wyszukiwanie tytułu (próba kilku metod) ---
-        title = ''
-        title_tag = soup.find('h1', {'data-testid': 'product-name'}) or soup.find('h1')
-        if title_tag:
-            title = title_tag.get_text(strip=True)
+        title_tag = soup.find('h1')
+        title = title_tag.get_text(strip=True) if title_tag else ''
 
-        # --- Wyszukiwanie opisu (próba kilku metod w kolejności) ---
-        description_text = ""
-        
-        # Metoda 1: Nowa struktura (np. Smyk) oparta na data-testid
-        desc_div = soup.find("div", {"data-testid": "box-attributes__simple"})
-        if desc_div:
-            description_text = desc_div.get_text(separator="\n", strip=True)
-        
-        # Metoda 2: Starsza struktura (np. Tania Książka) oparta na klasie "desc-container"
-        if not description_text:
-            desc_div = soup.find("div", class_="desc-container")
-            if desc_div:
-                article = desc_div.find("article")
-                if article:
-                    nested_article = article.find("article")
-                    description_text = (nested_article or article).get_text(separator="\n", strip=True)
-                else:
-                    description_text = desc_div.get_text(separator="\n", strip=True)
-
-        # Metoda 3: Inna struktura oparta na ID "product-description"
-        if not description_text:
-            desc_div = soup.find("div", id="product-description")
-            if desc_div:
-                description_text = desc_div.get_text(separator="\n", strip=True)
-        
-        # --- Wyszukiwanie szczegółów (opcjonalne, jeśli istnieją) ---
         details_text = ""
         details_div = soup.find("div", id="szczegoly") or soup.find("div", class_="product-features")
         if details_div:
             ul = details_div.find("ul", class_="bullet") or details_div.find("ul")
             if ul:
-                details_list = [li.get_text(separator=" ", strip=True) for li in ul.find_all("li")]
+                li_elements = ul.find_all("li")
+                details_list = [li.get_text(separator=" ", strip=True) for li in li_elements]
                 details_text = "\n".join(details_list)
 
-        # Wspólne przetwarzanie i zwracanie wyniku
+        description_text = ""
+        description_div = soup.find("div", class_="desc-container")
+        if description_div:
+            article = description_div.find("article")
+            if article:
+                nested_article = article.find("article")
+                if nested_article:
+                    description_text = nested_article.get_text(separator="\n", strip=True)
+                else:
+                    description_text = article.get_text(separator="\n", strip=True)
+            else:
+                description_text = description_div.get_text(separator="\n", strip=True)
+
+        if not description_text:
+            alt_desc_div = soup.find("div", id="product-description")
+            if alt_desc_div:
+                description_text = alt_desc_div.get_text(separator="\n", strip=True)
+
         description_text = " ".join(description_text.split())
 
         if not description_text:
@@ -144,9 +144,8 @@ def get_book_data(url):
                 'title': title,
                 'details': details_text,
                 'description': '',
-                'error': "Nie udało się pobrać opisu produktu. Sprawdź strukturę HTML strony."
+                'error': "Nie udało się pobrać opisu produktu. Zatrzymuję przetwarzanie."
             }
-            
         return {
             'title': title,
             'details': details_text,
@@ -276,7 +275,7 @@ Zaczyna się od nagłówka <h2> z kreatywnym hasłem, które oddaje emocje i cha
 - Unikaj powtórzeń
 - Zachowaj spójność tonu
 5. Osoba do której kierowany jest opis:
-Opis książki kierowany jest do dorosłego czytelnika, który uwielbia rozwiązywać zagadki i zanurzać się w historie pełne intryg oraz nieoczywistych zwrotów akcji. To osoba ciekawska, poszukująca książek, które odrywają ją od codzienności i pozwalają wejsć w mroczny, pełen sekretów świat. Ceni wciągającą, dynamiczną fabułę oraz głęboką psychologię postaci, dzięki której może śledzić motywacje bohaterów i zgłębiać ich moralne dylematy. Czytelnik ten oczekuje od kryminału intensywnych emocji, napięcia i poczucia uczestnictwa w niebezpiecznej, ale fascynującej grze.
+Opis książki kierowany jest do dorosłego czytelnika, który uwielbia rozwiązywać zagadki i zanurzać się w historie pełne intryg oraz nieoczywistych zwrotów akcji. To osoba ciekawska, poszukująca książek, które odrywają ją od codzienności i pozwalają wejść w mroczny, pełen sekretów świat. Ceni wciągającą, dynamiczną fabułę oraz głęboką psychologię postaci, dzięki której może śledzić motywacje bohaterów i zgłębiać ich moralne dylematy. Czytelnik ten oczekuje od kryminału intensywnych emocji, napięcia i poczucia uczestnictwa w niebezpiecznej, ale fascynującej grze.
 Przykład formatu:
 <h2>nagłówek</h2>
 <p>dwa akapity</p>
@@ -400,7 +399,7 @@ Zaczyna się od nagłówka <h2> z kreatywnym hasłem, które oddaje emocje i cha
 - Nie używaj znaczników Markdown, tylko HTML
 - Nie dodawaj komentarzy ani wyjaśnień, tylko sam opis
 4. Styl:
-- Opis powinien być angażający, pełen emocji i obrazowy
+- Opis powinien być angażujący, pełen emocji i obrazowy
 - Używaj języka, który pobudza wyobraźnię, buduje atmosferę przygody i magii
 - Akcentuj unikalność świata przedstawionego, niezwykłość bohaterów i epickość opowieści
 - Unikaj ogólników — skup się na konkretnych elementach świata, magii czy konfliktach (jeśli masz takie informacje)
@@ -480,7 +479,7 @@ Przykład formatu:
 <h3>CTA</h3>
 """
 
-prompt_biografie = """Jako autor opisów w księgarni internetowej, twoim zadaniem jest przygotowanie rzetelnego, zoptymalizowanego opisu produktu o tytule "{book_title}". Oto informacje, na których powinieneś bazować: {book_details} {book_description}. Stwórz angażujący opis w HTML z wykorzystaniem: <h2>, <p>, <b>, <ul>, <li>. Opis powinien:
+prompt_biografie = """Jako autor opisów w księgarni internetowej, twoim zadaniem jest przygotowanie rzetelnego, zoptymalizowanego opisu produktu o tytule "{book_title}". Oto informacje, na których powinieneś bazować: {book_details} {book_description}. Stwórz angażający opis w HTML z wykorzystaniem: <h2>, <p>, <b>, <ul>, <li>. Opis powinien:
 Zaczyna się od nagłówka <h2> z kreatywnym hasłem, które oddaje emocje i charakter książki oraz odwołuje się do miłośników historii prawdziwych i inspirujących opowieści.
 1. Zawiera sekcje:
  <p>Wprowadzenie, które przedstawia książkę, jej gatunek (biografia, autobiografia, wspomnienia), ogólną tematykę i klimat (np. inspirujący, motywujący, szczery), główne cechy, takie jak autentyczność historii, dokładność przedstawienia faktów, osobisty charakter opowieści. Dodatkowo zaznacz, do jakiego czytelnika jest skierowana — np. dla osób szukających prawdziwych historii pełnych wartościowych lekcji i inspiracji.</p>
@@ -710,6 +709,7 @@ with col2:
             st.code(meta_code, language='html')
 
         st.markdown("---")
+        # --- wysyłka do PIM ---
         pim_disabled = len(missing) > 0 if 'missing' in locals() else False
         if st.button("✅ Zaakceptuj i wyślij do PIM", use_container_width=True, type="primary", disabled=pim_disabled):
             if pim_disabled:
@@ -734,4 +734,4 @@ with col2:
 # ------------- STOPKA ------------- #
 st.markdown("---")
 st.markdown("🔧 **Narzędzie do generowania opisów produktów** | Wykorzystuje OpenAI GPT-4o-mini")
-st.markdown("💡 **Wskazówka:** Wybierz odpowiednią kategorię z menu bocznego dla najlepszych rezultatów")```
+st.markdown("💡 **Wskazówka:** Wybierz odpowiednią kategorię z menu bocznego dla najlepszych rezultatów")
