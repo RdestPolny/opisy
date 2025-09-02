@@ -156,14 +156,14 @@ def generate_brief(product_data, client):
         title = product_data.get('title', '')
         description = product_data.get('description', '')
         
-system_prompt = """
+        system_prompt = """
 Jesteś content managerem w sklepie internetowym. 
 Na podstawie danych produktu przygotowujesz profesjonalny brief dla copywritera, 
 który posłuży mu do stworzenia atrakcyjnego i dopasowanego opisu produktu.
 Brief ma być kompletny, spójny i gotowy do użycia, bez placeholderów i komentarzy technicznych.
 """
 
-user_prompt = f"""
+        user_prompt = f"""
 # Rola i cel
 - Przeanalizuj dane produktu i wygeneruj brief dla copywritera.
 
