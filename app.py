@@ -177,8 +177,7 @@ Brief ma być kompletny, spójny i gotowy do użycia, bez placeholderów i komen
 5. **Ton i styl**: określ styl narracji dopasowany do kategorii i odbiorców 
    (np. emocjonalny dla romansu, pełen napięcia dla kryminału, edukacyjny i przyjazny dla zabawek, dynamiczny dla gier planszowych).
 6. **SEO**: zaproponuj główne i dodatkowe frazy kluczowe, które naturalnie pasują do produktu i jego kategorii.
-7. **Wizualia**: podaj sugestie do ALT tekstów obrazów (np. „okładka książki”, „plansza gry”, „detal zabawki”).
-8. **Compliance**: wskaż sformułowania, których należy unikać (np. „najlepszy”, „100% gwarancji”).
+7. **Compliance**: wskaż sformułowania, których należy unikać (np. „najlepszy”, „100% gwarancji”).
 
 # Format wyjściowy
 - Zwróć wyłącznie treść briefu jako spójny tekst, bez nagłówków typu #, bez komentarzy, bez placeholderów.
