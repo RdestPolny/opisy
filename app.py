@@ -156,37 +156,46 @@ def generate_brief(product_data, client):
         title = product_data.get('title', '')
         description = product_data.get('description', '')
         
-        system_prompt = "Jesteś ekspertem-analitykiem e-commerce. Twoim jedynym zadaniem jest analiza danych produktu i wygenerowanie na ich podstawie klarownego, ustrukturyzowanego briefu dla copywritera AI."
-        
-        user_prompt = f"""
-# Rola i Cel
-- Przeanalizuj dane produktu e-commerce i wygeneruj profesjonalny brief dla AI copywritera.
-# Instrukcje
-- Zidentyfikuj kategorię produktu (np. książka – romans, kryminał; zabawka edukacyjna; gra planszowa).
-- Stwórz brief, który posłuży do wygenerowania kompletnego, atrakcyjnego opisu produktu w HTML.
-# Wymagania dotyczące briefu, który stworzysz
-1. **Struktura HTML:** Brief musi nakazać copywriterowi użycie następującej struktury:
-    - Nagłówek `<h2>` z chwytliwym hasłem.
-    - Kilka akapitów `<p>` opisujących produkt.
-    - Wyróżnienia `<b>` dla kluczowych fraz w treści (nie używaj '*' do pogrubień).
-    - Nagłówek `<h3>` z wezwaniem do działania (Call To Action).
-2. **Ton i styl:** Brief musi określić ton i styl opisu dopasowany do kategorii i odbiorców (np. emocjonalny dla romansu, pełen napięcia dla kryminału, przyjazny dla zabawek).
-3. **Wykorzystanie danych:** W briefie umieść instrukcję dla copywritera, aby bazował na dostarczonych mu później tytule, szczegółach i opisie produktu. **WAŻNE: NIE umieszczaj w briefie placeholderów typu `{{book_title}}`.**
-4. **Język:** Brief musi kategorycznie nakazać copywriterowi pisanie wyłącznie w języku polskim, bez mieszania języków.
-5. **Format wyjściowy:** Zwróć tylko i wyłącznie tekst briefu, bez dodatkowych komentarzy, nagłówków czy formatowania.
-# Kontekst
-- Dane produktu do analizy:
-- Tytuł: "{title}"
-- Opis: "{description[:1000]}..."
+system_prompt = """
+Jesteś content managerem w sklepie internetowym. 
+Na podstawie danych produktu przygotowujesz profesjonalny brief dla copywritera, 
+który posłuży mu do stworzenia atrakcyjnego i dopasowanego opisu produktu.
+Brief ma być kompletny, spójny i gotowy do użycia, bez placeholderów i komentarzy technicznych.
 """
+
+user_prompt = f"""
+# Rola i cel
+- Przeanalizuj dane produktu i wygeneruj brief dla copywritera.
+
+# Instrukcje
+1. **Najpierw ustal typ produktu**: 
+   - Jeśli to książka → skup się na gatunku literackim, klimacie, grupie docelowej i tonie narracji. 
+   - Jeśli to inny produkt (np. zabawka, gra planszowa) → uwzględnij materiały, funkcje, zastosowania oraz unikalne cechy.
+2. **Kategoria i podkategoria**: określ jednoznacznie, gdzie produkt się mieści (np. „książka – kryminał”, „zabawka edukacyjna”, „gra planszowa rodzinna”).
+3. **Grupa docelowa**: zdefiniuj odbiorców (wiek, zainteresowania, potrzeby, bariery zakupu).
+4. **USP**: wskaż najważniejsze wyróżniki i korzyści (np. fabuła i emocje w książce; funkcje i bezpieczeństwo w zabawce; mechanika rozgrywki w grze).
+5. **Ton i styl**: określ styl narracji dopasowany do kategorii i odbiorców 
+   (np. emocjonalny dla romansu, pełen napięcia dla kryminału, edukacyjny i przyjazny dla zabawek, dynamiczny dla gier planszowych).
+6. **SEO**: zaproponuj główne i dodatkowe frazy kluczowe, które naturalnie pasują do produktu i jego kategorii.
+7. **Wizualia**: podaj sugestie do ALT tekstów obrazów (np. „okładka książki”, „plansza gry”, „detal zabawki”).
+8. **Compliance**: wskaż sformułowania, których należy unikać (np. „najlepszy”, „100% gwarancji”).
+
+# Format wyjściowy
+- Zwróć wyłącznie treść briefu jako spójny tekst, bez nagłówków typu #, bez komentarzy, bez placeholderów.
+
+# Dane produktu do analizy
+- Tytuł: "{title}"
+- Opis: "{description[:2000]}..."
+"""
+
 
         full_input = f"{system_prompt}\n\n{user_prompt}"
         
         response = client.responses.create(
             model="gpt-5-nano",
             input=full_input,
-            reasoning={"effort": "minimal"},
-            text={"verbosity": "low"}
+            reasoning={"effort": "medium"},
+            text={"verbosity": "medium"}
         )
         return response.output_text
     except Exception as e:
@@ -202,7 +211,11 @@ def generate_description(book_data, generated_brief, client):
 
 --- KRYTYCZNE ZASADY ---
 1.  **JĘZYK:** Używaj WYŁĄCZNIE języka polskiego. Absolutnie nie wolno mieszać języków ani wstawiać pojedynczych słów z rosyjskiego, ukraińskiego czy jakiegokolwiek innego języka (poza angielskim). Cały tekst musi być w 100% po polsku.
-2.  **FORMAT:** Zwróć wyłącznie gotowy kod HTML, zgodnie ze strukturą opisaną w briefie.
+2.  **FORMAT:** Zwróć wyłącznie gotowy kod HTML, zgodnie z poniższą strukturą:
+    - Akapit wstępu <p> nakreślający to czym jest dany produkt - sedno sprawy, prowadzące do dalszej części opisu. 
+    - Nagłówek `<h2>` z chwytliwym hasłem.
+    - Kilka akapitów `<p>` opisujących produkt (użyj <b> w tych akapitach aby pogrubić kluczowe informacje i frazy wspierające SEO, zwróć przy tym uwagę, aby pogrubienia nie pojawiały się za gęsto).
+    - Nagłówek `<h3>` z wezwaniem do działania (Call To Action).
 3.  **ZADANIE:** Twoim zadaniem jest napisanie opisu, a NIE komentowanie briefu. Nie pisz o tym, co robisz. Po prostu wykonaj polecenia."""
 
         raw_data_context = f"""
@@ -217,7 +230,7 @@ Oryginalny opis od wydawcy/producenta: {book_data.get('description', '')}
         response = client.responses.create(
             model="gpt-5-nano",
             input=full_input,
-            reasoning={"effort": "low"},
+            reasoning={"effort": "medium"},
             text={"verbosity": "medium"}
         )
         return response.output_text
