@@ -216,8 +216,9 @@ def generate_description(book_data, generated_brief, client):
     - Kilka akapitów `<p>` opisujących produkt (użyj <b> w tych akapitach aby pogrubić kluczowe informacje i frazy wspierające SEO, zwróć przy tym uwagę, aby pogrubienia nie pojawiały się za gęsto).
     - Nagłówek `<h3>` z wezwaniem do działania (Call To Action).
     Ważne: nie rób infodumpu na końcu opisu (podawanie danych technicznych typu wydawnictwo, autor, oprawa itd.). Używaj takich informacji tylko w treści jeśli to istotne, ale nie rób podsumowania atrybutów/szczegółów w formie dumpu.
-3.  **ZADANIE:** Twoim zadaniem jest napisanie opisu, a NIE komentowanie briefu. Nie pisz o tym, co robisz. Po prostu wykonaj polecenia."""
+3.  **ZADANIE:** Twoim zadaniem jest napisanie opisu, a NIE komentowanie briefu. Nie pisz o tym, co robisz. Po prostu wykonaj polecenia.
 4. Ważne - nie wychodź z np. opisem fabuły poza to, co otrzymałeś w inpucie, żeby nie popełnić błędów fabularnych.
+"""
         raw_data_context = f"""
 --- DANE PRODUKTU DO WYKORZYSTANIA ---
 Tytuł: {book_data.get('title', '')}
