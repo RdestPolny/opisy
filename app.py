@@ -6,10 +6,12 @@ import time
 from openai import OpenAI
 import json
 import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # ------------- USTAWIENIA STRONY ------------- #
-st.set_page_config(page_title="Generator opisów książek", page_icon="📚", layout="wide")
+st.set_page_config(page_title="Generator opisów produktów", page_icon="📚", layout="wide")
 
+# ------------- FUNKCJE POMOCNICZE ------------- #
 def strip_code_fences(text: str) -> str:
     if not text:
         return text
@@ -20,7 +22,7 @@ def strip_code_fences(text: str) -> str:
     text = re.sub(r"\s*```\s*$", "", text)
     return text.strip()
 
-# ------------- AKENEO API (bez zmian) ------------- #
+# ------------- AKENEO API ------------- #
 def akeneo_get_attribute(code, token):
     url = _akeneo_root() + f"/api/rest/v1/attributes/{code}"
     r = requests.get(url, headers={"Authorization": f"Bearer {token}"}, timeout=30)
@@ -82,7 +84,7 @@ def akeneo_update_description(sku, html_description, channel, locale="pl_PL"):
         detail = r.text
     raise RuntimeError(f"Akeneo zwróciło {r.status_code}: {detail}")
 
-# ------------- POBIERANIE DANYCH (bez zmian) ------------- #
+# ------------- POBIERANIE DANYCH ------------- #
 def get_book_data(url):
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36',
@@ -99,7 +101,6 @@ def get_book_data(url):
         details_text = ""
         description_text = ""
 
-        # Logika specyficzna dla smyk.com
         if 'smyk.com' in url:
             smyk_desc_div = soup.find("div", attrs={"data-testid": "box-attributes__simple"})
             if smyk_desc_div:
@@ -124,7 +125,6 @@ def get_book_data(url):
                 if attributes_list:
                     details_text = "\n".join(attributes_list)
         
-        # Stara logika (jeśli nie znaleziono opisu dla Smyka lub to inna strona)
         if not description_text:
             details_div = soup.find("div", id="szczegoly") or soup.find("div", class_="product-features")
             if details_div:
@@ -168,11 +168,8 @@ def get_book_data(url):
             'error': f"Błąd pobierania: {str(e)}"
         }
 
-# ------------- ZMODYFIKOWANA LOGIKA GENEROWANIA OPISU (JEDEN KROK) ------------- #
+# ------------- LOGIKA GENEROWANIA ------------- #
 def generate_description(product_data, client):
-    """
-    Generuje opis produktu w jednym kroku, analizując produkt i dostosowując styl.
-    """
     try:
         system_prompt = """Jesteś światowej klasy copywriterem e-commerce, specjalizującym się w tworzeniu angażujących, czytelnych i zoptymalizowanych pod SEO opisów produktów.
 
@@ -186,33 +183,11 @@ Twoim pierwszym zadaniem jest **wewnętrzna analiza** dostarczonych danych, aby 
 Po tej analizie, stwórz opis produktu, bezwzględnie przestrzegając poniższych zasad.
 
 --- KRYTYCZNE ZASADY, KTÓRYCH MUSISZ ZAWSZE PRZESTRZEGAĆ ---
-
-1.  **JĘZYK I POPRAWNOŚĆ:**
-    -   Używaj WYŁĄCZNIE nienagannej polszczyzny. Dbaj o gramatykę, ortografię i interpunkcję. Tekst musi być absolutnie wolny od literówek i błędów.
-    -   Absolutnie nie wolno wstawiać zwrotów w innych językach. Cały tekst musi być po polsku.
-
-2.  **STRUKTURA I FORMAT HTML:**
-    -   Zwróć wyłącznie gotowy kod HTML, bez żadnych dodatkowych komentarzy czy wyjaśnień.
-    -   Zastosuj poniższą strukturę:
-        -   `<p>`: Krótki, chwytliwy akapit wprowadzający (2-3 zdania).
-        -   `<h2>`: Pierwszy nagłówek, który rozwija myśl z wprowadzenia.
-        -   `<p>`: 1-2 krótkie akapity (maks. 3-4 zdania każdy).
-        -   `<h2>`: Drugi, inny nagłówek, wprowadzający kolejny aspekt produktu.
-        -   `<p>`: 1-2 krótkie akapity (maks. 3-4 zdania każdy).
-        -   `<h3>`: Nagłówek końcowy z wezwaniem do działania (Call To Action).
-    -   Dzielenie tekstu nagłówkami jest OBOWIĄZKOWE.
-
-3.  **ZASADY POGRUBiania (BARDZO WAŻNE!):**
-    -   Używaj tagów `<b>` oszczędnie.
-    -   Pogrubiaj **TYLKO pojedyncze, kluczowe słowa lub bardzo krótkie frazy (2-4 słowa)**.
-    -   **NIGDY nie pogrubiaj całych zdań ani długich fragmentów akapitów.**
-
-4.  **TREŚĆ I UNIKANIE POWTÓRZEŃ:**
-    -   Napisz opis marketingowy, a NIE streszczenie techniczne. Wykorzystaj dane techniczne, aby wpleść je w treść (np. "zabawka od marki Dumel jest idealna dla dzieci powyżej roku"), ale NIE twórz listy atrybutów.
-    -   **Kategorycznie unikaj powtarzania w tekście danych katalogowych takich jak numer ISBN, EAN, wydawnictwo, liczba stron, format, typ oprawy.**
-
-5.  **DŁUGOŚĆ OPISU:**
-    -   Celuj w wyczerpujący, ale zwięzły opis o długości około 1500-2500 znaków.
+1.  **JĘZYK I POPRAWNOŚĆ:** Używaj WYŁĄCZNIE nienagannej polszczyzny. Dbaj o gramatykę, ortografię i interpunkcję.
+2.  **STRUKTURA I FORMAT HTML:** Zwróć wyłącznie gotowy kod HTML. Zastosuj strukturę: <p> (wstęp), <h2>, <p>, <h2>, <p>, <h3> (CTA). Dzielenie tekstu nagłówkami jest OBOWIĄZKOWE.
+3.  **ZASADY POGRUBiania (BARDZO WAŻNE!):** Używaj tagów `<b>` oszczędnie. Pogrubiaj **TYLKO pojedyncze, kluczowe słowa lub bardzo krótkie frazy (2-4 słowa)**. **NIGDY nie pogrubiaj całych zdań.**
+4.  **TREŚĆ I UNIKANIE POWTÓRZEŃ:** Napisz opis marketingowy, a NIE streszczenie techniczne. Wykorzystaj dane techniczne, aby wpleść je w treść, ale NIE twórz listy atrybutów. **Kategorycznie unikaj powtarzania w tekście danych katalogowych jak numer ISBN, EAN, itp.**
+5.  **DŁUGOŚĆ OPISU:** Celuj w opis o długości około 1500-2500 znaków.
 """
         raw_data_context = f"""
 --- DANE PRODUKTU DO ANALIZY I OPISANIA ---
@@ -220,19 +195,17 @@ Tytuł: {product_data.get('title', '')}
 Szczegóły techniczne (do inspiracji, nie kopiowania): {product_data.get('details', '')}
 Oryginalny opis (główne źródło informacji): {product_data.get('description', '')}
 """
-        
         full_input = f"{system_prompt}\n\n{raw_data_context}"
 
         response = client.responses.create(
             model="gpt-5-nano",
             input=full_input,
-            reasoning={"effort": "high"}, # Zwiększamy effort, aby AI lepiej przeanalizowało dane
+            reasoning={"effort": "high"},
             text={"verbosity": "medium"}
         )
-        return response.output_text
+        return strip_code_fences(response.output_text)
     except Exception as e:
-        st.error(f"Błąd generowania opisu: {str(e)}")
-        return ""
+        return f"BŁĄD GENEROWANIA: {str(e)}"
 
 def generate_meta_tags(product_data, client):
     try:
@@ -269,11 +242,32 @@ Meta description: [treść]"""
         st.error(f"Błąd generowania metatagów: {str(e)}")
         return "", ""
 
-# ------------- INICJALIZACJA STANU ------------- #
+# ------------- FUNKCJA DO PRZETWARZANIA RÓWNOLEGŁEGO ------------- #
+def process_single_url(url, sku, client):
+    """
+    Kompletny proces dla jednego URL: pobranie danych i wygenerowanie opisu.
+    Zaprojektowana do działania w osobnym wątku.
+    """
+    try:
+        product_data = get_book_data(url)
+        if product_data['error']:
+            return {'url': url, 'sku': sku, 'title': product_data.get('title', ''), 'description_html': '', 'error': product_data['error']}
+
+        description_html = generate_description(product_data, client)
+        if "BŁĄD GENEROWANIA:" in description_html:
+             return {'url': url, 'sku': sku, 'title': product_data.get('title', ''), 'description_html': '', 'error': description_html}
+
+        return {'url': url, 'sku': sku, 'title': product_data.get('title', ''), 'description_html': description_html, 'error': None}
+    except Exception as e:
+        return {'url': url, 'sku': sku, 'title': '', 'description_html': '', 'error': f"Nieoczekiwany błąd w wątku: {str(e)}"}
+
+
+# ------------- INICJALIZACJA STANU I WALIDACJA ------------- #
 if 'show_preview' not in st.session_state:
     st.session_state.show_preview = False
+if 'batch_results' not in st.session_state:
+    st.session_state.batch_results = []
 
-# ------------- WALIDACJA SEKRETÓW ------------- #
 if "OPENAI_API_KEY" not in st.secrets:
     st.error("❌ Brak klucza API OpenAI w secrets. Skonfiguruj OPENAI_API_KEY.")
     st.stop()
@@ -287,142 +281,179 @@ client = OpenAI()
 
 # ------------- UI ------------- #
 st.title('📚 Inteligentny Generator Opisów Produktów')
-st.markdown("---")
 
-st.sidebar.header("🎯 Ustawienia")
-channel = st.sidebar.selectbox(
-    "Kanał (scope) do zapisu w PIM:",
-    ["Bookland", "B2B"],
-    index=0
-)
-locale = st.sidebar.text_input(
-    "Locale:",
-    value=st.secrets.get("AKENEO_DEFAULT_LOCALE", "pl_PL")
-)
-st.sidebar.info("Aplikacja automatycznie wykryje kategorię produktu i dostosuje styl opisu.")
+tab1, tab2 = st.tabs(["👤 Pojedynczy produkt", "🗂️ Przetwarzanie wsadowe"])
 
-col1, col2 = st.columns([1, 1])
+# --- ZAKŁADKA 1: TRYB POJEDYNCZY ---
+with tab1:
+    col1, col2 = st.columns([1, 1])
+    with col1:
+        st.header("📝 Dane wejściowe")
+        url_single = st.text_input("URL strony produktu:", placeholder="https://przyklad.com/ksiazka-lub-gra", key="url_single")
+        sku_single = st.text_input("SKU w PIM (identifier):", placeholder="np. BL-12345", key="sku_single")
 
-with col1:
-    st.header("📝 Dane wejściowe")
-    url = st.text_input(
-        "URL strony produktu:",
-        placeholder="https://przyklad.com/ksiazka-lub-gra",
-        help="Wklej pełny URL strony produktu"
-    )
-    sku = st.text_input(
-        "SKU w PIM (identifier):",
-        placeholder="np. BL-12345",
-        help="Kod identyfikatora produktu w Akeneo"
-    )
+        generate_meta = st.checkbox("Generuj meta title i meta description", value=False, key="meta_single")
+        
+        col_btn1, col_btn2 = st.columns([1, 1])
+        with col_btn1:
+            generate_button = st.button("🚀 Generuj opis", type="primary", use_container_width=True, key="gen_single")
+        with col_btn2:
+            if st.button("🔄 Wyczyść", use_container_width=True, key="clear_single"):
+                keys_to_clear = ['generated_description', 'book_title', 'meta_title', 'meta_description', 'show_preview']
+                for key in keys_to_clear:
+                    if key in st.session_state:
+                        del st.session_state[key]
+                st.rerun()
 
-    generate_meta = st.checkbox("Generuj meta title i meta description", value=False)
+        if generate_button:
+            if not url_single:
+                st.error("❌ Podaj URL strony produktu!")
+            else:
+                with st.spinner("Pobieram dane ze strony..."):
+                    book_data = get_book_data(url_single)
+                
+                if book_data['error']:
+                    st.error(f"❌ {book_data['error']}")
+                else:
+                    st.success("✅ Dane pobrane pomyślnie!")
+                    st.subheader("📊 Pobrane dane")
+                    st.write(f"**Tytuł:** {book_data['title']}")
+                    if book_data['description']:
+                        st.text_area("Opis (fragment)", (book_data['description'][:500] + "..."), height=150, disabled=True, key="desc_preview")
+                    if book_data['details']:
+                        with st.expander("Zobacz pobrane szczegóły techniczne"):
+                            st.text(book_data['details'])
+                    
+                    with st.spinner("Analizuję produkt i generuję opis... To może chwilę potrwać."):
+                        generated_desc = generate_description(book_data, client)
+                        
+                        if "BŁĄD GENEROWANIA:" not in generated_desc:
+                            st.session_state['generated_description'] = generated_desc
+                            st.session_state['book_title'] = book_data['title']
+                            st.session_state.show_preview = False
+                            
+                            if generate_meta:
+                                with st.spinner("Generuję metatagi..."):
+                                    meta_title, meta_description = generate_meta_tags(book_data, client)
+                                    st.session_state['meta_title'] = meta_title
+                                    st.session_state['meta_description'] = meta_description
 
-    col_btn1, col_btn2 = st.columns([1, 1])
-    with col_btn1:
-        generate_button = st.button("🚀 Generuj opis", type="primary", use_container_width=True)
-    with col_btn2:
-        if st.button("🔄 Generuj kolejny", use_container_width=True):
-            keys_to_remove = [key for key in st.session_state.keys() if key != 'some_persistent_key']
-            for key in keys_to_remove:
-                del st.session_state[key]
-            st.session_state.show_preview = False
+                            st.success("✅ Opis wygenerowany pomyślnie!")
+                        else:
+                            st.error(f"❌ {generated_desc}")
+
+    with col2:
+        st.header("📄 Wygenerowany opis")
+        if 'generated_description' in st.session_state:
+            st.subheader(f"📖 {st.session_state.get('book_title', 'Opis produktu')}")
+            st.code(st.session_state['generated_description'], language='html')
+
+            if st.button("👁️ Pokaż/Ukryj podgląd", use_container_width=True, key="preview_single"):
+                st.session_state.show_preview = not st.session_state.show_preview
+            if st.session_state.show_preview:
+                st.markdown("**Podgląd:**", help="Podgląd może nie renderować wszystkich stylów CSS.")
+                st.markdown(st.session_state['generated_description'], unsafe_allow_html=True)
+
+            if 'meta_title' in st.session_state and 'meta_description' in st.session_state:
+                st.markdown("---")
+                st.subheader("🏷️ Metatagi SEO")
+                st.write(f"**Meta Title:** {st.session_state['meta_title']}")
+                st.write(f"**Meta Description:** {st.session_state['meta_description']}")
+            
+            st.markdown("---")
+            pim_disabled = len(missing) > 0
+            st.sidebar.header("🎯 Ustawienia PIM")
+            channel = st.sidebar.selectbox("Kanał (scope):", ["Bookland", "B2B"], index=0, key="channel_single")
+            locale = st.sidebar.text_input("Locale:", value=st.secrets.get("AKENEO_DEFAULT_LOCALE", "pl_PL"), key="locale_single")
+            
+            if st.button("✅ Zaakceptuj i wyślij do PIM", use_container_width=True, type="primary", disabled=pim_disabled, key="send_pim_single"):
+                if not sku_single:
+                    st.error("❌ Podaj SKU produktu (identifier) przed wysyłką do PIM.")
+                else:
+                    try:
+                        ok = akeneo_update_description(sku_single.strip(), st.session_state['generated_description'], channel, locale.strip())
+                        if ok:
+                            st.success(f"✅ Opis zapisany w Akeneo dla SKU: {sku_single}")
+                    except Exception as e:
+                        st.error(f"❌ Błąd zapisu do Akeneo: {e}")
+        else:
+            st.info("👈 Podaj URL i kliknij 'Generuj opis' aby rozpocząć")
+
+# --- ZAKŁADKA 2: TRYB WSADOWY ---
+with tab2:
+    st.header("🚀 Przetwarzanie wielu linków jednocześnie")
+    st.info("Wklej linki i odpowiadające im kody SKU, każdy w nowej linii. Upewnij się, że kolejność jest taka sama w obu polach.")
+
+    col_urls, col_skus = st.columns(2)
+    with col_urls:
+        urls_batch = st.text_area("Linki do produktów (jeden na linię)", height=250, placeholder="https://.../produkt1\nhttps://.../produkt2", key="urls_batch")
+    with col_skus:
+        skus_batch = st.text_area("Kody SKU (jeden na linię)", height=250, placeholder="SKU-001\nSKU-002", key="skus_batch")
+    
+    col_b1, col_b2 = st.columns(2)
+    with col_b1:
+        if st.button("🚀 Rozpocznij generowanie wsadowe", type="primary", use_container_width=True, key="gen_batch"):
+            urls = [url.strip() for url in urls_batch.splitlines() if url.strip()]
+            skus = [sku.strip() for sku in skus_batch.splitlines() if sku.strip()]
+
+            if not urls:
+                st.warning("⚠️ Podaj przynajmniej jeden URL.")
+            elif len(urls) != len(skus):
+                st.error(f"❌ Niezgodna liczba linków ({len(urls)}) i SKU ({len(skus)}). Sprawdź listy.")
+            else:
+                st.session_state.batch_results = []
+                data_to_process = list(zip(urls, skus))
+                progress_bar = st.progress(0, text="Rozpoczynam przetwarzanie...")
+                
+                with ThreadPoolExecutor(max_workers=5) as executor:
+                    future_to_data = {executor.submit(process_single_url, url, sku, client): (url, sku) for url, sku in data_to_process}
+                    
+                    results_temp = []
+                    for i, future in enumerate(as_completed(future_to_data)):
+                        result = future.result()
+                        results_temp.append(result)
+                        progress_bar.progress((i + 1) / len(data_to_process), text=f"Przetworzono {i+1}/{len(data_to_process)}: {result['url']}")
+
+                st.session_state.batch_results = sorted(results_temp, key=lambda x: urls.index(x['url'])) # Sortuj wg oryginalnej kolejności
+                progress_bar.progress(1.0, text="Zakończono!")
+    with col_b2:
+        if st.button("🗑️ Wyczyść wyniki", use_container_width=True, key="clear_batch"):
+            st.session_state.batch_results = []
             st.rerun()
 
-    if generate_button:
-        if not url:
-            st.error("❌ Podaj URL strony produktu!")
-        else:
-            with st.spinner("Pobieram dane ze strony..."):
-                book_data = get_book_data(url)
-            
-            if book_data['error']:
-                st.error(f"❌ {book_data['error']}")
-            else:
-                st.success("✅ Dane pobrane pomyślnie!")
-                st.subheader("📊 Pobrane dane")
-                st.write(f"**Tytuł:** {book_data['title']}")
-                if book_data['description']:
-                    full_desc = book_data['description']
-                    st.write("**Opis (pierwsze 500 znaków):**")
-                    st.text_area("Opis", (full_desc[:500] + "...") if len(full_desc) > 500 else full_desc, height=150, disabled=True)
-                
-                if book_data['details']:
-                    with st.expander("Zobacz pobrane szczegóły techniczne"):
-                        st.text(book_data['details'])
-                
-                with st.spinner("Analizuję produkt i generuję opis... To może chwilę potrwać."):
-                    generated_desc_raw = generate_description(book_data, client)
-                    generated_desc = strip_code_fences(generated_desc_raw)
-                    
-                    if generated_desc:
-                        st.session_state['generated_description'] = generated_desc
-                        st.session_state['book_title'] = book_data['title']
-                        st.session_state.show_preview = False
-
-                        if generate_meta:
-                            with st.spinner("Generuję metatagi..."):
-                                meta_title, meta_description = generate_meta_tags(book_data, client)
-                                st.session_state['meta_title'] = meta_title
-                                st.session_state['meta_description'] = meta_description
-                        
-                        st.success("✅ Opis wygenerowany pomyślnie!")
-                    else:
-                        st.error("❌ Nie udało się wygenerować opisu. Spróbuj ponownie.")
-
-with col2:
-    st.header("📄 Wygenerowany opis")
-
-    if 'generated_description' in st.session_state:
-        st.subheader(f"📖 {st.session_state.get('book_title', 'Opis produktu')}")
-        
-        st.markdown("**Kod HTML:**")
-        html_code = st.session_state['generated_description']
-        st.code(html_code, language='html')
-
-        if st.button("📋 Skopiuj kod HTML", use_container_width=True):
-            st.success("✅ Kod HTML jest gotowy do skopiowania z pola powyżej!")
-
-        if st.button("👁️ Pokaż/Ukryj podgląd", use_container_width=True):
-            st.session_state.show_preview = not st.session_state.show_preview
-
-        if st.session_state.show_preview:
-            st.markdown("---")
-            st.markdown("**Podgląd:**")
-            st.markdown(st.session_state['generated_description'], unsafe_allow_html=True)
-
-        if 'meta_title' in st.session_state and 'meta_description' in st.session_state:
-            st.markdown("---")
-            st.subheader("🏷️ Metatagi SEO")
-            st.write(f"**Meta Title:** {st.session_state['meta_title']}")
-            st.write(f"**Meta Description:** {st.session_state['meta_description']}")
-            meta_code = f"""<title>{st.session_state['meta_title']}</title>
-<meta name="description" content="{st.session_state['meta_description']}">"""
-            st.code(meta_code, language='html')
-
+    if st.session_state.batch_results:
         st.markdown("---")
-        pim_disabled = len(missing) > 0 if 'missing' in locals() else False
-        if st.button("✅ Zaakceptuj i wyślij do PIM", use_container_width=True, type="primary", disabled=pim_disabled):
-            if pim_disabled:
-                st.error("❌ Konfiguracja Akeneo niepełna. Uzupełnij sekrety i odśwież aplikację.")
-            elif not sku:
-                st.error("❌ Podaj SKU produktu (identifier) przed wysyłką do PIM.")
-            else:
-                try:
-                    ok = akeneo_update_description(
-                        sku=sku.strip(),
-                        html_description=st.session_state['generated_description'],
-                        channel=channel,
-                        locale=locale.strip() or "pl_PL"
-                    )
-                    if ok:
-                        st.success(f"✅ Opis zapisany w Akeneo dla SKU: {sku} (kanał: {channel}, locale: {locale}).")
-                except Exception as e:
-                    st.error(f"❌ Błąd zapisu do Akeneo: {e}")
-    else:
-        st.info("👈 Podaj URL i kliknij 'Generuj opis' aby rozpocząć")
+        st.subheader("📊 Wyniki generowania")
 
+        results = st.session_state.batch_results
+        success_count = sum(1 for r in results if r['error'] is None)
+        error_count = len(results) - success_count
+        
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Liczba linków", len(results))
+        c2.metric("Wygenerowano pomyślnie", success_count)
+        c3.metric("Błędy", error_count)
+        
+        df = pd.DataFrame(results)
+        csv = df.to_csv(index=False).encode('utf-8')
+        st.download_button(
+            label="📥 Pobierz wyniki jako CSV",
+            data=csv,
+            file_name='wygenerowane_opisy.csv',
+            mime='text/csv',
+        )
+
+        for result in results:
+            if result['error']:
+                with st.expander(f"❌ Błąd: {result['url']}", expanded=True):
+                    st.error(result['error'])
+                    st.write(f"**SKU:** {result['sku']}")
+            else:
+                with st.expander(f"✅ Sukces: {result['title'] or result['url']}"):
+                    st.write(f"**URL:** {result['url']}")
+                    st.write(f"**SKU:** {result['sku']}")
+                    st.code(result['description_html'], language='html')
+                    
 # ------------- STOPKA ------------- #
 st.markdown("---")
 st.markdown("🔧 **Narzędzie do generowania opisów produktów** | Wykorzystuje OpenAI gpt-5-nano")
-st.markdown("💡 **Wskazówka:** Aplikacja sama analizuje produkt i dobiera najlepszy styl opisu.")
