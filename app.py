@@ -82,7 +82,7 @@ def akeneo_update_description(sku, html_description, channel, locale="pl_PL"):
         detail = r.text
     raise RuntimeError(f"Akeneo zwróciło {r.status_code}: {detail}")
 
-# ------------- POBIERANIE DANYCH (ZAKTUALIZOWANE) ------------- #
+# ------------- POBIERANIE DANYCH (bez zmian) ------------- #
 def get_book_data(url):
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36',
@@ -101,7 +101,6 @@ def get_book_data(url):
 
         # Logika specyficzna dla smyk.com
         if 'smyk.com' in url:
-            # 1. Pobieranie głównego opisu
             smyk_desc_div = soup.find("div", attrs={"data-testid": "box-attributes__simple"})
             if smyk_desc_div:
                 for p_tag in smyk_desc_div.find_all("p"):
@@ -109,7 +108,6 @@ def get_book_data(url):
                         p_tag.decompose()
                 description_text = smyk_desc_div.get_text(separator="\n", strip=True)
 
-            # 2. Pobieranie dodatkowych atrybutów ("Dane produktu")
             smyk_attributes_div = soup.find("div", class_="box-attributes__not-simple")
             if smyk_attributes_div:
                 attributes_list = []
@@ -128,7 +126,6 @@ def get_book_data(url):
         
         # Stara logika (jeśli nie znaleziono opisu dla Smyka lub to inna strona)
         if not description_text:
-            # Pobieranie szczegółów (stara logika - dla innych stron)
             details_div = soup.find("div", id="szczegoly") or soup.find("div", class_="product-features")
             if details_div:
                 ul = details_div.find("ul", class_="bullet") or details_div.find("ul")
@@ -137,7 +134,6 @@ def get_book_data(url):
                     details_list = [li.get_text(separator=" ", strip=True) for li in li_elements]
                     details_text = "\n".join(details_list)
             
-            # Pobieranie opisu (stara logika - dla innych stron)
             description_div = soup.find("div", class_="desc-container")
             if description_div:
                 article = description_div.find("article")
@@ -150,148 +146,87 @@ def get_book_data(url):
                 else:
                     description_text = description_div.get_text(separator="\n", strip=True)
 
-        # Stara logika - fallback
         if not description_text:
             alt_desc_div = soup.find("div", id="product-description")
             if alt_desc_div:
                 description_text = alt_desc_div.get_text(separator="\n", strip=True)
 
-        # Czyszczenie tekstu
         description_text = " ".join(description_text.split())
 
         if not description_text and not details_text:
             return {
-                'title': title,
-                'details': '',
-                'description': '',
+                'title': title, 'details': '', 'description': '',
                 'error': "Nie udało się pobrać opisu ani szczegółów produktu. Sprawdź strukturę strony."
             }
         return {
-            'title': title,
-            'details': details_text,
-            'description': description_text,
+            'title': title, 'details': details_text, 'description': description_text,
             'error': None
         }
     except Exception as e:
         return {
-            'title': '',
-            'details': '',
-            'description': '',
+            'title': '', 'details': '', 'description': '',
             'error': f"Błąd pobierania: {str(e)}"
         }
 
-# ------------- NOWA LOGIKA GENEROWANIA OPISU (ZGODNA Z GPT-5 RESPONSES API) ------------- #
-
-def generate_brief(product_data, client):
+# ------------- ZMODYFIKOWANA LOGIKA GENEROWANIA OPISU (JEDEN KROK) ------------- #
+def generate_description(product_data, client):
     """
-    Etap 1: Analizuje dane produktu i generuje klarowny BRIEF dla copywritera.
-    """
-    try:
-        title = product_data.get('title', '')
-        description = product_data.get('description', '')
-        details = product_data.get('details', '')
-
-        # Łączymy opis i szczegóły, aby dać AI pełniejszy obraz
-        full_product_info = f"{description}\n\nDane techniczne:\n{details}"
-        
-        system_prompt = """
-Jesteś content managerem w sklepie internetowym. 
-Na podstawie danych produktu przygotowujesz profesjonalny brief dla copywritera, 
-który posłuży mu do stworzenia atrakcyjnego i dopasowanego opisu produktu.
-Brief ma być kompletny, spójny i gotowy do użycia, bez placeholderów i komentarzy technicznych.
-"""
-
-        user_prompt = f"""
-# Rola i cel
-- Przeanalizuj dane produktu i wygeneruj brief dla copywritera.
-
-# Instrukcje
-1. **Najpierw ustal typ produktu**: 
-   - Jeśli to książka → skup się na gatunku literackim, klimacie, grupie docelowej i tonie narracji. 
-   - Jeśli to inny produkt (np. zabawka, gra planszowa) → uwzględnij materiały, funkcje, zastosowania oraz unikalne cechy. Wykorzystaj dane techniczne, aby precyzyjnie określić grupę wiekową, markę i kluczowe funkcje.
-2. **Kategoria i podkategoria**: określ jednoznacznie, gdzie produkt się mieści (np. „książka – kryminał”, „zabawka edukacyjna”, „gra planszowa rodzinna”).
-3. **Grupa docelowa**: zdefiniuj odbiorców (wiek, zainteresowania, potrzeby, bariery zakupu). Jeśli dostępne, użyj danych o przedziale wiekowym.
-4. **USP**: wskaż najważniejsze wyróżniki i korzyści (np. fabuła i emocje w książce; funkcje i bezpieczeństwo w zabawce; mechanika rozgrywki w grze).
-5. **Ton i styl**: określ styl narracji dopasowany do kategorii i odbiorców 
-   (np. emocjonalny dla romansu, pełen napięcia dla kryminału, edukacyjny i przyjazny dla zabawek, dynamiczny dla gier planszowych).
-6. **SEO**: zaproponuj główne i dodatkowe frazy kluczowe, które naturalnie pasują do produktu i jego kategorii.
-7. **Compliance**: wskaż sformułowania, których należy unikać (np. „najlepszy”, „100% gwarancji”).
-
-# Format wyjściowy
-- Zwróć wyłącznie treść briefu jako spójny tekst, bez nagłówków typu #, bez komentarzy, bez placeholderów.
-
-# Dane produktu do analizy
-- Tytuł: "{title}"
-- Opis i szczegóły: "{full_product_info[:2500]}..."
-"""
-
-
-        full_input = f"{system_prompt}\n\n{user_prompt}"
-        
-        response = client.responses.create(
-            model="gpt-5-nano",
-            input=full_input,
-            reasoning={"effort": "medium"},
-            text={"verbosity": "medium"}
-        )
-        return response.output_text
-    except Exception as e:
-        st.error(f"Błąd generowania briefu: {str(e)}")
-        return ""
-
-def generate_description(book_data, generated_brief, client):
-    """
-    Etap 2: Generuje opis produktu na podstawie dostarczonego briefu i surowych danych.
-    (Wersja zaktualizowana na podstawie feedbacku użytkownika)
+    Generuje opis produktu w jednym kroku, analizując produkt i dostosowując styl.
     """
     try:
-        system_prompt = """Jesteś profesjonalnym copywriterem e-commerce z wieloletnim doświadczeniem. Twoim zadaniem jest stworzenie angażującego, czytelnego i zoptymalizowanego pod SEO opisu produktu na podstawie dostarczonego briefu i danych.
+        system_prompt = """Jesteś światowej klasy copywriterem e-commerce, specjalizującym się w tworzeniu angażujących, czytelnych i zoptymalizowanych pod SEO opisów produktów.
 
---- KRYTYCZNE ZASADY, KTÓRYCH MUSISZ BEZWZGLĘDNIE PRZESTRZEGAĆ ---
+--- TWOJE ZADANIE ---
+Twoim pierwszym zadaniem jest **wewnętrzna analiza** dostarczonych danych, aby zrozumieć, czym jest produkt. Na podstawie tej analizy musisz **automatycznie dostosować ton i styl** opisu. Przykładowo:
+-   Dla **kryminału** użyj języka budującego napięcie i tajemnicę.
+-   Dla **zabawki edukacyjnej** pisz w sposób przyjazny i informacyjny, podkreślając korzyści dla rozwoju dziecka.
+-   Dla **powieści fantasy** skup się na budowaniu niezwykłego klimatu i świata przedstawionego.
+-   Dla **gry planszowej** opisz dynamicznie zasady i emocje towarzyszące rozgrywce.
+
+Po tej analizie, stwórz opis produktu, bezwzględnie przestrzegając poniższych zasad.
+
+--- KRYTYCZNE ZASADY, KTÓRYCH MUSISZ ZAWSZE PRZESTRZEGAĆ ---
 
 1.  **JĘZYK I POPRAWNOŚĆ:**
-    - Używaj WYŁĄCZNIE nienagannej polszczyzny. Dbaj o gramatykę, ortografię i interpunkcję. Tekst musi być absolutnie wolny od literówek i błędów (np. "odnalezywania", "sekretemi").
-    - Absolutnie nie wolno wstawiać zwrotów w innych językach. To oznacza zero fraz typu 'pleasure reading', 'must-have' itp. Cały tekst, od A do Z, musi być po polsku.
+    -   Używaj WYŁĄCZNIE nienagannej polszczyzny. Dbaj o gramatykę, ortografię i interpunkcję. Tekst musi być absolutnie wolny od literówek i błędów.
+    -   Absolutnie nie wolno wstawiać zwrotów w innych językach. Cały tekst musi być po polsku.
 
 2.  **STRUKTURA I FORMAT HTML:**
-    - Zwróć wyłącznie gotowy kod HTML, bez żadnych dodatkowych komentarzy czy wyjaśnień.
-    - Zastosuj poniższą strukturę, aby tekst był przejrzysty i dobrze zoptymalizowany:
-        - `<p>`: Krótki, chwytliwy akapit wprowadzający (2-3 zdania), który jest esencją produktu.
-        - `<h2>`: Pierwszy nagłówek, który rozwija myśl z wprowadzenia lub przedstawia główną korzyść.
-        - `<p>`: 1-2 krótkie akapity (maks. 3-4 zdania każdy) rozwijające temat z nagłówka H2.
-        - `<h2>`: Drugi, inny nagłówek, wprowadzający kolejny aspekt produktu (np. dla kogo jest, co go wyróżnia).
-        - `<p>`: 1-2 krótkie akapity (maks. 3-4 zdania każdy) opisujące ten aspekt.
-        - `<h3>`: Nagłówek końcowy z wezwaniem do działania (Call To Action), np. "Sięgnij po tę historię już dziś!".
-    - Dzielenie tekstu nagłówkami jest OBOWIĄZKOWE. Unikaj długich bloków tekstu bez śródtytułów.
+    -   Zwróć wyłącznie gotowy kod HTML, bez żadnych dodatkowych komentarzy czy wyjaśnień.
+    -   Zastosuj poniższą strukturę:
+        -   `<p>`: Krótki, chwytliwy akapit wprowadzający (2-3 zdania).
+        -   `<h2>`: Pierwszy nagłówek, który rozwija myśl z wprowadzenia.
+        -   `<p>`: 1-2 krótkie akapity (maks. 3-4 zdania każdy).
+        -   `<h2>`: Drugi, inny nagłówek, wprowadzający kolejny aspekt produktu.
+        -   `<p>`: 1-2 krótkie akapity (maks. 3-4 zdania każdy).
+        -   `<h3>`: Nagłówek końcowy z wezwaniem do działania (Call To Action).
+    -   Dzielenie tekstu nagłówkami jest OBOWIĄZKOWE.
 
 3.  **ZASADY POGRUBiania (BARDZO WAŻNE!):**
-    - Używaj tagów `<b>` oszczędnie i celowo.
-    - Pogrubiaj **TYLKO pojedyncze, kluczowe słowa lub bardzo krótkie frazy (2-4 słowa)**, które stanowią najważniejsze korzyści, cechy lub słowa kluczowe.
-    - **NIGDY nie pogrubiaj całych zdań ani długich fragmentów akapitów.** Pogrubienia mają przyciągać wzrok do sedna, a nie przytłaczać czytelnika.
-    - Nie pogrubiaj tytułu produktu w treści opisu.
+    -   Używaj tagów `<b>` oszczędnie.
+    -   Pogrubiaj **TYLKO pojedyncze, kluczowe słowa lub bardzo krótkie frazy (2-4 słowa)**.
+    -   **NIGDY nie pogrubiaj całych zdań ani długich fragmentów akapitów.**
 
 4.  **TREŚĆ I UNIKANIE POWTÓRZEŃ:**
-    - Twoim zadaniem jest napisanie opisu marketingowego, a NIE streszczenia technicznego. Wykorzystaj dane techniczne, aby wpleść je w treść (np. "zabawka od marki Dumel jest idealna dla dzieci powyżej roku"), ale NIE twórz listy atrybutów.
-    - **Kategorycznie unikaj powtarzania w tekście danych katalogowych takich jak numer ISBN, EAN, wydawnictwo, liczba stron, format, typ oprawy.** 
-    - Nie wychodź z fabułą poza to, co otrzymałeś w danych wejściowych, aby uniknąć błędów merytorycznych.
-    - Nie komentuj briefu. Po prostu wykonaj zadanie.
+    -   Napisz opis marketingowy, a NIE streszczenie techniczne. Wykorzystaj dane techniczne, aby wpleść je w treść (np. "zabawka od marki Dumel jest idealna dla dzieci powyżej roku"), ale NIE twórz listy atrybutów.
+    -   **Kategorycznie unikaj powtarzania w tekście danych katalogowych takich jak numer ISBN, EAN, wydawnictwo, liczba stron, format, typ oprawy.**
 
 5.  **DŁUGOŚĆ OPISU:**
-    - Celuj w wyczerpujący, ale zwięzły opis. Optymalna długość to około 1500-2500 znaków. Opis nie może być zbyt krótki. Powinien angażować czytelnika i dostarczać mu wartościowych informacji.
+    -   Celuj w wyczerpujący, ale zwięzły opis o długości około 1500-2500 znaków.
 """
         raw_data_context = f"""
---- DANE PRODUKTU DO WYKORZYSTANIA ---
-Tytuł: {book_data.get('title', '')}
-Szczegóły techniczne: {book_data.get('details', '')}
-Oryginalny opis od wydawcy/producenta: {book_data.get('description', '')}
+--- DANE PRODUKTU DO ANALIZY I OPISANIA ---
+Tytuł: {product_data.get('title', '')}
+Szczegóły techniczne (do inspiracji, nie kopiowania): {product_data.get('details', '')}
+Oryginalny opis (główne źródło informacji): {product_data.get('description', '')}
 """
         
-        full_input = f"{system_prompt}\n\n--- BRIEF (TWOJE POLECENIA) ---\n{generated_brief}\n\n{raw_data_context}"
+        full_input = f"{system_prompt}\n\n{raw_data_context}"
 
         response = client.responses.create(
             model="gpt-5-nano",
             input=full_input,
-            reasoning={"effort": "medium"},
+            reasoning={"effort": "high"}, # Zwiększamy effort, aby AI lepiej przeanalizowało dane
             text={"verbosity": "medium"}
         )
         return response.output_text
@@ -417,30 +352,23 @@ with col1:
                         st.text(book_data['details'])
                 
                 with st.spinner("Analizuję produkt i generuję opis... To może chwilę potrwać."):
-                    st.info("Krok 1: Identyfikacja kategorii i tworzenie briefu...")
-                    generated_brief = generate_brief(book_data, client)
+                    generated_desc_raw = generate_description(book_data, client)
+                    generated_desc = strip_code_fences(generated_desc_raw)
                     
-                    if not generated_brief:
-                        st.error("❌ Nie udało się wygenerować briefu. Przerwanie operacji.")
-                    else:
-                        st.session_state['generated_brief'] = generated_brief
-                        
-                        st.info("Krok 2: Generowanie opisu na podstawie briefu...")
-                        generated_desc_raw = generate_description(book_data, generated_brief, client)
-                        generated_desc = strip_code_fences(generated_desc_raw)
-                        
-                        if generated_desc:
-                            st.session_state['generated_description'] = generated_desc
-                            st.session_state['book_title'] = book_data['title']
-                            st.session_state.show_preview = False
+                    if generated_desc:
+                        st.session_state['generated_description'] = generated_desc
+                        st.session_state['book_title'] = book_data['title']
+                        st.session_state.show_preview = False
 
-                            if generate_meta:
-                                with st.spinner("Generuję metatagi..."):
-                                    meta_title, meta_description = generate_meta_tags(book_data, client)
-                                    st.session_state['meta_title'] = meta_title
-                                    st.session_state['meta_description'] = meta_description
-                            
-                            st.success("✅ Opis wygenerowany pomyślnie!")
+                        if generate_meta:
+                            with st.spinner("Generuję metatagi..."):
+                                meta_title, meta_description = generate_meta_tags(book_data, client)
+                                st.session_state['meta_title'] = meta_title
+                                st.session_state['meta_description'] = meta_description
+                        
+                        st.success("✅ Opis wygenerowany pomyślnie!")
+                    else:
+                        st.error("❌ Nie udało się wygenerować opisu. Spróbuj ponownie.")
 
 with col2:
     st.header("📄 Wygenerowany opis")
@@ -448,10 +376,6 @@ with col2:
     if 'generated_description' in st.session_state:
         st.subheader(f"📖 {st.session_state.get('book_title', 'Opis produktu')}")
         
-        if 'generated_brief' in st.session_state:
-            with st.expander("🕵️ Zobacz brief użyty do generacji"):
-                st.text(st.session_state['generated_brief'])
-
         st.markdown("**Kod HTML:**")
         html_code = st.session_state['generated_description']
         st.code(html_code, language='html')
