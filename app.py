@@ -96,30 +96,48 @@ def get_book_data(url):
         title_tag = soup.find('h1')
         title = title_tag.get_text(strip=True) if title_tag else ''
 
-        # Pobieranie szczegółów (stara logika - dla innych stron)
         details_text = ""
-        details_div = soup.find("div", id="szczegoly") or soup.find("div", class_="product-features")
-        if details_div:
-            ul = details_div.find("ul", class_="bullet") or details_div.find("ul")
-            if ul:
-                li_elements = ul.find_all("li")
-                details_list = [li.get_text(separator=" ", strip=True) for li in li_elements]
-                details_text = "\n".join(details_list)
-
         description_text = ""
 
-        # NOWA LOGIKA: Najpierw sprawdzamy, czy to strona smyk.com
+        # Logika specyficzna dla smyk.com
         if 'smyk.com' in url:
+            # 1. Pobieranie głównego opisu
             smyk_desc_div = soup.find("div", attrs={"data-testid": "box-attributes__simple"})
             if smyk_desc_div:
-                # Opcjonalne: Usuwamy niepotrzebny element z numerem produktu
                 for p_tag in smyk_desc_div.find_all("p"):
                     if p_tag.find("span", string=re.compile(r"Nr produktu:")):
                         p_tag.decompose()
                 description_text = smyk_desc_div.get_text(separator="\n", strip=True)
+
+            # 2. Pobieranie dodatkowych atrybutów ("Dane produktu")
+            smyk_attributes_div = soup.find("div", class_="box-attributes__not-simple")
+            if smyk_attributes_div:
+                attributes_list = []
+                items = smyk_attributes_div.find_all("div", class_="box_attributes__spec-item")
+                for item in items:
+                    label_tag = item.find("span", class_="box-attributes-list__label--L")
+                    value_tag = item.find("span", class_="box-attributes-list__atribute--L")
+                    if label_tag and value_tag:
+                        label = label_tag.get_text(strip=True)
+                        value = value_tag.get_text(strip=True)
+                        if label and value:
+                            attributes_list.append(f"{label}: {value}")
+                
+                if attributes_list:
+                    details_text = "\n".join(attributes_list)
         
         # Stara logika (jeśli nie znaleziono opisu dla Smyka lub to inna strona)
         if not description_text:
+            # Pobieranie szczegółów (stara logika - dla innych stron)
+            details_div = soup.find("div", id="szczegoly") or soup.find("div", class_="product-features")
+            if details_div:
+                ul = details_div.find("ul", class_="bullet") or details_div.find("ul")
+                if ul:
+                    li_elements = ul.find_all("li")
+                    details_list = [li.get_text(separator=" ", strip=True) for li in li_elements]
+                    details_text = "\n".join(details_list)
+            
+            # Pobieranie opisu (stara logika - dla innych stron)
             description_div = soup.find("div", class_="desc-container")
             if description_div:
                 article = description_div.find("article")
@@ -141,12 +159,12 @@ def get_book_data(url):
         # Czyszczenie tekstu
         description_text = " ".join(description_text.split())
 
-        if not description_text:
+        if not description_text and not details_text:
             return {
                 'title': title,
-                'details': details_text,
+                'details': '',
                 'description': '',
-                'error': "Nie udało się pobrać opisu produktu. Sprawdź strukturę strony."
+                'error': "Nie udało się pobrać opisu ani szczegółów produktu. Sprawdź strukturę strony."
             }
         return {
             'title': title,
@@ -171,6 +189,10 @@ def generate_brief(product_data, client):
     try:
         title = product_data.get('title', '')
         description = product_data.get('description', '')
+        details = product_data.get('details', '')
+
+        # Łączymy opis i szczegóły, aby dać AI pełniejszy obraz
+        full_product_info = f"{description}\n\nDane techniczne:\n{details}"
         
         system_prompt = """
 Jesteś content managerem w sklepie internetowym. 
@@ -186,9 +208,9 @@ Brief ma być kompletny, spójny i gotowy do użycia, bez placeholderów i komen
 # Instrukcje
 1. **Najpierw ustal typ produktu**: 
    - Jeśli to książka → skup się na gatunku literackim, klimacie, grupie docelowej i tonie narracji. 
-   - Jeśli to inny produkt (np. zabawka, gra planszowa) → uwzględnij materiały, funkcje, zastosowania oraz unikalne cechy.
+   - Jeśli to inny produkt (np. zabawka, gra planszowa) → uwzględnij materiały, funkcje, zastosowania oraz unikalne cechy. Wykorzystaj dane techniczne, aby precyzyjnie określić grupę wiekową, markę i kluczowe funkcje.
 2. **Kategoria i podkategoria**: określ jednoznacznie, gdzie produkt się mieści (np. „książka – kryminał”, „zabawka edukacyjna”, „gra planszowa rodzinna”).
-3. **Grupa docelowa**: zdefiniuj odbiorców (wiek, zainteresowania, potrzeby, bariery zakupu).
+3. **Grupa docelowa**: zdefiniuj odbiorców (wiek, zainteresowania, potrzeby, bariery zakupu). Jeśli dostępne, użyj danych o przedziale wiekowym.
 4. **USP**: wskaż najważniejsze wyróżniki i korzyści (np. fabuła i emocje w książce; funkcje i bezpieczeństwo w zabawce; mechanika rozgrywki w grze).
 5. **Ton i styl**: określ styl narracji dopasowany do kategorii i odbiorców 
    (np. emocjonalny dla romansu, pełen napięcia dla kryminału, edukacyjny i przyjazny dla zabawek, dynamiczny dla gier planszowych).
@@ -200,7 +222,7 @@ Brief ma być kompletny, spójny i gotowy do użycia, bez placeholderów i komen
 
 # Dane produktu do analizy
 - Tytuł: "{title}"
-- Opis: "{description[:2000]}..."
+- Opis i szczegóły: "{full_product_info[:2500]}..."
 """
 
 
@@ -249,8 +271,8 @@ def generate_description(book_data, generated_brief, client):
     - Nie pogrubiaj tytułu produktu w treści opisu.
 
 4.  **TREŚĆ I UNIKANIE POWTÓRZEŃ:**
-    - Twoim zadaniem jest napisanie opisu marketingowego, a NIE streszczenia technicznego.
-    - **Kategorycznie unikaj powtarzania w tekście danych katalogowych takich jak numer ISBN, EAN, wydawnictwo, liczba stron, format, typ oprawy.** Możesz wspomnieć o cesze (np. "w eleganckiej twardej oprawie"), ale nie twórz listy atrybutów ani nie powtarzaj numerów.
+    - Twoim zadaniem jest napisanie opisu marketingowego, a NIE streszczenia technicznego. Wykorzystaj dane techniczne, aby wpleść je w treść (np. "zabawka od marki Dumel jest idealna dla dzieci powyżej roku"), ale NIE twórz listy atrybutów.
+    - **Kategorycznie unikaj powtarzania w tekście danych katalogowych takich jak numer ISBN, EAN, wydawnictwo, liczba stron, format, typ oprawy.** 
     - Nie wychodź z fabułą poza to, co otrzymałeś w danych wejściowych, aby uniknąć błędów merytorycznych.
     - Nie komentuj briefu. Po prostu wykonaj zadanie.
 
@@ -389,6 +411,10 @@ with col1:
                     full_desc = book_data['description']
                     st.write("**Opis (pierwsze 500 znaków):**")
                     st.text_area("Opis", (full_desc[:500] + "...") if len(full_desc) > 500 else full_desc, height=150, disabled=True)
+                
+                if book_data['details']:
+                    with st.expander("Zobacz pobrane szczegóły techniczne"):
+                        st.text(book_data['details'])
                 
                 with st.spinner("Analizuję produkt i generuję opis... To może chwilę potrwać."):
                     st.info("Krok 1: Identyfikacja kategorii i tworzenie briefu...")
