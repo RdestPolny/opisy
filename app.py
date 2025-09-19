@@ -56,26 +56,52 @@ def akeneo_product_exists(sku, token):
         return False
     r.raise_for_status()
 
+# ZAKTUALIZOWANA FUNKCJA
 def akeneo_update_description(sku, html_description, channel, locale="pl_PL"):
     token = akeneo_get_token()
     if not akeneo_product_exists(sku, token):
         raise ValueError(f"Produkt o SKU '{sku}' nie istnieje w Akeneo.")
-    attr = akeneo_get_attribute("description", token)
-    is_scopable = bool(attr.get("scopable", False))
-    is_localizable = bool(attr.get("localizable", False))
-    value_obj = {
+    
+    # Przygotuj dane dla atrybutu 'description'
+    attr_desc = akeneo_get_attribute("description", token)
+    is_scopable_desc = bool(attr_desc.get("scopable", False))
+    is_localizable_desc = bool(attr_desc.get("localizable", False))
+    value_obj_desc = {
         "data": html_description,
-        "scope": channel if is_scopable else None,
-        "locale": locale if is_localizable else None,
+        "scope": channel if is_scopable_desc else None,
+        "locale": locale if is_localizable_desc else None,
     }
+    
+    payload_values = {"description": [value_obj_desc]}
+
+    # Spróbuj dodać aktualizację atrybutu 'opisy_seo'
+    try:
+        attr_seo = akeneo_get_attribute("opisy_seo", token)
+        is_scopable_seo = bool(attr_seo.get("scopable", False))
+        is_localizable_seo = bool(attr_seo.get("localizable", False))
+        value_obj_seo = {
+            "data": 1,  # Ustawienie wartości na 1 (co odpowiada "Yes")
+            "scope": channel if is_scopable_seo else None,
+            "locale": locale if is_localizable_seo else None,
+        }
+        payload_values["opisy_seo"] = [value_obj_seo]
+    except requests.exceptions.HTTPError as e:
+        if e.response.status_code == 404:
+            st.warning("⚠️ Nie udało się zaktualizować atrybutu 'opisy_seo'. Sprawdź, czy atrybut o takim kodzie istnieje w Akeneo. Opis główny zostanie zaktualizowany.")
+        else:
+            raise e
+
+    # Zbuduj finalny payload i wyślij zapytanie
     url = _akeneo_root() + f"/api/rest/v1/products/{sku}"
-    payload = {"values": {"description": [value_obj]}}
+    payload = {"values": payload_values}
     headers = {
         "Authorization": f"Bearer {token}",
         "Content-Type": "application/json",
         "Accept": "application/json",
     }
+    
     r = requests.patch(url, headers=headers, data=json.dumps(payload), timeout=30)
+    
     if r.status_code in (200, 204):
         return True
     try:
@@ -244,10 +270,6 @@ Meta description: [treść]"""
 
 # ------------- FUNKCJA DO PRZETWARZANIA RÓWNOLEGŁEGO ------------- #
 def process_single_url(url, sku, client):
-    """
-    Kompletny proces dla jednego URL: pobranie danych i wygenerowanie opisu.
-    Zaprojektowana do działania w osobnym wątku.
-    """
     try:
         product_data = get_book_data(url)
         if product_data['error']:
@@ -373,7 +395,7 @@ with tab1:
                     try:
                         ok = akeneo_update_description(sku_single.strip(), st.session_state['generated_description'], channel, locale.strip())
                         if ok:
-                            st.success(f"✅ Opis zapisany w Akeneo dla SKU: {sku_single}")
+                            st.success(f"✅ Opis zapisany w Akeneo dla SKU: {sku_single}. Atrybut 'opisy_seo' został ustawiony na 'Yes'.")
                     except Exception as e:
                         st.error(f"❌ Błąd zapisu do Akeneo: {e}")
         else:
