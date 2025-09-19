@@ -253,7 +253,7 @@ Oryginalny opis od wydawcy/producenta: {book_data.get('description', '')}
         response = client.responses.create(
             model="gpt-5-nano",
             input=full_input,
-            reasoning={"effort": "medium"},
+            reasoning={"effort": "low"},
             text={"verbosity": "medium"}
         )
         return response.output_text
