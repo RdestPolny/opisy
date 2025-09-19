@@ -82,7 +82,7 @@ def akeneo_update_description(sku, html_description, channel, locale="pl_PL"):
         detail = r.text
     raise RuntimeError(f"Akeneo zwróciło {r.status_code}: {detail}")
 
-# ------------- POBIERANIE DANYCH (bez zmian) ------------- #
+# ------------- POBIERANIE DANYCH (ZAKTUALIZOWANE) ------------- #
 def get_book_data(url):
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36',
@@ -96,6 +96,7 @@ def get_book_data(url):
         title_tag = soup.find('h1')
         title = title_tag.get_text(strip=True) if title_tag else ''
 
+        # Pobieranie szczegółów (stara logika - dla innych stron)
         details_text = ""
         details_div = soup.find("div", id="szczegoly") or soup.find("div", class_="product-features")
         if details_div:
@@ -106,23 +107,38 @@ def get_book_data(url):
                 details_text = "\n".join(details_list)
 
         description_text = ""
-        description_div = soup.find("div", class_="desc-container")
-        if description_div:
-            article = description_div.find("article")
-            if article:
-                nested_article = article.find("article")
-                if nested_article:
-                    description_text = nested_article.get_text(separator="\n", strip=True)
-                else:
-                    description_text = article.get_text(separator="\n", strip=True)
-            else:
-                description_text = description_div.get_text(separator="\n", strip=True)
 
+        # NOWA LOGIKA: Najpierw sprawdzamy, czy to strona smyk.com
+        if 'smyk.com' in url:
+            smyk_desc_div = soup.find("div", attrs={"data-testid": "box-attributes__simple"})
+            if smyk_desc_div:
+                # Opcjonalne: Usuwamy niepotrzebny element z numerem produktu
+                for p_tag in smyk_desc_div.find_all("p"):
+                    if p_tag.find("span", string=re.compile(r"Nr produktu:")):
+                        p_tag.decompose()
+                description_text = smyk_desc_div.get_text(separator="\n", strip=True)
+        
+        # Stara logika (jeśli nie znaleziono opisu dla Smyka lub to inna strona)
+        if not description_text:
+            description_div = soup.find("div", class_="desc-container")
+            if description_div:
+                article = description_div.find("article")
+                if article:
+                    nested_article = article.find("article")
+                    if nested_article:
+                        description_text = nested_article.get_text(separator="\n", strip=True)
+                    else:
+                        description_text = article.get_text(separator="\n", strip=True)
+                else:
+                    description_text = description_div.get_text(separator="\n", strip=True)
+
+        # Stara logika - fallback
         if not description_text:
             alt_desc_div = soup.find("div", id="product-description")
             if alt_desc_div:
                 description_text = alt_desc_div.get_text(separator="\n", strip=True)
 
+        # Czyszczenie tekstu
         description_text = " ".join(description_text.split())
 
         if not description_text:
@@ -130,7 +146,7 @@ def get_book_data(url):
                 'title': title,
                 'details': details_text,
                 'description': '',
-                'error': "Nie udało się pobrać opisu produktu. Zatrzymuję przetwarzanie."
+                'error': "Nie udało się pobrać opisu produktu. Sprawdź strukturę strony."
             }
         return {
             'title': title,
@@ -253,7 +269,7 @@ Oryginalny opis od wydawcy/producenta: {book_data.get('description', '')}
         response = client.responses.create(
             model="gpt-5-nano",
             input=full_input,
-            reasoning={"effort": "low"},
+            reasoning={"effort": "medium"},
             text={"verbosity": "medium"}
         )
         return response.output_text
