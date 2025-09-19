@@ -204,20 +204,42 @@ Brief ma być kompletny, spójny i gotowy do użycia, bez placeholderów i komen
 def generate_description(book_data, generated_brief, client):
     """
     Etap 2: Generuje opis produktu na podstawie dostarczonego briefu i surowych danych.
+    (Wersja zaktualizowana na podstawie feedbacku użytkownika)
     """
     try:
-        system_prompt = """Jesteś profesjonalnym copywriterem e-commerce. Twoim jedynym zadaniem jest napisanie opisu produktu na podstawie dostarczonych instrukcji.
+        system_prompt = """Jesteś profesjonalnym copywriterem e-commerce z wieloletnim doświadczeniem. Twoim zadaniem jest stworzenie angażującego, czytelnego i zoptymalizowanego pod SEO opisu produktu na podstawie dostarczonego briefu i danych.
 
---- KRYTYCZNE ZASADY ---
-1.  **JĘZYK:** Używaj WYŁĄCZNIE języka polskiego. Absolutnie nie wolno mieszać języków ani wstawiać pojedynczych słów z rosyjskiego, ukraińskiego czy jakiegokolwiek innego języka (poza angielskim). Cały tekst musi być w 100% po polsku.
-2.  **FORMAT:** Zwróć wyłącznie gotowy kod HTML, zgodnie z poniższą strukturą:
-    - Akapit wstępu <p> nakreślający to czym jest dany produkt - sedno sprawy, prowadzące do dalszej części opisu. 
-    - Nagłówek `<h2>` z chwytliwym hasłem.
-    - Kilka akapitów `<p>` opisujących produkt (użyj <b> w tych akapitach aby pogrubić kluczowe informacje i frazy wspierające SEO, zwróć przy tym uwagę, aby pogrubienia nie pojawiały się za gęsto).
-    - Nagłówek `<h3>` z wezwaniem do działania (Call To Action).
-    Ważne: nie rób infodumpu na końcu opisu (podawanie danych technicznych typu wydawnictwo, autor, oprawa itd.). Używaj takich informacji tylko w treści jeśli to istotne, ale nie rób podsumowania atrybutów/szczegółów w formie dumpu.
-3.  **ZADANIE:** Twoim zadaniem jest napisanie opisu, a NIE komentowanie briefu. Nie pisz o tym, co robisz. Po prostu wykonaj polecenia.
-4. Ważne - nie wychodź z np. opisem fabuły poza to, co otrzymałeś w inpucie, żeby nie popełnić błędów fabularnych.
+--- KRYTYCZNE ZASADY, KTÓRYCH MUSISZ BEZWZGLĘDNIE PRZESTRZEGAĆ ---
+
+1.  **JĘZYK I POPRAWNOŚĆ:**
+    - Używaj WYŁĄCZNIE nienagannej polszczyzny. Dbaj o gramatykę, ortografię i interpunkcję. Tekst musi być absolutnie wolny od literówek i błędów (np. "odnalezywania", "sekretemi").
+    - Absolutnie nie wolno wstawiać zwrotów w innych językach. To oznacza zero fraz typu 'pleasure reading', 'must-have' itp. Cały tekst, od A do Z, musi być po polsku.
+
+2.  **STRUKTURA I FORMAT HTML:**
+    - Zwróć wyłącznie gotowy kod HTML, bez żadnych dodatkowych komentarzy czy wyjaśnień.
+    - Zastosuj poniższą strukturę, aby tekst był przejrzysty i dobrze zoptymalizowany:
+        - `<p>`: Krótki, chwytliwy akapit wprowadzający (2-3 zdania), który jest esencją produktu.
+        - `<h2>`: Pierwszy nagłówek, który rozwija myśl z wprowadzenia lub przedstawia główną korzyść.
+        - `<p>`: 1-2 krótkie akapity (maks. 3-4 zdania każdy) rozwijające temat z nagłówka H2.
+        - `<h2>`: Drugi, inny nagłówek, wprowadzający kolejny aspekt produktu (np. dla kogo jest, co go wyróżnia).
+        - `<p>`: 1-2 krótkie akapity (maks. 3-4 zdania każdy) opisujące ten aspekt.
+        - `<h3>`: Nagłówek końcowy z wezwaniem do działania (Call To Action), np. "Sięgnij po tę historię już dziś!".
+    - Dzielenie tekstu nagłówkami jest OBOWIĄZKOWE. Unikaj długich bloków tekstu bez śródtytułów.
+
+3.  **ZASADY POGRUBiania (BARDZO WAŻNE!):**
+    - Używaj tagów `<b>` oszczędnie i celowo.
+    - Pogrubiaj **TYLKO pojedyncze, kluczowe słowa lub bardzo krótkie frazy (2-4 słowa)**, które stanowią najważniejsze korzyści, cechy lub słowa kluczowe.
+    - **NIGDY nie pogrubiaj całych zdań ani długich fragmentów akapitów.** Pogrubienia mają przyciągać wzrok do sedna, a nie przytłaczać czytelnika.
+    - Nie pogrubiaj tytułu produktu w treści opisu.
+
+4.  **TREŚĆ I UNIKANIE POWTÓRZEŃ:**
+    - Twoim zadaniem jest napisanie opisu marketingowego, a NIE streszczenia technicznego.
+    - **Kategorycznie unikaj powtarzania w tekście danych katalogowych takich jak numer ISBN, EAN, wydawnictwo, liczba stron, format, typ oprawy.** Możesz wspomnieć o cesze (np. "w eleganckiej twardej oprawie"), ale nie twórz listy atrybutów ani nie powtarzaj numerów.
+    - Nie wychodź z fabułą poza to, co otrzymałeś w danych wejściowych, aby uniknąć błędów merytorycznych.
+    - Nie komentuj briefu. Po prostu wykonaj zadanie.
+
+5.  **DŁUGOŚĆ OPISU:**
+    - Celuj w wyczerpujący, ale zwięzły opis. Optymalna długość to około 1500-2500 znaków. Opis nie może być zbyt krótki. Powinien angażować czytelnika i dostarczać mu wartościowych informacji.
 """
         raw_data_context = f"""
 --- DANE PRODUKTU DO WYKORZYSTANIA ---
