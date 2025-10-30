@@ -89,14 +89,15 @@ def akeneo_product_exists(sku: str, token: str) -> bool:
         return False
     r.raise_for_status()
 
-def akeneo_search_products(search_query: str, token: str, limit: int = 20) -> List[Dict]:
+def akeneo_search_products(search_query: str, token: str, limit: int = 20, locale: str = "pl_PL") -> List[Dict]:
     """
-    Wyszukuje produkty w Akeneo po nazwie/tytule
+    Wyszukuje produkty w Akeneo po nazwie lub SKU
     
     Args:
         search_query: Fraza do wyszukania
         token: Access token Akeneo
         limit: Maksymalna liczba wyników
+        locale: Locale dla atrybutu name
         
     Returns:
         Lista produktów z podstawowymi danymi
@@ -104,43 +105,87 @@ def akeneo_search_products(search_query: str, token: str, limit: int = 20) -> Li
     url = _akeneo_root() + "/api/rest/v1/products"
     headers = {"Authorization": f"Bearer {token}"}
     
-    # Szukamy w różnych możliwych atrybutach nazwy
-    # Dostosuj do swoich atrybutów (name, title, product_name, etc.)
-    params = {
-        "limit": limit,
-        "search": json.dumps({
-            "identifier": [{"operator": "CONTAINS", "value": search_query}]
-        })
-    }
+    products_dict = {}  # Używamy dict żeby uniknąć duplikatów (key = identifier)
     
     try:
-        r = requests.get(url, headers=headers, params=params, timeout=30)
-        r.raise_for_status()
-        data = r.json()
+        # ZAPYTANIE 1: Wyszukiwanie po identyfikatorze (SKU)
+        params_identifier = {
+            "limit": limit,
+            "search": json.dumps({
+                "identifier": [{"operator": "CONTAINS", "value": search_query}]
+            })
+        }
         
-        products = []
-        for item in data.get("_embedded", {}).get("items", []):
-            # Próbujemy znaleźć tytuł produktu
-            title = item.get("identifier", "")
+        r1 = requests.get(url, headers=headers, params=params_identifier, timeout=30)
+        r1.raise_for_status()
+        data1 = r1.json()
+        
+        for item in data1.get("_embedded", {}).get("items", []):
+            identifier = item.get("identifier", "")
             
-            # Szukamy w values różnych możliwych atrybutów z nazwą
+            # Pobieramy tytuł z atrybutu name
+            title = identifier
             values = item.get("values", {})
-            for attr_name in ["name", "title", "product_name", "nazwa"]:
-                if attr_name in values:
-                    attr_values = values[attr_name]
-                    if attr_values and len(attr_values) > 0:
-                        title = attr_values[0].get("data", title)
+            if "name" in values:
+                name_values = values["name"]
+                for val in name_values:
+                    if val.get("locale") == locale or val.get("locale") is None:
+                        title = val.get("data", identifier)
                         break
             
-            products.append({
-                "identifier": item.get("identifier", ""),
+            products_dict[identifier] = {
+                "identifier": identifier,
                 "title": title,
                 "family": item.get("family", ""),
                 "enabled": item.get("enabled", False),
                 "raw_data": item
-            })
+            }
         
-        return products
+        # ZAPYTANIE 2: Wyszukiwanie po atrybucie "name"
+        params_name = {
+            "limit": limit,
+            "search": json.dumps({
+                "name": [{"operator": "CONTAINS", "value": search_query, "locale": locale}]
+            })
+        }
+        
+        r2 = requests.get(url, headers=headers, params=params_name, timeout=30)
+        r2.raise_for_status()
+        data2 = r2.json()
+        
+        for item in data2.get("_embedded", {}).get("items", []):
+            identifier = item.get("identifier", "")
+            
+            # Jeśli już mamy ten produkt, pomijamy (z pierwszego zapytania)
+            if identifier in products_dict:
+                continue
+            
+            # Pobieramy tytuł z atrybutu name
+            title = identifier
+            values = item.get("values", {})
+            if "name" in values:
+                name_values = values["name"]
+                for val in name_values:
+                    if val.get("locale") == locale or val.get("locale") is None:
+                        title = val.get("data", identifier)
+                        break
+            
+            products_dict[identifier] = {
+                "identifier": identifier,
+                "title": title,
+                "family": item.get("family", ""),
+                "enabled": item.get("enabled", False),
+                "raw_data": item
+            }
+        
+        # Konwertujemy dict na listę
+        products = list(products_dict.values())
+        
+        # Sortujemy po tytule
+        products.sort(key=lambda x: x['title'].lower())
+        
+        return products[:limit]  # Ograniczamy do limitu
+        
     except Exception as e:
         st.error(f"Błąd wyszukiwania w Akeneo: {str(e)}")
         return []
@@ -971,7 +1016,7 @@ with tab2:
                     with st.spinner(f"Wyszukuję '{search_query}' w Akeneo..."):
                         try:
                             token = akeneo_get_token()
-                            results = akeneo_search_products(search_query, token, search_limit)
+                            results = akeneo_search_products(search_query, token, search_limit, locale)
                             st.session_state.akeneo_search_results = results
                             
                             if results:
