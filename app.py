@@ -325,75 +325,152 @@ def akeneo_update_description(sku: str, html_description: str, channel: str, loc
 def generate_description(product_data: Dict, client: OpenAI, style_variant: str = "default") -> str:
     """Generuje opis produktu z wykorzystaniem GPT-5-nano"""
     try:
-        system_prompt = """Jesteś EKSPERTEM copywritingu e-commerce i SEO. Twoje opisy są angażujące, semantycznie zoptymalizowane i konwertują odwiedzających w kupujących.
+        system_prompt = """Jesteś EKSPERTEM copywritingu e-commerce i języka polskiego. Twoje opisy są poprawne gramatycznie, angażujące i konwertują.
 
 ╔═══════════════════════════════════════════════════════════════════╗
-║  KROK 1: WEWNĘTRZNA ANALIZA PRODUKTU (NIE WYPISUJ TEJ CZĘŚCI)     ║
+║  STRUKTURA OPISU (PROSTA I CZYTELNA)                              ║
 ╚═══════════════════════════════════════════════════════════════════╝
 
-Przeanalizuj dane produktu i zidentyfikuj:
-- Typ produktu (książka/gra/zabawka/edukacja)
-- Grupę docelową (dzieci/młodzież/dorośli/profesjonaliści)
-- Kluczowe korzyści i USP
-- Główne słowa kluczowe SEO
+OBOWIĄZKOWA STRUKTURA (tylko 4 elementy!):
+
+1. <p>[AKAPIT WSTĘPNY: 4-6 zdań przedstawiających produkt, jego główne cechy i pierwsze wrażenie. Core informacje o produkcie. BEZ danych technicznych jak wymiary, rok, ISBN.]</p>
+
+2. <h2>[Jeden konkretny nagłówek z korzyścią lub cechą produktu]</h2>
+
+3. <p>[AKAPIT GŁÓWNY: 5-8 zdań rozwijających temat. Dla kogo jest produkt, co go wyróżnia, jakie emocje wzbudza, dlaczego warto. TUTAJ naturalnie wpleć dane techniczne jeśli są istotne (np. oprawa, rok, wymiary). Buduj hype i entuzjazm.]</p>
+
+4. <h3>[Wezwanie do działania - krótkie i konkretne]</h3>
+
+5. <p>[KRÓTKIE ZAKOŃCZENIE: 1-2 zdania zachęcające do zakupu]</p>
 
 ╔═══════════════════════════════════════════════════════════════════╗
-║  KROK 2: GENEROWANIE OPISU - STRUKTURA HTML                       ║
+║  KRYTYCZNE ZASADY JĘZYKA POLSKIEGO                                ║
 ╚═══════════════════════════════════════════════════════════════════╝
 
-OBOWIĄZKOWA STRUKTURA:
-1. <h2>[Chwytliwy nagłówek z głównym słowem kluczowym]</h2>
-2. <p>[Akapit wprowadzający - emocje, 2-3 zdania, BEZ danych technicznych]</p>
-3. <h2>[Nagłówek sekcji głównej]</h2>
-4. <p>[Główna treść z korzyściami - 3-4 zdania]</p>
-5. <h2>[Nagłówek drugiej sekcji]</h2>
-6. <p>[Rozwinięcie - 3-4 zdania, TUTAJ wpleć dane techniczne naturalnie]</p>
-7. <h3>[Wezwanie do działania]</h3>
-8. <p>[Zachęta do zakupu - 1-2 zdania]</p>
+**POPRAWNOŚĆ GRAMATYCZNA (NAJWAŻNIEJSZE!):**
 
-╔═══════════════════════════════════════════════════════════════════╗
-║  KRYTYCZNE ZASADY                                                  ║
-╚═══════════════════════════════════════════════════════════════════╝
+1. PRZYPADKI:
+   ✅ "Ta część Wiedźmina" (dopełniacz!)
+   ❌ "Ta część Wiedźmin"
+   
+   ✅ "pełnego politycznych machinacji i spisków" (dopełniacz!)
+   ❌ "pełnego politycznych machinacji i spiski"
+   
+   ✅ "dzięki dopracowanym komponentom" (celownik!)
+   ❌ "dzięki dopracowanymi komponentami"
 
-1. JĘZYK I INTERPUNKCJA:
-   ✅ ZAWSZE używaj myślnika "-"
-   ❌ NIGDY em dash "—" ani en dash "–"
-   ❌ NIGDY wielokropek "…"
+2. ODMIANA PRZEZ PRZYPADKI:
+   - Mianownik (kto? co?): Wiedźmin
+   - Dopełniacz (kogo? czego?): Wiedźmina, spisków, machinacji
+   - Celownik (komu? czemu?): Wiedźminowi, komponentom
+   - Biernik (kogo? co?): Wiedźmina, opowieść
+   
+3. ZGODA:
+   ✅ "bogata ilustracja"
+   ❌ "bogaty ilustracja"
+   
+   ✅ "dopracowane komponenty"
+   ❌ "dopracowany komponenty"
+
+4. INTERPUNKCJA:
+   ✅ Używaj tylko "-" (myślnik)
+   ❌ NIGDY "—" (em dash) ani "–" (en dash)
+
+**STYL I TREŚĆ:**
+
+1. AKAPITY:
+   - Pierwszy akapit: 4-6 zdań (minimum 300 znaków)
+   - Akapit główny: 5-8 zdań (minimum 400 znaków)
+   - Zakończenie: 1-2 zdania (około 100 znaków)
 
 2. BOLDOWANIE:
-   ✅ 6-10 kluczowych fraz
-   ✅ Pojedyncze słowa lub 2-4 słowa
-   ❌ Całe zdania
+   ✅ 6-10 pojedynczych słów lub krótkich fraz (2-4 słowa)
+   ✅ Rozmieść równomiernie przez cały tekst
+   ❌ NIGDY całych zdań
 
-3. NAGŁÓWKI:
-   ✅ H2 na początku ZAWSZE
-   ✅ Minimum 2x H2 i 1x H3
+3. DANE TECHNICZNE:
+   - Wpleć naturalnie w akapit główny
+   - Np: "Wydanie w twardej oprawie z 2023 roku liczy 320 stron"
+   - NIE twórz osobnej sekcji z danymi
 
-4. TREŚĆ:
-   ✅ Dane techniczne w środku/dole, naturalnie
-   ✅ NIGDY nie powtarzaj informacji
-   ❌ Listy punktowe
-   ❌ ISBN/EAN w treści
+4. NIE POWTARZAJ:
+   - Sprawdź przed wysłaniem czy nie powtarzasz tych samych informacji
+   - Każde zdanie musi wnosić coś nowego
 
-5. DŁUGOŚĆ: 1500-2500 znaków
+╔═══════════════════════════════════════════════════════════════════╗
+║  PRZYKŁAD DOBREJ STRUKTURY                                        ║
+╚═══════════════════════════════════════════════════════════════════╝
 
-Zwróć TYLKO czysty HTML (bez ```html).
-Zacznij od <h2>, zakończ na </p>.
+<p>Zanurz się w <b>mrocznym świecie Wiedźmina</b>, gdzie polityczne intrygi splatają się z magią, a każda decyzja ma nieodwracalne konsekwencje. Tom czwarty sagi Andrzeja Sapkowskiego przenosi czytelnika w sam środek nadciągającej burzy - czas pogardy nadszedł, a bohaterowie muszą stanąć po jednej ze stron konfliktu. To opowieść, która trzyma w napięciu od pierwszej do ostatniej strony, łącząc epicką skalę wydarzeń z intymnymi portretami postaci. Geralt, Yennefer i Ciri stają przed wyborami, które zmienią losy całego kontynentu.</p>
+
+<h2>Dla kogo jest ta książka i co ją wyróżnia</h2>
+
+<p>Ten tom to obowiązkowa lektura dla fanów <b>fantasy</b> i miłośników <b>złożonych intryg politycznych</b>. Sapkowski mistrzowsko łączy wątki fabularne, tworząc mozaikę perspektyw, która buduje napięcie z każdym rozdziałem. Historia nie oszczędza czytelnika - decyzje bohaterów mają realne konsekwencje, a granica między dobrem a złem jest płynna. <b>Dynamiczna narracja</b> przeplatana scenami akcji i dialogami pełnymi subtelnego humoru sprawia, że czas lektury mija niepostrzeżenie. Wydanie w miękkiej oprawie od SuperNowej to poręczny format, idealny do czytania w podróży. Klarowna typografia i dobry papier zapewniają komfort nawet podczas długich sesji czytania, a seria Wiedźmina pozostaje jedną z najważniejszych <b>polskich sag fantasy</b> ostatnich dekad.</p>
+
+<h3>Dodaj do koszyka i dołącz do legendy</h3>
+
+<p>Nie czekaj - zamów teraz i odkryj, dlaczego miliony czytelników na całym świecie pokochało <b>sagę o Wiedźminie</b>. Twoja przygoda z Czasem Pogardy zaczyna się już dziś!</p>
+
+╔═══════════════════════════════════════════════════════════════════╗
+║  ANTI-PRZYKŁADY (CZEGO NIE ROBIĆ!)                                ║
+╚═══════════════════════════════════════════════════════════════════╝
+
+❌ ZŁE: "Ta część Wiedźmin" → ✅ DOBRE: "Ta część Wiedźmina"
+❌ ZŁE: "pełnego spiski" → ✅ DOBRE: "pełnego spisków"
+❌ ZŁE: "dzięki komponentami" → ✅ DOBRE: "dzięki komponentom"
+❌ ZŁE: Akapit 2 zdania → ✅ DOBRE: Akapit 5+ zdań
+❌ ZŁE: 3 nagłówki H2 → ✅ DOBRE: 1 nagłówek H2
+❌ ZŁE: Powtórzenie "klimat" 2x → ✅ DOBRE: Każde słowo raz
+
+╔═══════════════════════════════════════════════════════════════════╗
+║  DŁUGOŚĆ I TON                                                     ║
+╚═══════════════════════════════════════════════════════════════════╝
+
+- Całość: 1500-2500 znaków
+- Ton dostosowany do produktu (książka/gra/zabawka)
+- Naturalny, płynny język
+- Entuzjastyczny ale wiarygodny
+
+╔═══════════════════════════════════════════════════════════════════╗
+║  TWOJA ODPOWIEDŹ                                                   ║
+╚═══════════════════════════════════════════════════════════════════╝
+
+Zwróć TYLKO czysty HTML.
+Struktura: <p> → <h2> → <p> → <h3> → <p>
+Sprawdź PRZED wysłaniem:
+- Wszystkie przypadki poprawne?
+- Akapity długie (4+ zdań)?
+- Brak powtórzeń?
+- Tylko jeden H2?
+- Brak em dash?
 """
 
         style_additions = {
-            "alternative": "\n\nAlternatywny styl: bezpośredni ton, krótsze zdania, mocne CTA.",
-            "concise": "\n\nZwięzły styl: maksimum info, minimum ozdobników. 1500-1800 znaków.",
-            "detailed": "\n\nSzczegółowy styl: storytelling, kontekst. 2200-2500 znaków."
+            "alternative": "\n\nStyl alternatywny: bardziej bezpośredni ton, krótsze zdania w ramach długich akapitów, mocniejsze CTA.",
+            "concise": "\n\nStyl zwięzły: informacje bez ozdobników, ale nadal w długich akapitach. 1500-1800 znaków.",
+            "detailed": "\n\nStyl szczegółowy: rozbudowany storytelling, głębszy kontekst. 2200-2500 znaków."
         }
         
         if style_variant in style_additions:
             system_prompt += style_additions[style_variant]
 
         raw_data = f"""
-TYTUŁ: {product_data.get('title', '')}
-SZCZEGÓŁY: {product_data.get('details', '')}
-OPIS: {product_data.get('description', '')}
+TYTUŁ PRODUKTU:
+{product_data.get('title', '')}
+
+SZCZEGÓŁY TECHNICZNE (wpleć naturalnie w akapit główny):
+{product_data.get('details', '')}
+
+ORYGINALNY OPIS (główne źródło informacji o produkcie):
+{product_data.get('description', '')}
+
+PAMIĘTAJ:
+- Pierwsza część Wiedźmina (nie: część Wiedźmin)
+- Pełnego spisków (nie: pełnego spiski)
+- Dzięki komponentom (nie: dzięki komponentami)
+- Długie akapity (5+ zdań)
+- Tylko jeden H2
+- Brak powtórzeń
 """
         
         response = client.responses.create(
@@ -748,28 +825,29 @@ with tab1:
         result = st.session_state.generated_description
         
         # Tabs dla kodu i podglądu
-        tab_code, tab_preview, tab_compare = st.tabs(["💻 Kod HTML", "👁️ Podgląd", "📊 Porównanie"])
+        tab_code, tab_preview = st.tabs(["💻 Kod HTML", "👁️ Porównanie"])
         
         with tab_code:
             st.code(result['description_html'], language='html')
             st.caption(f"Długość: {len(result['description_html'])} znaków")
         
         with tab_preview:
-            st.markdown(result['description_html'], unsafe_allow_html=True)
-        
-        with tab_compare:
             if result.get('old_description'):
                 col_old, col_new = st.columns(2)
                 with col_old:
-                    st.markdown("**Stary opis (Akeneo)**")
-                    st.caption(f"Długość: {len(result['old_description'])} znaków")
-                    st.markdown(result['old_description'][:500] + "..." if len(result['old_description']) > 500 else result['old_description'], unsafe_allow_html=True)
+                    st.markdown("### Stary opis (Akeneo)")
+                    st.caption(f"📏 {len(result['old_description'])} znaków")
+                    st.markdown("---")
+                    old_desc_display = result['old_description'][:800] + "..." if len(result['old_description']) > 800 else result['old_description']
+                    st.markdown(old_desc_display, unsafe_allow_html=True)
                 with col_new:
-                    st.markdown("**Nowy opis (AI)**")
-                    st.caption(f"Długość: {len(result['description_html'])} znaków")
+                    st.markdown("### Nowy opis (AI)")
+                    st.caption(f"📏 {len(result['description_html'])} znaków")
+                    st.markdown("---")
                     st.markdown(result['description_html'], unsafe_allow_html=True)
             else:
-                st.info("Brak starego opisu do porównania")
+                st.info("Brak starego opisu w Akeneo - wyświetlam tylko nowy")
+                st.markdown(result['description_html'], unsafe_allow_html=True)
         
         # Metatagi
         if 'meta_title' in st.session_state:
@@ -1145,17 +1223,67 @@ with tab2:
         st.markdown("---")
         st.subheader("Szczegóły")
         
-        for result in results:
+        for idx, result in enumerate(results):
             if result['error']:
                 with st.expander(f"❌ {result['sku']}", expanded=False):
                     st.error(result['error'])
             else:
                 with st.expander(f"✅ {result['sku']} - {format_product_title(result['title'])}"):
-                    tab_c, tab_p = st.tabs(["Kod", "Podgląd"])
+                    # Przycisk regeneracji dla tego konkretnego produktu
+                    col_regen_info, col_regen_btn = st.columns([3, 1])
+                    with col_regen_info:
+                        st.info(f"💡 Nie podoba Ci się ten opis? Wygeneruj nowy tylko dla tego produktu")
+                    with col_regen_btn:
+                        if st.button("♻️ Przeredaguj ten", key=f"regen_bulk_{result['sku']}_{idx}", use_container_width=True):
+                            with st.spinner(f"Przeredagowuję {result['sku']}..."):
+                                import random
+                                variants = ["default", "alternative", "concise", "detailed"]
+                                random_variant = random.choice(variants)
+                                
+                                token = akeneo_get_token()
+                                new_result = process_product_from_akeneo(
+                                    result['sku'],
+                                    client,
+                                    token,
+                                    channel,
+                                    locale,
+                                    random_variant
+                                )
+                                
+                                if not new_result['error']:
+                                    # Aktualizuj wynik w liście
+                                    st.session_state.bulk_results[idx] = new_result
+                                    st.success(f"✅ Przeredagowano! (wariant: {random_variant})")
+                                    st.rerun()
+                                else:
+                                    st.error(f"❌ {new_result['error']}")
+                    
+                    st.markdown("---")
+                    
+                    # Tabs z kodem i porównaniem
+                    tab_c, tab_p = st.tabs(["💻 Kod HTML", "👁️ Porównanie"])
+                    
                     with tab_c:
                         st.code(result['description_html'], language='html')
+                        st.caption(f"📏 Długość: {len(result['description_html'])} znaków")
+                    
                     with tab_p:
-                        st.markdown(result['description_html'], unsafe_allow_html=True)
+                        if result.get('old_description'):
+                            col_old, col_new = st.columns(2)
+                            with col_old:
+                                st.markdown("**🕰️ Stary opis (Akeneo)**")
+                                st.caption(f"📏 {len(result['old_description'])} znaków")
+                                st.markdown("---")
+                                old_desc_display = result['old_description'][:600] + "..." if len(result['old_description']) > 600 else result['old_description']
+                                st.markdown(old_desc_display, unsafe_allow_html=True)
+                            with col_new:
+                                st.markdown("**✨ Nowy opis (AI)**")
+                                st.caption(f"📏 {len(result['description_html'])} znaków")
+                                st.markdown("---")
+                                st.markdown(result['description_html'], unsafe_allow_html=True)
+                        else:
+                            st.info("Brak starego opisu w Akeneo")
+                            st.markdown(result['description_html'], unsafe_allow_html=True)
 
 # ═══════════════════════════════════════════════════════════════════
 # FOOTER
