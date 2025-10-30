@@ -52,6 +52,14 @@ st.markdown("""
         border-radius: 0.25rem;
         margin: 1rem 0;
     }
+    .scrollable-results {
+        max-height: 400px;
+        overflow-y: auto;
+        border: 1px solid #e0e0e0;
+        border-radius: 0.5rem;
+        padding: 1rem;
+        background: #fafafa;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -331,17 +339,17 @@ def generate_description(product_data: Dict, client: OpenAI, style_variant: str 
 ║  STRUKTURA OPISU (PROSTA I CZYTELNA)                              ║
 ╚═══════════════════════════════════════════════════════════════════╝
 
-OBOWIĄZKOWA STRUKTURA (tylko 4 elementy!):
+OBOWIĄZKOWA STRUKTURA (tylko 3 elementy!):
 
 1. <p>[AKAPIT WSTĘPNY: 4-6 zdań przedstawiających produkt, jego główne cechy i pierwsze wrażenie. Core informacje o produkcie. BEZ danych technicznych jak wymiary, rok, ISBN.]</p>
 
 2. <h2>[Jeden konkretny nagłówek z korzyścią lub cechą produktu]</h2>
 
-3. <p>[AKAPIT GŁÓWNY: 5-8 zdań rozwijających temat. Dla kogo jest produkt, co go wyróżnia, jakie emocje wzbudza, dlaczego warto. TUTAJ naturalnie wpleć dane techniczne jeśli są istotne (np. oprawa, rok, wymiary). Buduj hype i entuzjazm.]</p>
+3. <p>[AKAPIT GŁÓWNY: 5-8 zdań rozwijających temat. Dla kogo jest produkt, co go wyróżnia, jakie emocje wzbudza, dlaczego warto. TUTAJ naturalnie wpleć dane techniczne jeśli są istotne (np. oprawa, rok, wymiary). Buduj hype i entuzjazm. NA KOŃCU TEGO AKAPITU dodaj wezwanie do działania (1-2 zdania zachęcające do zakupu).]</p>
 
-4. <h3>[Wezwanie do działania - krótkie i konkretne]</h3>
+4. <h3>[Krótkie, chwytliwe wezwanie do działania - to OSTATNI element opisu]</h3>
 
-5. <p>[KRÓTKIE ZAKOŃCZENIE: 1-2 zdania zachęcające do zakupu]</p>
+KRYTYCZNE: Po H3 NIE DODAWAJ nic więcej! H3 to ostatni element.
 
 ╔═══════════════════════════════════════════════════════════════════╗
 ║  KRYTYCZNE ZASADY JĘZYKA POLSKIEGO                                ║
@@ -380,8 +388,8 @@ OBOWIĄZKOWA STRUKTURA (tylko 4 elementy!):
 
 1. AKAPITY:
    - Pierwszy akapit: 4-6 zdań (minimum 300 znaków)
-   - Akapit główny: 5-8 zdań (minimum 400 znaków)
-   - Zakończenie: 1-2 zdania (około 100 znaków)
+   - Akapit główny: 5-8 zdań (minimum 400 znaków) + CTA na końcu (1-2 zdania)
+   - Brak zakończenia po H3!
 
 2. BOLDOWANIE:
    ✅ 6-10 pojedynczych słów lub krótkich fraz (2-4 słowa)
@@ -405,11 +413,9 @@ OBOWIĄZKOWA STRUKTURA (tylko 4 elementy!):
 
 <h2>Dla kogo jest ta książka i co ją wyróżnia</h2>
 
-<p>Ten tom to obowiązkowa lektura dla fanów <b>fantasy</b> i miłośników <b>złożonych intryg politycznych</b>. Sapkowski mistrzowsko łączy wątki fabularne, tworząc mozaikę perspektyw, która buduje napięcie z każdym rozdziałem. Historia nie oszczędza czytelnika - decyzje bohaterów mają realne konsekwencje, a granica między dobrem a złem jest płynna. <b>Dynamiczna narracja</b> przeplatana scenami akcji i dialogami pełnymi subtelnego humoru sprawia, że czas lektury mija niepostrzeżenie. Wydanie w miękkiej oprawie od SuperNowej to poręczny format, idealny do czytania w podróży. Klarowna typografia i dobry papier zapewniają komfort nawet podczas długich sesji czytania, a seria Wiedźmina pozostaje jedną z najważniejszych <b>polskich sag fantasy</b> ostatnich dekad.</p>
+<p>Ten tom to obowiązkowa lektura dla fanów <b>fantasy</b> i miłośników <b>złożonych intryg politycznych</b>. Sapkowski mistrzowsko łączy wątki fabularne, tworząc mozaikę perspektyw, która buduje napięcie z każdym rozdziałem. Historia nie oszczędza czytelnika - decyzje bohaterów mają realne konsekwencje, a granica między dobrem a złem jest płynna. <b>Dynamiczna narracja</b> przeplatana scenami akcji i dialogami pełnymi subtelnego humoru sprawia, że czas lektury mija niepostrzeżenie. Wydanie w miękkiej oprawie od SuperNowej to poręczny format, idealny do czytania w podróży. Klarowna typografia i dobry papier zapewniają komfort nawet podczas długich sesji czytania, a seria Wiedźmina pozostaje jedną z najważniejszych <b>polskich sag fantasy</b> ostatnich dekad. Nie czekaj - zamów teraz i odkryj, dlaczego miliony czytelników na całym świecie pokochało tę epicką sagę.</p>
 
 <h3>Dodaj do koszyka i dołącz do legendy</h3>
-
-<p>Nie czekaj - zamów teraz i odkryj, dlaczego miliony czytelników na całym świecie pokochało <b>sagę o Wiedźminie</b>. Twoja przygoda z Czasem Pogardy zaczyna się już dziś!</p>
 
 ╔═══════════════════════════════════════════════════════════════════╗
 ║  ANTI-PRZYKŁADY (CZEGO NIE ROBIĆ!)                                ║
@@ -421,12 +427,13 @@ OBOWIĄZKOWA STRUKTURA (tylko 4 elementy!):
 ❌ ZŁE: Akapit 2 zdania → ✅ DOBRE: Akapit 5+ zdań
 ❌ ZŁE: 3 nagłówki H2 → ✅ DOBRE: 1 nagłówek H2
 ❌ ZŁE: Powtórzenie "klimat" 2x → ✅ DOBRE: Każde słowo raz
+❌ ZŁE: <h3>CTA</h3><p>Jeszcze tekst</p> → ✅ DOBRE: <h3>CTA</h3> (KONIEC!)
 
 ╔═══════════════════════════════════════════════════════════════════╗
 ║  DŁUGOŚĆ I TON                                                     ║
 ╚═══════════════════════════════════════════════════════════════════╝
 
-- Całość: 1500-2500 znaków
+- Całość: 1400-2400 znaków (krótsza bo bez dodatkowego paragrafu)
 - Ton dostosowany do produktu (książka/gra/zabawka)
 - Naturalny, płynny język
 - Entuzjastyczny ale wiarygodny
@@ -436,13 +443,16 @@ OBOWIĄZKOWA STRUKTURA (tylko 4 elementy!):
 ╚═══════════════════════════════════════════════════════════════════╝
 
 Zwróć TYLKO czysty HTML.
-Struktura: <p> → <h2> → <p> → <h3> → <p>
+Struktura: <p> → <h2> → <p> → <h3>
+KONIEC! Nic po H3!
+
 Sprawdź PRZED wysłaniem:
 - Wszystkie przypadki poprawne?
 - Akapity długie (4+ zdań)?
 - Brak powtórzeń?
 - Tylko jeden H2?
 - Brak em dash?
+- Koniec na H3 (bez dodatkowego <p>)?
 """
 
         style_additions = {
@@ -704,7 +714,7 @@ with tab1:
                 "Limit",
                 min_value=5,
                 max_value=50,
-                value=20,
+                value=10,
                 label_visibility="collapsed"
             )
         
@@ -747,11 +757,17 @@ with tab1:
                 display += " [WYŁĄCZONY]"
             product_options[display] = prod
         
-        selected_display = st.selectbox(
-            "Produkt:",
-            options=list(product_options.keys()),
-            label_visibility="collapsed"
-        )
+        # Scrollowalny kontener
+        with st.container():
+            st.markdown('<div class="scrollable-results">', unsafe_allow_html=True)
+            
+            selected_display = st.selectbox(
+                "Produkt:",
+                options=list(product_options.keys()),
+                label_visibility="collapsed"
+            )
+            
+            st.markdown('</div>', unsafe_allow_html=True)
         
         if selected_display:
             selected = product_options[selected_display]
@@ -838,8 +854,7 @@ with tab1:
                     st.markdown("### Stary opis (Akeneo)")
                     st.caption(f"📏 {len(result['old_description'])} znaków")
                     st.markdown("---")
-                    old_desc_display = result['old_description'][:800] + "..." if len(result['old_description']) > 800 else result['old_description']
-                    st.markdown(old_desc_display, unsafe_allow_html=True)
+                    st.markdown(result['old_description'], unsafe_allow_html=True)
                 with col_new:
                     st.markdown("### Nowy opis (AI)")
                     st.caption(f"📏 {len(result['description_html'])} znaków")
@@ -929,6 +944,8 @@ with tab2:
         # KOSZYK WYBRANYCH PRODUKTÓW
         if st.session_state.bulk_selected_products:
             with st.expander(f"🛒 Wybrane produkty ({len(st.session_state.bulk_selected_products)})", expanded=True):
+                st.markdown('<div class="scrollable-results">', unsafe_allow_html=True)
+                
                 for sku, prod_data in list(st.session_state.bulk_selected_products.items()):
                     col_info, col_remove = st.columns([5, 1])
                     with col_info:
@@ -939,7 +956,9 @@ with tab2:
                             del st.session_state.bulk_selected_products[sku]
                             st.rerun()
                 
+                st.markdown('</div>', unsafe_allow_html=True)
                 st.markdown("---")
+                
                 col_clear, col_info = st.columns([1, 3])
                 with col_clear:
                     if st.button("🗑️ Wyczyść wszystkie", use_container_width=True):
@@ -967,7 +986,7 @@ with tab2:
                 "Limit",
                 min_value=5,
                 max_value=100,
-                value=50,
+                value=10,
                 key="bulk_limit"
             )
         
@@ -1011,7 +1030,9 @@ with tab2:
             
             st.markdown("---")
             
-            # Lista z checkboxami - NOWA LOGIKA
+            # Lista z checkboxami w scrollowalnym kontenerze
+            st.markdown('<div class="scrollable-results">', unsafe_allow_html=True)
+            
             for prod in st.session_state.bulk_search_results:
                 col_check, col_info = st.columns([1, 6])
                 
@@ -1040,6 +1061,8 @@ with tab2:
                     status = "🟢" if prod['enabled'] else "🔴"
                     already_selected = " ✓ (w koszyku)" if is_selected else ""
                     st.write(f"{status} **{sku}** - {format_product_title(prod['title'])}{already_selected}")
+            
+            st.markdown('</div>', unsafe_allow_html=True)
     
     # METODA 2: LISTA SKU
     else:
@@ -1085,6 +1108,8 @@ with tab2:
             st.markdown("---")
             st.subheader(f"📋 Załadowane produkty ({len(st.session_state.bulk_selected_products)})")
             
+            st.markdown('<div class="scrollable-results">', unsafe_allow_html=True)
+            
             for sku, prod_data in list(st.session_state.bulk_selected_products.items()):
                 col_info, col_remove = st.columns([5, 1])
                 with col_info:
@@ -1094,6 +1119,9 @@ with tab2:
                     if st.button("🗑️", key=f"remove_list_{sku}"):
                         del st.session_state.bulk_selected_products[sku]
                         st.rerun()
+            
+            st.markdown('</div>', unsafe_allow_html=True)
+            st.markdown("---")
             
             if st.button("🗑️ Wyczyść wszystkie", use_container_width=True):
                 st.session_state.bulk_selected_products = {}
@@ -1274,8 +1302,7 @@ with tab2:
                                 st.markdown("**🕰️ Stary opis (Akeneo)**")
                                 st.caption(f"📏 {len(result['old_description'])} znaków")
                                 st.markdown("---")
-                                old_desc_display = result['old_description'][:600] + "..." if len(result['old_description']) > 600 else result['old_description']
-                                st.markdown(old_desc_display, unsafe_allow_html=True)
+                                st.markdown(result['old_description'], unsafe_allow_html=True)
                             with col_new:
                                 st.markdown("**✨ Nowy opis (AI)**")
                                 st.caption(f"📏 {len(result['description_html'])} znaków")
