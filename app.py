@@ -527,7 +527,7 @@ if 'generated_description' not in st.session_state:
 if 'bulk_results' not in st.session_state:
     st.session_state.bulk_results = []
 if 'bulk_selected_products' not in st.session_state:
-    st.session_state.bulk_selected_products = []
+    st.session_state.bulk_selected_products = {}  # Dict: {sku: product_data}
 
 # ═══════════════════════════════════════════════════════════════════
 # WALIDACJA
@@ -591,9 +591,11 @@ with st.sidebar:
 4. Zaktualizuj w PIM
 
 **Tryb zbiorczy:**
-- Zaznacz wiele produktów
+- Wyszukuj różne produkty
+- Zaznaczaj interesujące
+- Wszystkie trafiają do "koszyka"
+- Generuj wszystkie naraz
 - Lub wklej listę SKU
-- Generuj równolegle
     """)
 
 # ═══════════════════════════════════════════════════════════════════
@@ -845,6 +847,34 @@ with tab2:
     
     # METODA 1: WYSZUKIWANIE I ZAZNACZANIE
     if method == "🔍 Wyszukaj i zaznacz produkty":
+        
+        # KOSZYK WYBRANYCH PRODUKTÓW
+        if st.session_state.bulk_selected_products:
+            with st.expander(f"🛒 Wybrane produkty ({len(st.session_state.bulk_selected_products)})", expanded=True):
+                for sku, prod_data in list(st.session_state.bulk_selected_products.items()):
+                    col_info, col_remove = st.columns([5, 1])
+                    with col_info:
+                        status = "🟢" if prod_data.get('enabled', False) else "🔴"
+                        st.write(f"{status} **{sku}** - {format_product_title(prod_data.get('title', sku))}")
+                    with col_remove:
+                        if st.button("🗑️", key=f"remove_{sku}"):
+                            del st.session_state.bulk_selected_products[sku]
+                            st.rerun()
+                
+                st.markdown("---")
+                col_clear, col_info = st.columns([1, 3])
+                with col_clear:
+                    if st.button("🗑️ Wyczyść wszystkie", use_container_width=True):
+                        st.session_state.bulk_selected_products = {}
+                        st.rerun()
+                with col_info:
+                    st.info(f"Masz {len(st.session_state.bulk_selected_products)} produktów w koszyku")
+        
+        st.markdown("---")
+        
+        # WYSZUKIWARKA
+        st.subheader("🔎 Wyszukaj i dodaj produkty")
+        
         col_search, col_limit = st.columns([4, 1])
         
         with col_search:
@@ -871,7 +901,7 @@ with tab2:
                     token = akeneo_get_token()
                     results = akeneo_search_products(bulk_search, token, bulk_limit, locale)
                     st.session_state.bulk_search_results = results
-                    st.session_state.bulk_selected_products = []
+                    # NIE resetujemy bulk_selected_products!
                     
                     if results:
                         st.success(f"✅ Znaleziono {len(results)} produktów")
@@ -881,37 +911,57 @@ with tab2:
         # LISTA PRODUKTÓW DO ZAZNACZENIA
         if 'bulk_search_results' in st.session_state and st.session_state.bulk_search_results:
             st.markdown("---")
-            st.subheader("Zaznacz produkty do przetworzenia:")
+            st.subheader("Zaznacz produkty z wyników wyszukiwania:")
             
-            # Select All / Deselect All
+            # Select All / Deselect All dla aktualnych wyników
             col_all1, col_all2, col_all3 = st.columns([1, 1, 4])
             with col_all1:
-                if st.button("✅ Zaznacz wszystkie", use_container_width=True):
-                    st.session_state.bulk_selected_products = [p['identifier'] for p in st.session_state.bulk_search_results]
+                if st.button("✅ Zaznacz widoczne", use_container_width=True, help="Zaznacz wszystkie produkty z obecnych wyników"):
+                    for prod in st.session_state.bulk_search_results:
+                        st.session_state.bulk_selected_products[prod['identifier']] = {
+                            'title': prod['title'],
+                            'enabled': prod['enabled'],
+                            'family': prod['family']
+                        }
                     st.rerun()
             with col_all2:
-                if st.button("❌ Odznacz wszystkie", use_container_width=True):
-                    st.session_state.bulk_selected_products = []
+                if st.button("❌ Odznacz widoczne", use_container_width=True, help="Odznacz wszystkie z obecnych wyników"):
+                    for prod in st.session_state.bulk_search_results:
+                        if prod['identifier'] in st.session_state.bulk_selected_products:
+                            del st.session_state.bulk_selected_products[prod['identifier']]
                     st.rerun()
             
             st.markdown("---")
             
-            # Lista z checkboxami
+            # Lista z checkboxami - NOWA LOGIKA
             for prod in st.session_state.bulk_search_results:
                 col_check, col_info = st.columns([1, 6])
                 
+                sku = prod['identifier']
+                is_selected = sku in st.session_state.bulk_selected_products
+                
                 with col_check:
-                    is_selected = prod['identifier'] in st.session_state.bulk_selected_products
-                    if st.checkbox("", value=is_selected, key=f"check_{prod['identifier']}"):
-                        if prod['identifier'] not in st.session_state.bulk_selected_products:
-                            st.session_state.bulk_selected_products.append(prod['identifier'])
-                    else:
-                        if prod['identifier'] in st.session_state.bulk_selected_products:
-                            st.session_state.bulk_selected_products.remove(prod['identifier'])
+                    checkbox_key = f"check_{sku}_{bulk_search}"  # Unikalny key z frazą wyszukiwania
+                    checked = st.checkbox("", value=is_selected, key=checkbox_key, label_visibility="collapsed")
+                    
+                    # Aktualizacja stanu
+                    if checked and not is_selected:
+                        # Dodaj do wybranych
+                        st.session_state.bulk_selected_products[sku] = {
+                            'title': prod['title'],
+                            'enabled': prod['enabled'],
+                            'family': prod['family']
+                        }
+                        st.rerun()
+                    elif not checked and is_selected:
+                        # Usuń z wybranych
+                        del st.session_state.bulk_selected_products[sku]
+                        st.rerun()
                 
                 with col_info:
                     status = "🟢" if prod['enabled'] else "🔴"
-                    st.write(f"{status} **{prod['identifier']}** - {format_product_title(prod['title'])}")
+                    already_selected = " ✓ (w koszyku)" if is_selected else ""
+                    st.write(f"{status} **{sku}** - {format_product_title(prod['title'])}{already_selected}")
     
     # METODA 2: LISTA SKU
     else:
@@ -928,13 +978,54 @@ with tab2:
                 st.warning("⚠️ Wklej listę SKU")
             else:
                 skus = [s.strip() for s in skus_text.split('\n') if s.strip()]
-                st.session_state.bulk_selected_products = skus
-                st.success(f"✅ Załadowano {len(skus)} SKU")
+                
+                # Pobierz info o produktach i dodaj do wybranych
+                with st.spinner(f"Ładuję {len(skus)} produktów..."):
+                    token = akeneo_get_token()
+                    for sku in skus:
+                        try:
+                            product = akeneo_get_product_details(sku, token, channel, locale)
+                            if product:
+                                st.session_state.bulk_selected_products[sku] = {
+                                    'title': product.get('title', sku),
+                                    'enabled': product.get('enabled', False),
+                                    'family': product.get('family', '')
+                                }
+                        except:
+                            # Jeśli nie można pobrać, dodaj z podstawowymi danymi
+                            st.session_state.bulk_selected_products[sku] = {
+                                'title': sku,
+                                'enabled': True,
+                                'family': ''
+                            }
+                
+                st.success(f"✅ Załadowano {len(skus)} produktów do koszyka")
+                st.rerun()
+        
+        # Pokaż załadowane
+        if st.session_state.bulk_selected_products:
+            st.markdown("---")
+            st.subheader(f"📋 Załadowane produkty ({len(st.session_state.bulk_selected_products)})")
+            
+            for sku, prod_data in list(st.session_state.bulk_selected_products.items()):
+                col_info, col_remove = st.columns([5, 1])
+                with col_info:
+                    status = "🟢" if prod_data.get('enabled', False) else "🔴"
+                    st.write(f"{status} **{sku}** - {format_product_title(prod_data.get('title', sku))}")
+                with col_remove:
+                    if st.button("🗑️", key=f"remove_list_{sku}"):
+                        del st.session_state.bulk_selected_products[sku]
+                        st.rerun()
+            
+            if st.button("🗑️ Wyczyść wszystkie", use_container_width=True):
+                st.session_state.bulk_selected_products = {}
+                st.rerun()
     
     # GENEROWANIE ZBIORCZE
     if st.session_state.bulk_selected_products:
         st.markdown("---")
-        st.subheader("🚀 Generowanie")
+        st.markdown("---")
+        st.subheader("🚀 Generowanie opisów")
         
         col_count, col_variant = st.columns([1, 2])
         
@@ -959,7 +1050,7 @@ with tab2:
                 status_text = st.empty()
                 
                 token = akeneo_get_token()
-                skus = st.session_state.bulk_selected_products
+                skus = list(st.session_state.bulk_selected_products.keys())
                 
                 with ThreadPoolExecutor(max_workers=5) as executor:
                     futures = {
@@ -989,8 +1080,8 @@ with tab2:
                 st.rerun()
         
         with col_clear:
-            if st.button("🗑️ Wyczyść wybór", use_container_width=True):
-                st.session_state.bulk_selected_products = []
+            if st.button("🗑️ Wyczyść koszyk", use_container_width=True):
+                st.session_state.bulk_selected_products = {}
                 st.session_state.bulk_results = []
                 st.rerun()
     
