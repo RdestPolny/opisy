@@ -7,13 +7,15 @@ import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict, List, Optional, Tuple
 import time
+from datetime import datetime
+from pathlib import Path
 
 # ═══════════════════════════════════════════════════════════════════
 # KONFIGURACJA STRONY
 # ═══════════════════════════════════════════════════════════════════
 
 st.set_page_config(
-    page_title="Generator Opisów Produktów v2.1",
+    page_title="Generator Opisów Produktów v2.2",
     page_icon="📚",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -89,6 +91,74 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ═══════════════════════════════════════════════════════════════════
+# BAZA ZOPTYMALIZOWANYCH PRODUKTÓW
+# ═══════════════════════════════════════════════════════════════════
+
+DB_PATH = Path(".streamlit/optimized_products.json")
+
+def ensure_db_exists():
+    """Tworzy plik bazy jeśli nie istnieje"""
+    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    if not DB_PATH.exists():
+        DB_PATH.write_text("[]")
+
+def load_optimized_products() -> List[Dict]:
+    """Wczytuje bazę zoptymalizowanych produktów"""
+    ensure_db_exists()
+    try:
+        with open(DB_PATH, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except:
+        return []
+
+def save_optimized_products(products: List[Dict]):
+    """Zapisuje bazę zoptymalizowanych produktów"""
+    ensure_db_exists()
+    with open(DB_PATH, 'w', encoding='utf-8') as f:
+        json.dump(products, f, ensure_ascii=False, indent=2)
+
+def add_optimized_product(sku: str, title: str, url: str):
+    """Dodaje produkt do bazy zoptymalizowanych"""
+    products = load_optimized_products()
+    
+    existing = next((p for p in products if p['sku'] == sku), None)
+    
+    if existing:
+        existing['last_optimized'] = datetime.now().isoformat()
+        existing['title'] = title
+        existing['url'] = url
+    else:
+        products.append({
+            'sku': sku,
+            'title': title,
+            'url': url,
+            'first_optimized': datetime.now().isoformat(),
+            'last_optimized': datetime.now().isoformat()
+        })
+    
+    save_optimized_products(products)
+
+def generate_product_url(title: str) -> str:
+    """Generuje URL produktu na podstawie nazwy"""
+    slug = title.lower()
+    
+    replacements = {
+        'ą': 'a', 'ć': 'c', 'ę': 'e', 'ł': 'l', 'ń': 'n',
+        'ó': 'o', 'ś': 's', 'ź': 'z', 'ż': 'z',
+        'Ą': 'a', 'Ć': 'c', 'Ę': 'e', 'Ł': 'l', 'Ń': 'n',
+        'Ó': 'o', 'Ś': 's', 'Ź': 'z', 'Ż': 'z'
+    }
+    for old, new in replacements.items():
+        slug = slug.replace(old, new)
+    
+    slug = re.sub(r'[^a-z0-9\s-]', '', slug)
+    slug = re.sub(r'[\s-]+', '-', slug)
+    slug = slug.strip('-')
+    
+    return f"https://bookland.com.pl/{slug}"
+
+
+# ═══════════════════════════════════════════════════════════════════
 # FUNKCJE POMOCNICZE
 # ═══════════════════════════════════════════════════════════════════
 
@@ -112,15 +182,12 @@ def clean_ai_fingerprints(text: str) -> str:
 
 def remove_checklist_from_output(text: str) -> str:
     """Usuwa checklist z końca odpowiedzi (dla gpt-4o-mini)"""
-    # Usuwa wszystko po słowie "Checklist"
     if "Checklist:" in text or "checklist:" in text:
         text = re.split(r'[Cc]hecklist:', text)[0]
     
-    # Usuwa checkboxy na końcu
     lines = text.split('\n')
     cleaned_lines = []
     for line in lines:
-        # Pomija linie zaczynające się od checkbox
         if line.strip().startswith('☑'):
             continue
         cleaned_lines.append(line)
@@ -526,16 +593,6 @@ H3: "Zamów teraz i dołącz do detektywów w poszukiwaniu zdrowia"
 - Tylko myślnik "-" (NIE em dash "—" ani en dash "–")
 """
 
-        # Dodaj wariant stylu
-        style_additions = {
-            "alternative": "\n\nStyl alternatywny: bardziej bezpośredni ton, krótsze zdania, mocniejsze CTA. Użyj wariantu B lub C.",
-            "concise": "\n\nStyl zwięzły: informacje bez ozdobników, konkretnie. 1500-1900 znaków. Użyj wariantu C.",
-            "detailed": "\n\nStyl szczegółowy: rozbudowany storytelling, głębszy kontekst. 2100-2500 znaków. Użyj wariantu A."
-        }
-        
-        if style_variant in style_additions:
-            system_prompt += style_additions[style_variant]
-
         # Końcówka promptu - różna dla modeli
         if model == "gpt-5-nano":
             # Dla gpt-5-nano - z checklistą (do internal reasoning)
@@ -621,7 +678,6 @@ PAMIĘTAJ:
                 max_tokens=2500
             )
             result = strip_code_fences(response.choices[0].message.content)
-            # Usuń ewentualną checklistę z outputu
             result = remove_checklist_from_output(result)
         
         result = clean_ai_fingerprints(result)
@@ -687,7 +743,7 @@ Meta description: [treść]"""
     except Exception as e:
         return "", ""
 
-def process_product_from_akeneo(sku: str, client: OpenAI, token: str, channel: str, locale: str, model: str = "gpt-5-nano", style_variant: str = "default") -> Dict:
+def process_product_from_akeneo(sku: str, client: OpenAI, token: str, channel: str, locale: str, model: str = "gpt-5-nano") -> Dict:
     """Przetwarza pojedynczy produkt z Akeneo"""
     try:
         product_details = akeneo_get_product_details(sku, token, channel, locale)
@@ -697,6 +753,7 @@ def process_product_from_akeneo(sku: str, client: OpenAI, token: str, channel: s
                 'sku': sku,
                 'title': '',
                 'description_html': '',
+                'url': '',
                 'error': 'Produkt nie znaleziony',
                 'description_quality': ('error', 'Produkt nie znaleziony')
             }
@@ -719,6 +776,9 @@ def process_product_from_akeneo(sku: str, client: OpenAI, token: str, channel: s
         original_desc = product_details.get('description', '') or product_details.get('short_description', '')
         quality_status, quality_msg = validate_description_quality(original_desc)
         
+        # Generuj URL produktu
+        product_url = generate_product_url(product_details['title'])
+        
         product_data = {
             'title': product_details['title'],
             'author': product_details.get('author', ''),
@@ -726,14 +786,15 @@ def process_product_from_akeneo(sku: str, client: OpenAI, token: str, channel: s
             'description': original_desc
         }
         
-        # Generowanie
-        description_html = generate_description(product_data, client, model, style_variant)
+        # Generowanie - zawsze default
+        description_html = generate_description(product_data, client, model, "default")
         
         if "BŁĄD" in description_html:
             return {
                 'sku': sku,
                 'title': product_details['title'],
                 'description_html': '',
+                'url': product_url,
                 'error': description_html,
                 'description_quality': (quality_status, quality_msg)
             }
@@ -742,6 +803,7 @@ def process_product_from_akeneo(sku: str, client: OpenAI, token: str, channel: s
             'sku': sku,
             'title': product_details['title'],
             'description_html': description_html,
+            'url': product_url,
             'old_description': original_desc,
             'error': None,
             'description_quality': (quality_status, quality_msg)
@@ -752,6 +814,7 @@ def process_product_from_akeneo(sku: str, client: OpenAI, token: str, channel: s
             'sku': sku,
             'title': '',
             'description_html': '',
+            'url': '',
             'error': str(e),
             'description_quality': ('error', str(e))
         }
@@ -770,6 +833,10 @@ if 'bulk_results' not in st.session_state:
     st.session_state.bulk_results = []
 if 'bulk_selected_products' not in st.session_state:
     st.session_state.bulk_selected_products = {}
+if 'hide_search' not in st.session_state:
+    st.session_state.hide_search = False
+if 'products_to_send' not in st.session_state:
+    st.session_state.products_to_send = {}
 
 # ═══════════════════════════════════════════════════════════════════
 # WALIDACJA
@@ -827,11 +894,73 @@ with st.sidebar:
     
     st.markdown("---")
     
-    st.header("📊 Warianty stylistyczne")
-    st.caption("**default** - elastyczny, różne struktury (A/B/C)")
-    st.caption("**alternative** - bezpośredni, wariant B/C")
-    st.caption("**concise** - zwięzły, wariant C")
-    st.caption("**detailed** - szczegółowy, wariant A")
+    # BAZA ZOPTYMALIZOWANYCH PRODUKTÓW
+    st.header("📊 Baza zoptymalizowanych")
+    
+    optimized_products = load_optimized_products()
+    
+    if optimized_products:
+        st.metric("Produkty w bazie", len(optimized_products))
+        
+        with st.expander("📋 Zobacz listę", expanded=False):
+            # Sortowanie po dacie (najnowsze pierwsze)
+            sorted_products = sorted(
+                optimized_products, 
+                key=lambda x: x.get('last_optimized', ''), 
+                reverse=True
+            )
+            
+            # Pokazuj po 10 na stronę
+            items_per_page = 10
+            total_pages = (len(sorted_products) + items_per_page - 1) // items_per_page
+            
+            if 'current_page' not in st.session_state:
+                st.session_state.current_page = 0
+            
+            start_idx = st.session_state.current_page * items_per_page
+            end_idx = start_idx + items_per_page
+            page_products = sorted_products[start_idx:end_idx]
+            
+            for prod in page_products:
+                with st.container():
+                    st.markdown(f"**{prod['sku']}**")
+                    st.caption(format_product_title(prod['title'], 60))
+                    
+                    # Parsuj datę
+                    try:
+                        dt = datetime.fromisoformat(prod['last_optimized'])
+                        date_str = dt.strftime("%d.%m.%Y %H:%M")
+                    except:
+                        date_str = prod['last_optimized'][:16]
+                    
+                    st.caption(f"📅 {date_str}")
+                    
+                    if prod.get('url'):
+                        st.caption(f"🔗 [{prod['url']}]({prod['url']})")
+                    
+                    st.markdown("---")
+            
+            # Paginacja
+            if total_pages > 1:
+                col_prev, col_info, col_next = st.columns([1, 2, 1])
+                with col_prev:
+                    if st.button("◀", disabled=(st.session_state.current_page == 0)):
+                        st.session_state.current_page -= 1
+                        st.rerun()
+                with col_info:
+                    st.caption(f"Strona {st.session_state.current_page + 1}/{total_pages}")
+                with col_next:
+                    if st.button("▶", disabled=(st.session_state.current_page >= total_pages - 1)):
+                        st.session_state.current_page += 1
+                        st.rerun()
+        
+        if st.button("🗑️ Wyczyść bazę", type="secondary"):
+            if st.checkbox("Potwierdź usunięcie"):
+                save_optimized_products([])
+                st.success("✅ Baza wyczyszczona")
+                st.rerun()
+    else:
+        st.info("Baza jest pusta")
     
     st.markdown("---")
     
@@ -848,12 +977,14 @@ with st.sidebar:
 - Wyszukuj różne produkty
 - Zaznaczaj interesujące
 - Generuj wszystkie naraz
+- Wybierz które wysłać
 
-**v2.1 - Nowości:**
-✅ Wybór modelu (5-nano/4o-mini)
-✅ Walidacja opisu oryginalnego
-✅ Lepszy UI (mniej scrollowania)
-✅ Poprawiony prompt (bez checklisty)
+**v2.2 - Nowości:**
+✅ Baza zoptymalizowanych produktów
+✅ Wybór które opisy wysłać
+✅ Ukrywanie wyszukiwarki po generowaniu
+✅ Automatyczne URL produktów
+✅ Tylko wariant default
     """)
 
 # ═══════════════════════════════════════════════════════════════════
@@ -867,198 +998,172 @@ tab1, tab2 = st.tabs(["🔍 Wyszukaj produkt", "📦 Tryb zbiorczy"])
 # ═══════════════════════════════════════════════════════════════════
 
 with tab1:
-    # WYSZUKIWARKA
-    with st.container():
-        st.subheader("🔎 Wyszukiwanie produktu")
-        
-        col_search, col_limit = st.columns([4, 1])
-        
-        with col_search:
-            search_query = st.text_input(
-                "Wpisz nazwę produktu lub SKU:",
-                placeholder="np. Harry Potter",
-                label_visibility="collapsed"
-            )
-        
-        with col_limit:
-            search_limit = st.number_input(
-                "Limit",
-                min_value=5,
-                max_value=50,
-                value=10,
-                label_visibility="collapsed"
-            )
-        
-        col_btn1, col_btn2 = st.columns([1, 1])
-        
-        with col_btn1:
-            if st.button("🔍 Szukaj", type="primary", use_container_width=True):
-                if not search_query:
-                    st.warning("⚠️ Wpisz frazę do wyszukania")
-                else:
-                    with st.spinner(f"Wyszukuję '{search_query}'..."):
-                        token = akeneo_get_token()
-                        results = akeneo_search_products(search_query, token, search_limit, locale)
-                        st.session_state.search_results = results
-                        st.session_state.selected_product = None
-                        st.session_state.generated_description = None
-                        
-                        if results:
-                            st.success(f"✅ Znaleziono {len(results)} produktów!")
-                        else:
-                            st.warning("⚠️ Nie znaleziono produktów")
-        
-        with col_btn2:
-            if st.button("🗑️ Wyczyść", use_container_width=True):
-                st.session_state.search_results = []
-                st.session_state.selected_product = None
-                st.session_state.generated_description = None
-                st.rerun()
-    
-    st.markdown("---")
-    
-    # WYNIKI WYSZUKIWANIA
-    if st.session_state.search_results:
-        st.subheader("📋 Wybierz produkt")
-        
-        product_options = {}
-        for prod in st.session_state.search_results:
-            display = f"{prod['identifier']} - {format_product_title(prod['title'])}"
-            if not prod['enabled']:
-                display += " [WYŁĄCZONY]"
-            product_options[display] = prod
-        
+    # WYSZUKIWARKA - ukryj po wygenerowaniu
+    if not st.session_state.hide_search:
         with st.container():
-            st.markdown('<div class="scrollable-results">', unsafe_allow_html=True)
+            st.subheader("🔎 Wyszukiwanie produktu")
             
-            selected_display = st.selectbox(
-                "Produkt:",
-                options=list(product_options.keys()),
-                label_visibility="collapsed"
-            )
+            col_search, col_limit = st.columns([4, 1])
             
-            st.markdown('</div>', unsafe_allow_html=True)
-        
-        if selected_display:
-            selected = product_options[selected_display]
-            st.session_state.selected_product = selected
-            
-            # INFO BOX
-            col_info1, col_info2, col_info3 = st.columns(3)
-            with col_info1:
-                st.metric("SKU", selected['identifier'])
-            with col_info2:
-                st.metric("Rodzina", selected['family'] or "N/A")
-            with col_info3:
-                status = "✅ Aktywny" if selected['enabled'] else "❌ Wyłączony"
-                st.metric("Status", status)
-            
-            st.markdown("---")
-            
-            # GENEROWANIE - ulepszone UI
-            st.subheader("✨ Generowanie opisu")
-            
-            # Najpierw sprawdź jakość opisu
-            token = akeneo_get_token()
-            product_details = akeneo_get_product_details(selected['identifier'], token, channel, locale)
-            
-            if product_details:
-                original_desc = product_details.get('description', '') or product_details.get('short_description', '')
-                quality_status, quality_msg = validate_description_quality(original_desc)
-                
-                # Pokaż ostrzeżenie o jakości opisu
-                if quality_status == 'error':
-                    st.markdown('<div class="error-box">', unsafe_allow_html=True)
-                    st.markdown(quality_msg, unsafe_allow_html=True)
-                    st.markdown('</div>', unsafe_allow_html=True)
-                elif quality_status == 'warning':
-                    st.markdown('<div class="warning-box">', unsafe_allow_html=True)
-                    st.markdown(quality_msg, unsafe_allow_html=True)
-                    st.markdown('</div>', unsafe_allow_html=True)
-                else:
-                    st.markdown('<div class="info-box">', unsafe_allow_html=True)
-                    st.markdown(quality_msg, unsafe_allow_html=True)
-                    st.markdown('</div>', unsafe_allow_html=True)
-            
-            col_gen1, col_gen2, col_gen3, col_gen4 = st.columns([2, 2, 1, 1])
-            
-            with col_gen1:
-                style_variant = st.selectbox(
-                    "Wariant:",
-                    ["default", "alternative", "concise", "detailed"],
-                    index=0
+            with col_search:
+                search_query = st.text_input(
+                    "Wpisz nazwę produktu lub SKU:",
+                    placeholder="np. Harry Potter",
+                    label_visibility="collapsed"
                 )
             
-            with col_gen2:
-                generate_meta = st.checkbox("Generuj metatagi SEO", value=False)
+            with col_limit:
+                search_limit = st.number_input(
+                    "Limit",
+                    min_value=5,
+                    max_value=50,
+                    value=10,
+                    label_visibility="collapsed"
+                )
             
-            with col_gen3:
-                st.write("")
-                st.write("")
-                if st.button("🚀 Generuj", type="primary", use_container_width=True):
-                    with st.spinner("Generuję..."):
-                        token = akeneo_get_token()
-                        result = process_product_from_akeneo(
-                            selected['identifier'],
-                            client,
-                            token,
-                            channel,
-                            locale,
-                            model_choice,
-                            style_variant
-                        )
-                        
-                        if result['error']:
-                            st.error(f"❌ {result['error']}")
-                        else:
-                            st.session_state.generated_description = result
-                            
-                            if generate_meta:
-                                product_data = {
-                                    'title': result['title'],
-                                    'details': '',
-                                    'description': result['description_html']
-                                }
-                                meta_title, meta_desc = generate_meta_tags(product_data, client, model_choice)
-                                st.session_state.meta_title = meta_title
-                                st.session_state.meta_description = meta_desc
-                            
-                            st.success("✅ Opis wygenerowany!")
-                            st.rerun()
+            col_btn1, col_btn2 = st.columns([1, 1])
             
-            with col_gen4:
-                st.write("")
-                st.write("")
-                if st.session_state.generated_description:
-                    if st.button("♻️", use_container_width=True, help="Przeredaguj"):
-                        with st.spinner("Przeredagowuję..."):
-                            import random
-                            variants = ["default", "alternative", "concise", "detailed"]
-                            random_variant = random.choice(variants)
-                            
+            with col_btn1:
+                if st.button("🔍 Szukaj", type="primary", use_container_width=True):
+                    if not search_query:
+                        st.warning("⚠️ Wpisz frazę do wyszukania")
+                    else:
+                        with st.spinner(f"Wyszukuję '{search_query}'..."):
                             token = akeneo_get_token()
-                            new_result = process_product_from_akeneo(
-                                st.session_state.generated_description['sku'],
+                            results = akeneo_search_products(search_query, token, search_limit, locale)
+                            st.session_state.search_results = results
+                            st.session_state.selected_product = None
+                            st.session_state.generated_description = None
+                            
+                            if results:
+                                st.success(f"✅ Znaleziono {len(results)} produktów!")
+                            else:
+                                st.warning("⚠️ Nie znaleziono produktów")
+            
+            with col_btn2:
+                if st.button("🗑️ Wyczyść", use_container_width=True):
+                    st.session_state.search_results = []
+                    st.session_state.selected_product = None
+                    st.session_state.generated_description = None
+                    st.session_state.hide_search = False
+                    st.rerun()
+        
+        st.markdown("---")
+        
+        # WYNIKI WYSZUKIWANIA
+        if st.session_state.search_results:
+            st.subheader("📋 Wybierz produkt")
+            
+            product_options = {}
+            for prod in st.session_state.search_results:
+                display = f"{prod['identifier']} - {format_product_title(prod['title'])}"
+                if not prod['enabled']:
+                    display += " [WYŁĄCZONY]"
+                product_options[display] = prod
+            
+            with st.container():
+                st.markdown('<div class="scrollable-results">', unsafe_allow_html=True)
+                
+                selected_display = st.selectbox(
+                    "Produkt:",
+                    options=list(product_options.keys()),
+                    label_visibility="collapsed"
+                )
+                
+                st.markdown('</div>', unsafe_allow_html=True)
+            
+            if selected_display:
+                selected = product_options[selected_display]
+                st.session_state.selected_product = selected
+                
+                # INFO BOX
+                col_info1, col_info2, col_info3 = st.columns(3)
+                with col_info1:
+                    st.metric("SKU", selected['identifier'])
+                with col_info2:
+                    st.metric("Rodzina", selected['family'] or "N/A")
+                with col_info3:
+                    status = "✅ Aktywny" if selected['enabled'] else "❌ Wyłączony"
+                    st.metric("Status", status)
+                
+                st.markdown("---")
+                
+                # GENEROWANIE
+                st.subheader("✨ Generowanie opisu")
+                
+                # Sprawdź jakość opisu
+                token = akeneo_get_token()
+                product_details = akeneo_get_product_details(selected['identifier'], token, channel, locale)
+                
+                if product_details:
+                    original_desc = product_details.get('description', '') or product_details.get('short_description', '')
+                    quality_status, quality_msg = validate_description_quality(original_desc)
+                    
+                    if quality_status == 'error':
+                        st.markdown('<div class="error-box">', unsafe_allow_html=True)
+                        st.markdown(quality_msg, unsafe_allow_html=True)
+                        st.markdown('</div>', unsafe_allow_html=True)
+                    elif quality_status == 'warning':
+                        st.markdown('<div class="warning-box">', unsafe_allow_html=True)
+                        st.markdown(quality_msg, unsafe_allow_html=True)
+                        st.markdown('</div>', unsafe_allow_html=True)
+                    else:
+                        st.markdown('<div class="info-box">', unsafe_allow_html=True)
+                        st.markdown(quality_msg, unsafe_allow_html=True)
+                        st.markdown('</div>', unsafe_allow_html=True)
+                
+                col_gen1, col_gen2 = st.columns([2, 1])
+                
+                with col_gen1:
+                    generate_meta = st.checkbox("Generuj metatagi SEO", value=False)
+                
+                with col_gen2:
+                    st.write("")
+                    st.write("")
+                    if st.button("🚀 Generuj", type="primary", use_container_width=True):
+                        with st.spinner("Generuję..."):
+                            token = akeneo_get_token()
+                            result = process_product_from_akeneo(
+                                selected['identifier'],
                                 client,
                                 token,
                                 channel,
                                 locale,
-                                model_choice,
-                                random_variant
+                                model_choice
                             )
                             
-                            if not new_result['error']:
-                                st.session_state.generated_description = new_result
-                                st.success(f"✅ Przeredagowano! (wariant: {random_variant})")
+                            if result['error']:
+                                st.error(f"❌ {result['error']}")
+                            else:
+                                st.session_state.generated_description = result
+                                st.session_state.hide_search = True
+                                
+                                if generate_meta:
+                                    product_data = {
+                                        'title': result['title'],
+                                        'details': '',
+                                        'description': result['description_html']
+                                    }
+                                    meta_title, meta_desc = generate_meta_tags(product_data, client, model_choice)
+                                    st.session_state.meta_title = meta_title
+                                    st.session_state.meta_description = meta_desc
+                                
+                                st.success("✅ Opis wygenerowany!")
                                 st.rerun()
     
-    # WYNIK GENEROWANIA - ulepszone UI z sticky buttons
+    # WYNIK GENEROWANIA
     if st.session_state.generated_description:
-        st.markdown("---")
-        
         result = st.session_state.generated_description
         
-        # STICKY ACTION BUTTONS na górze
+        # Przycisk powrotu do wyszukiwarki
+        if st.button("⬅️ Powrót do wyszukiwarki", use_container_width=True):
+            st.session_state.hide_search = False
+            st.session_state.generated_description = None
+            st.rerun()
+        
+        st.markdown("---")
+        
+        # STICKY ACTION BUTTONS
         st.markdown('<div class="sticky-actions">', unsafe_allow_html=True)
         st.markdown("### 🎯 Akcje:")
         col_act1, col_act2, col_act3, col_act4 = st.columns([2, 2, 2, 2])
@@ -1066,10 +1171,6 @@ with tab1:
         with col_act1:
             if st.button("♻️ Przeredaguj", use_container_width=True, type="secondary", key="regen_top"):
                 with st.spinner("Przeredagowuję..."):
-                    import random
-                    variants = ["default", "alternative", "concise", "detailed"]
-                    random_variant = random.choice(variants)
-                    
                     token = akeneo_get_token()
                     new_result = process_product_from_akeneo(
                         result['sku'],
@@ -1077,8 +1178,7 @@ with tab1:
                         token,
                         channel,
                         locale,
-                        model_choice,
-                        random_variant
+                        model_choice
                     )
                     
                     if not new_result['error']:
@@ -1097,7 +1197,6 @@ with tab1:
             )
         
         with col_act3:
-            # Kopiowanie do schowka (przez download trick)
             st.download_button(
                 "📋 Kopiuj kod",
                 result['description_html'],
@@ -1117,6 +1216,8 @@ with tab1:
                             channel,
                             locale
                         )
+                        # Dodaj do bazy zoptymalizowanych
+                        add_optimized_product(result['sku'], result['title'], result['url'])
                         st.success(f"✅ Zaktualizowano: {result['sku']}")
                         st.balloons()
                 except Exception as e:
@@ -1124,7 +1225,7 @@ with tab1:
         
         st.markdown('</div>', unsafe_allow_html=True)
         
-        # Wyświetl ostrzeżenie o jakości opisu oryginalnego
+        # Wyświetl ostrzeżenie o jakości
         if 'description_quality' in result:
             quality_status, quality_msg = result['description_quality']
             if quality_status in ['warning', 'error']:
@@ -1137,13 +1238,16 @@ with tab1:
         
         st.subheader("📄 Wygenerowany opis")
         
+        # URL produktu
+        if result.get('url'):
+            st.info(f"🔗 URL produktu: [{result['url']}]({result['url']})")
+        
         # Tabs dla kodu i podglądu
         tab_code, tab_preview = st.tabs(["💻 Kod HTML", "👁️ Porównanie"])
         
         with tab_code:
             st.code(result['description_html'], language='html')
             
-            # Analiza długości i struktury
             col_stats1, col_stats2, col_stats3, col_stats4 = st.columns(4)
             with col_stats1:
                 st.metric("Długość", f"{len(result['description_html'])} zn")
@@ -1154,8 +1258,7 @@ with tab1:
                 h2_count = result['description_html'].count('<h2>')
                 st.metric("H2", h2_count)
             with col_stats4:
-                model_used = model_choice
-                st.metric("Model", model_used)
+                st.metric("Model", model_choice)
         
         with tab_preview:
             if result.get('old_description'):
@@ -1393,24 +1496,14 @@ with tab2:
         st.markdown("---")
         st.subheader("🚀 Generowanie opisów")
         
-        col_count, col_variant = st.columns([1, 2])
-        
-        with col_count:
-            st.metric("Produkty do przetworzenia", len(st.session_state.bulk_selected_products))
-        
-        with col_variant:
-            bulk_style = st.selectbox(
-                "Wariant stylistyczny:",
-                ["default", "alternative", "concise", "detailed"],
-                index=0,
-                key="bulk_style"
-            )
+        st.metric("Produkty do przetworzenia", len(st.session_state.bulk_selected_products))
         
         col_gen, col_clear = st.columns([1, 1])
         
         with col_gen:
             if st.button("🚀 Rozpocznij generowanie zbiorcze", type="primary", use_container_width=True):
                 st.session_state.bulk_results = []
+                st.session_state.products_to_send = {}
                 
                 progress_bar = st.progress(0, text="Rozpoczynam...")
                 status_text = st.empty()
@@ -1427,8 +1520,7 @@ with tab2:
                             token,
                             channel,
                             locale,
-                            model_choice,
-                            bulk_style
+                            model_choice
                         ): sku for sku in skus
                     }
                     
@@ -1436,6 +1528,11 @@ with tab2:
                     for i, future in enumerate(as_completed(futures)):
                         result = future.result()
                         results_temp.append(result)
+                        
+                        # Automatycznie zaznacz pomyślne
+                        if not result['error']:
+                            st.session_state.products_to_send[result['sku']] = True
+                        
                         progress = (i + 1) / len(skus)
                         progress_bar.progress(progress, text=f"Przetworzono {i+1}/{len(skus)}")
                         status_text.text(f"Ostatni: {result['sku']}")
@@ -1450,6 +1547,7 @@ with tab2:
             if st.button("🗑️ Wyczyść koszyk", use_container_width=True):
                 st.session_state.bulk_selected_products = {}
                 st.session_state.bulk_results = []
+                st.session_state.products_to_send = {}
                 st.rerun()
     
     # WYNIKI ZBIORCZE
@@ -1461,14 +1559,13 @@ with tab2:
         successful = [r for r in results if not r['error']]
         errors = [r for r in results if r['error']]
         
-        # Zlicz ostrzeżenia o jakości opisu
         quality_warnings = [r for r in successful if 'description_quality' in r and r['description_quality'][0] in ['warning', 'error']]
         
         col_m1, col_m2, col_m3, col_m4 = st.columns(4)
         col_m1.metric("Wszystkie", len(results))
         col_m2.metric("Sukces", len(successful), delta=f"+{len(successful)}")
         col_m3.metric("Błędy", len(errors), delta=f"-{len(errors)}" if errors else "0")
-        col_m4.metric("Ostrzeżenia", len(quality_warnings), help="Produkty ze słabymi opisami oryginalnymi")
+        col_m4.metric("Ostrzeżenia", len(quality_warnings))
         
         # CSV Export
         df = pd.DataFrame(results)
@@ -1480,55 +1577,108 @@ with tab2:
             use_container_width=True
         )
         
-        # Wysyłka do PIM
+        # Wybór i wysyłka do PIM
         if successful:
             st.markdown("---")
-            if st.button("✅ Wyślij wszystkie pomyślne do PIM", type="primary", use_container_width=True):
-                success_count = 0
-                error_count = 0
-                error_msgs = []
+            st.subheader("📤 Wysyłka do Akeneo PIM")
+            
+            # Checkboxy wyboru
+            col_select_all, col_deselect_all, col_info_select = st.columns([1, 1, 2])
+            with col_select_all:
+                if st.button("✅ Zaznacz wszystkie", use_container_width=True):
+                    for r in successful:
+                        st.session_state.products_to_send[r['sku']] = True
+                    st.rerun()
+            with col_deselect_all:
+                if st.button("❌ Odznacz wszystkie", use_container_width=True):
+                    for r in successful:
+                        st.session_state.products_to_send[r['sku']] = False
+                    st.rerun()
+            with col_info_select:
+                selected_count = sum(1 for v in st.session_state.products_to_send.values() if v)
+                st.info(f"Wybrano: {selected_count}/{len(successful)}")
+            
+            st.markdown("---")
+            
+            # Lista z checkboxami
+            for idx, result in enumerate(successful):
+                col_check, col_sku, col_title = st.columns([0.5, 1.5, 4])
                 
-                progress_pim = st.progress(0, text="Wysyłam do PIM...")
+                with col_check:
+                    checked = st.checkbox(
+                        "",
+                        value=st.session_state.products_to_send.get(result['sku'], True),
+                        key=f"send_check_{result['sku']}_{idx}",
+                        label_visibility="collapsed"
+                    )
+                    st.session_state.products_to_send[result['sku']] = checked
                 
-                for i, result in enumerate(successful):
-                    try:
-                        akeneo_update_description(
-                            result['sku'],
-                            result['description_html'],
-                            channel,
-                            locale
-                        )
-                        success_count += 1
-                    except Exception as e:
-                        error_count += 1
-                        error_msgs.append(f"{result['sku']}: {str(e)}")
+                with col_sku:
+                    warning_icon = ""
+                    if 'description_quality' in result and result['description_quality'][0] in ['warning', 'error']:
+                        warning_icon = " ⚠️"
+                    st.write(f"**{result['sku']}**{warning_icon}")
+                
+                with col_title:
+                    st.write(format_product_title(result['title']))
+            
+            st.markdown("---")
+            
+            # Przycisk wysyłki
+            selected_to_send = [r for r in successful if st.session_state.products_to_send.get(r['sku'], False)]
+            
+            if selected_to_send:
+                if st.button(f"✅ Wyślij zaznaczone do PIM ({len(selected_to_send)})", type="primary", use_container_width=True):
+                    success_count = 0
+                    error_count = 0
+                    error_msgs = []
                     
-                    progress_pim.progress((i + 1) / len(successful))
-                
-                st.success(f"✅ Zaktualizowano {success_count} produktów")
-                
-                if error_count > 0:
-                    st.error(f"❌ Błędy: {error_count}")
-                    for msg in error_msgs:
-                        st.text(msg)
+                    progress_pim = st.progress(0, text="Wysyłam do PIM...")
+                    
+                    for i, result in enumerate(selected_to_send):
+                        try:
+                            akeneo_update_description(
+                                result['sku'],
+                                result['description_html'],
+                                channel,
+                                locale
+                            )
+                            # Dodaj do bazy
+                            add_optimized_product(result['sku'], result['title'], result['url'])
+                            success_count += 1
+                        except Exception as e:
+                            error_count += 1
+                            error_msgs.append(f"{result['sku']}: {str(e)}")
+                        
+                        progress_pim.progress((i + 1) / len(selected_to_send))
+                    
+                    st.success(f"✅ Zaktualizowano {success_count} produktów")
+                    
+                    if error_count > 0:
+                        st.error(f"❌ Błędy: {error_count}")
+                        for msg in error_msgs:
+                            st.text(msg)
+                    
+                    st.balloons()
+            else:
+                st.warning("⚠️ Nie wybrano żadnych produktów do wysyłki")
         
         # Szczegóły wyników
         st.markdown("---")
-        st.subheader("Szczegóły")
+        st.subheader("📋 Szczegóły wszystkich wyników")
         
         for idx, result in enumerate(results):
             if result['error']:
                 with st.expander(f"❌ {result['sku']}", expanded=False):
                     st.error(result['error'])
             else:
-                # Pokaż ikonę ostrzeżenia jeśli słaby opis
                 warning_icon = ""
                 if 'description_quality' in result and result['description_quality'][0] in ['warning', 'error']:
                     warning_icon = " ⚠️"
                 
                 with st.expander(f"✅ {result['sku']} - {format_product_title(result['title'])}{warning_icon}"):
                     
-                    # Pokaż ostrzeżenie o jakości
+                    # Ostrzeżenie o jakości
                     if 'description_quality' in result:
                         quality_status, quality_msg = result['description_quality']
                         if quality_status in ['warning', 'error']:
@@ -1537,16 +1687,16 @@ with tab2:
                             else:
                                 st.warning(quality_msg)
                     
+                    # URL produktu
+                    if result.get('url'):
+                        st.info(f"🔗 [{result['url']}]({result['url']})")
+                    
                     col_regen_info, col_regen_btn = st.columns([3, 1])
                     with col_regen_info:
                         st.info(f"💡 Nie podoba Ci się ten opis? Wygeneruj nowy")
                     with col_regen_btn:
                         if st.button("♻️ Przeredaguj", key=f"regen_bulk_{result['sku']}_{idx}", use_container_width=True):
                             with st.spinner(f"Przeredagowuję {result['sku']}..."):
-                                import random
-                                variants = ["default", "alternative", "concise", "detailed"]
-                                random_variant = random.choice(variants)
-                                
                                 token = akeneo_get_token()
                                 new_result = process_product_from_akeneo(
                                     result['sku'],
@@ -1554,8 +1704,7 @@ with tab2:
                                     token,
                                     channel,
                                     locale,
-                                    model_choice,
-                                    random_variant
+                                    model_choice
                                 )
                                 
                                 if not new_result['error']:
@@ -1606,10 +1755,10 @@ with tab2:
 st.markdown("---")
 st.markdown("""
 <div style='text-align: center; color: #666; padding: 20px;'>
-    <p><strong>Generator Opisów Produktów v2.1</strong></p>
+    <p><strong>Generator Opisów Produktów v2.2</strong></p>
     <p>Powered by OpenAI GPT-5-nano & GPT-4o-mini | Akeneo PIM Integration</p>
     <p style='font-size: 0.8rem; margin-top: 10px;'>
-        ✨ v2.1: Walidacja opisów, lepszy UI, bez checklisty w outputcie
+        ✨ v2.2: Baza zoptymalizowanych + Wybór opisów do wysyłki + Ukrywanie wyszukiwarki + Auto URL
     </p>
 </div>
 """, unsafe_allow_html=True)
