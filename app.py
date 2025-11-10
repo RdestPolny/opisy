@@ -15,7 +15,7 @@ from pathlib import Path
 # ═══════════════════════════════════════════════════════════════════
 
 st.set_page_config(
-    page_title="Generator Opisów Produktów v2.2",
+    page_title="Generator Opisów Produktów v3.0",
     page_icon="📚",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -823,18 +823,10 @@ def process_product_from_akeneo(sku: str, client: OpenAI, token: str, channel: s
 # SESSION STATE
 # ═══════════════════════════════════════════════════════════════════
 
-if 'search_results' not in st.session_state:
-    st.session_state.search_results = []
-if 'selected_product' not in st.session_state:
-    st.session_state.selected_product = None
-if 'generated_description' not in st.session_state:
-    st.session_state.generated_description = None
 if 'bulk_results' not in st.session_state:
     st.session_state.bulk_results = []
 if 'bulk_selected_products' not in st.session_state:
     st.session_state.bulk_selected_products = {}
-if 'hide_search' not in st.session_state:
-    st.session_state.hide_search = False
 if 'products_to_send' not in st.session_state:
     st.session_state.products_to_send = {}
 
@@ -861,7 +853,7 @@ client = OpenAI()
 col_logo, col_title = st.columns([1, 5])
 with col_title:
     st.markdown('<h1 class="main-header">📚 Generator Opisów Produktów</h1>', unsafe_allow_html=True)
-    st.markdown('<p class="sub-header">Inteligentne opisy produktów z Akeneo PIM • Powered by OpenAI GPT</p>', unsafe_allow_html=True)
+    st.markdown('<p class="sub-header">Masowe generowanie opisów produktów z Akeneo PIM • Powered by OpenAI GPT</p>', unsafe_allow_html=True)
 
 # ═══════════════════════════════════════════════════════════════════
 # SIDEBAR
@@ -967,510 +959,43 @@ with st.sidebar:
     st.header("ℹ️ Informacje")
     st.info("""
 **Jak używać:**
-1. Wyszukaj produkt w Akeneo
-2. Wybierz z listy
-3. **Sprawdź jakość opisu** oryginalnego
-4. Wygeneruj nowy opis
-5. Zaktualizuj w PIM
+1. Wyszukaj produkty lub wklej listę SKU
+2. Zaznacz produkty do generowania
+3. Kliknij "Rozpocznij generowanie"
+4. **Sprawdź jakość** wygenerowanych opisów
+5. **Wybierz które wysłać** do PIM
+6. Zaktualizuj zaznaczone w Akeneo
 
-**Tryb zbiorczy:**
-- Wyszukuj różne produkty
-- Zaznaczaj interesujące
-- Generuj wszystkie naraz
-- Wybierz które wysłać
-
-**v2.2 - Nowości:**
-✅ Baza zoptymalizowanych produktów
-✅ Wybór które opisy wysłać
-✅ Ukrywanie wyszukiwarki po generowaniu
+**v3.0 - Nowości:**
+✅ Tylko tryb zbiorczy (uproszczony interfejs)
+✅ Baza zoptymalizowanych produktów z historią
+✅ Wybór które opisy wysłać do PIM
 ✅ Automatyczne URL produktów
-✅ Tylko wariant default
+✅ Model: tylko default, bez wariantów
+✅ Walidacja jakości opisów oryginalnych
     """)
 
 # ═══════════════════════════════════════════════════════════════════
-# MAIN TABS
+# GŁÓWNA FUNKCJONALNOŚĆ - TRYB ZBIORCZY
 # ═══════════════════════════════════════════════════════════════════
 
-tab1, tab2 = st.tabs(["🔍 Wyszukaj produkt", "📦 Tryb zbiorczy"])
+st.subheader("📦 Przetwarzanie wielu produktów")
 
-# ═══════════════════════════════════════════════════════════════════
-# TAB 1: POJEDYNCZY PRODUKT
-# ═══════════════════════════════════════════════════════════════════
+# WYBÓR METODY
+method = st.radio(
+    "Wybierz metodę:",
+    ["🔍 Wyszukaj i zaznacz produkty", "📋 Wklej listę SKU"],
+    horizontal=True
+)
 
-with tab1:
-    # WYSZUKIWARKA - ukryj po wygenerowaniu
-    if not st.session_state.hide_search:
-        with st.container():
-            st.subheader("🔎 Wyszukiwanie produktu")
-            
-            col_search, col_limit = st.columns([4, 1])
-            
-            with col_search:
-                search_query = st.text_input(
-                    "Wpisz nazwę produktu lub SKU:",
-                    placeholder="np. Harry Potter",
-                    label_visibility="collapsed"
-                )
-            
-            with col_limit:
-                search_limit = st.number_input(
-                    "Limit",
-                    min_value=5,
-                    max_value=50,
-                    value=10,
-                    label_visibility="collapsed"
-                )
-            
-            col_btn1, col_btn2 = st.columns([1, 1])
-            
-            with col_btn1:
-                if st.button("🔍 Szukaj", type="primary", use_container_width=True):
-                    if not search_query:
-                        st.warning("⚠️ Wpisz frazę do wyszukania")
-                    else:
-                        with st.spinner(f"Wyszukuję '{search_query}'..."):
-                            token = akeneo_get_token()
-                            results = akeneo_search_products(search_query, token, search_limit, locale)
-                            st.session_state.search_results = results
-                            st.session_state.selected_product = None
-                            st.session_state.generated_description = None
-                            
-                            if results:
-                                st.success(f"✅ Znaleziono {len(results)} produktów!")
-                            else:
-                                st.warning("⚠️ Nie znaleziono produktów")
-            
-            with col_btn2:
-                if st.button("🗑️ Wyczyść", use_container_width=True):
-                    st.session_state.search_results = []
-                    st.session_state.selected_product = None
-                    st.session_state.generated_description = None
-                    st.session_state.hide_search = False
-                    st.rerun()
-        
-        st.markdown("---")
-        
-        # WYNIKI WYSZUKIWANIA
-        if st.session_state.search_results:
-            st.subheader("📋 Wybierz produkt")
-            
-            product_options = {}
-            for prod in st.session_state.search_results:
-                display = f"{prod['identifier']} - {format_product_title(prod['title'])}"
-                if not prod['enabled']:
-                    display += " [WYŁĄCZONY]"
-                product_options[display] = prod
-            
-            with st.container():
-                st.markdown('<div class="scrollable-results">', unsafe_allow_html=True)
-                
-                selected_display = st.selectbox(
-                    "Produkt:",
-                    options=list(product_options.keys()),
-                    label_visibility="collapsed"
-                )
-                
-                st.markdown('</div>', unsafe_allow_html=True)
-            
-            if selected_display:
-                selected = product_options[selected_display]
-                st.session_state.selected_product = selected
-                
-                # INFO BOX
-                col_info1, col_info2, col_info3 = st.columns(3)
-                with col_info1:
-                    st.metric("SKU", selected['identifier'])
-                with col_info2:
-                    st.metric("Rodzina", selected['family'] or "N/A")
-                with col_info3:
-                    status = "✅ Aktywny" if selected['enabled'] else "❌ Wyłączony"
-                    st.metric("Status", status)
-                
-                st.markdown("---")
-                
-                # GENEROWANIE
-                st.subheader("✨ Generowanie opisu")
-                
-                # Sprawdź jakość opisu
-                token = akeneo_get_token()
-                product_details = akeneo_get_product_details(selected['identifier'], token, channel, locale)
-                
-                if product_details:
-                    original_desc = product_details.get('description', '') or product_details.get('short_description', '')
-                    quality_status, quality_msg = validate_description_quality(original_desc)
-                    
-                    if quality_status == 'error':
-                        st.markdown('<div class="error-box">', unsafe_allow_html=True)
-                        st.markdown(quality_msg, unsafe_allow_html=True)
-                        st.markdown('</div>', unsafe_allow_html=True)
-                    elif quality_status == 'warning':
-                        st.markdown('<div class="warning-box">', unsafe_allow_html=True)
-                        st.markdown(quality_msg, unsafe_allow_html=True)
-                        st.markdown('</div>', unsafe_allow_html=True)
-                    else:
-                        st.markdown('<div class="info-box">', unsafe_allow_html=True)
-                        st.markdown(quality_msg, unsafe_allow_html=True)
-                        st.markdown('</div>', unsafe_allow_html=True)
-                
-                col_gen1, col_gen2 = st.columns([2, 1])
-                
-                with col_gen1:
-                    generate_meta = st.checkbox("Generuj metatagi SEO", value=False)
-                
-                with col_gen2:
-                    st.write("")
-                    st.write("")
-                    if st.button("🚀 Generuj", type="primary", use_container_width=True):
-                        with st.spinner("Generuję..."):
-                            token = akeneo_get_token()
-                            result = process_product_from_akeneo(
-                                selected['identifier'],
-                                client,
-                                token,
-                                channel,
-                                locale,
-                                model_choice
-                            )
-                            
-                            if result['error']:
-                                st.error(f"❌ {result['error']}")
-                            else:
-                                st.session_state.generated_description = result
-                                st.session_state.hide_search = True
-                                
-                                if generate_meta:
-                                    product_data = {
-                                        'title': result['title'],
-                                        'details': '',
-                                        'description': result['description_html']
-                                    }
-                                    meta_title, meta_desc = generate_meta_tags(product_data, client, model_choice)
-                                    st.session_state.meta_title = meta_title
-                                    st.session_state.meta_description = meta_desc
-                                
-                                st.success("✅ Opis wygenerowany!")
-                                st.rerun()
-    
-    # WYNIK GENEROWANIA
-    if st.session_state.generated_description:
-        result = st.session_state.generated_description
-        
-        # Przycisk powrotu do wyszukiwarki
-        if st.button("⬅️ Powrót do wyszukiwarki", use_container_width=True):
-            st.session_state.hide_search = False
-            st.session_state.generated_description = None
-            st.rerun()
-        
-        st.markdown("---")
-        
-        # STICKY ACTION BUTTONS
-        st.markdown('<div class="sticky-actions">', unsafe_allow_html=True)
-        st.markdown("### 🎯 Akcje:")
-        col_act1, col_act2, col_act3, col_act4 = st.columns([2, 2, 2, 2])
-        
-        with col_act1:
-            if st.button("♻️ Przeredaguj", use_container_width=True, type="secondary", key="regen_top"):
-                with st.spinner("Przeredagowuję..."):
-                    token = akeneo_get_token()
-                    new_result = process_product_from_akeneo(
-                        result['sku'],
-                        client,
-                        token,
-                        channel,
-                        locale,
-                        model_choice
-                    )
-                    
-                    if not new_result['error']:
-                        st.session_state.generated_description = new_result
-                        st.success(f"✅ Przeredagowano!")
-                        st.rerun()
-        
-        with col_act2:
-            st.download_button(
-                "📥 Pobierz HTML",
-                result['description_html'],
-                file_name=f"{result['sku']}_description.html",
-                mime="text/html",
-                use_container_width=True,
-                key="download_top"
-            )
-        
-        with col_act3:
-            st.download_button(
-                "📋 Kopiuj kod",
-                result['description_html'],
-                file_name=f"clipboard.txt",
-                mime="text/plain",
-                use_container_width=True,
-                key="copy_top"
-            )
-        
-        with col_act4:
-            if st.button("✅ Zaktualizuj w PIM", type="primary", use_container_width=True, key="update_top"):
-                try:
-                    with st.spinner("Aktualizuję w Akeneo..."):
-                        akeneo_update_description(
-                            result['sku'],
-                            result['description_html'],
-                            channel,
-                            locale
-                        )
-                        # Dodaj do bazy zoptymalizowanych
-                        add_optimized_product(result['sku'], result['title'], result['url'])
-                        st.success(f"✅ Zaktualizowano: {result['sku']}")
-                        st.balloons()
-                except Exception as e:
-                    st.error(f"❌ Błąd: {str(e)}")
-        
-        st.markdown('</div>', unsafe_allow_html=True)
-        
-        # Wyświetl ostrzeżenie o jakości
-        if 'description_quality' in result:
-            quality_status, quality_msg = result['description_quality']
-            if quality_status in ['warning', 'error']:
-                if quality_status == 'error':
-                    st.markdown('<div class="error-box">', unsafe_allow_html=True)
-                else:
-                    st.markdown('<div class="warning-box">', unsafe_allow_html=True)
-                st.markdown(f"**Uwaga o oryginalnym opisie:** {quality_msg}", unsafe_allow_html=True)
-                st.markdown('</div>', unsafe_allow_html=True)
-        
-        st.subheader("📄 Wygenerowany opis")
-        
-        # URL produktu
-        if result.get('url'):
-            st.info(f"🔗 URL produktu: [{result['url']}]({result['url']})")
-        
-        # Tabs dla kodu i podglądu
-        tab_code, tab_preview = st.tabs(["💻 Kod HTML", "👁️ Porównanie"])
-        
-        with tab_code:
-            st.code(result['description_html'], language='html')
-            
-            col_stats1, col_stats2, col_stats3, col_stats4 = st.columns(4)
-            with col_stats1:
-                st.metric("Długość", f"{len(result['description_html'])} zn")
-            with col_stats2:
-                bold_count = result['description_html'].count('<b>')
-                st.metric("Bold", bold_count)
-            with col_stats3:
-                h2_count = result['description_html'].count('<h2>')
-                st.metric("H2", h2_count)
-            with col_stats4:
-                st.metric("Model", model_choice)
-        
-        with tab_preview:
-            if result.get('old_description'):
-                col_old, col_new = st.columns(2)
-                with col_old:
-                    st.markdown("### 🕰️ Stary opis")
-                    st.caption(f"📏 {len(result['old_description'])} znaków")
-                    st.markdown("---")
-                    st.markdown(result['old_description'], unsafe_allow_html=True)
-                with col_new:
-                    st.markdown("### ✨ Nowy opis")
-                    st.caption(f"📏 {len(result['description_html'])} znaków")
-                    st.markdown("---")
-                    st.markdown(result['description_html'], unsafe_allow_html=True)
-            else:
-                st.warning("⚠️ Brak starego opisu w Akeneo")
-                st.markdown("### ✨ Wygenerowany opis:")
-                st.markdown(result['description_html'], unsafe_allow_html=True)
-        
-        # Metatagi
-        if 'meta_title' in st.session_state:
-            st.markdown("---")
-            st.subheader("🏷️ Metatagi SEO")
-            col_meta1, col_meta2 = st.columns(2)
-            with col_meta1:
-                title_len = len(st.session_state.meta_title)
-                color = "🟢" if title_len <= 60 else "🔴"
-                st.markdown(f"**Meta Title** {color} ({title_len}/60)")
-                st.code(st.session_state.meta_title)
-            with col_meta2:
-                desc_len = len(st.session_state.meta_description)
-                color = "🟢" if desc_len <= 160 else "🔴"
-                st.markdown(f"**Meta Description** {color} ({desc_len}/160)")
-                st.code(st.session_state.meta_description)
+st.markdown("---")
 
-# ═══════════════════════════════════════════════════════════════════
-# TAB 2: TRYB ZBIORCZY
-# ═══════════════════════════════════════════════════════════════════
-
-with tab2:
-    st.subheader("📦 Przetwarzanie wielu produktów")
+# METODA 1: WYSZUKIWANIE I ZAZNACZANIE
+if method == "🔍 Wyszukaj i zaznacz produkty":
     
-    # WYBÓR METODY
-    method = st.radio(
-        "Wybierz metodę:",
-        ["🔍 Wyszukaj i zaznacz produkty", "📋 Wklej listę SKU"],
-        horizontal=True
-    )
-    
-    st.markdown("---")
-    
-    # METODA 1: WYSZUKIWANIE I ZAZNACZANIE
-    if method == "🔍 Wyszukaj i zaznacz produkty":
-        
-        # KOSZYK WYBRANYCH PRODUKTÓW
-        if st.session_state.bulk_selected_products:
-            with st.expander(f"🛒 Wybrane produkty ({len(st.session_state.bulk_selected_products)})", expanded=True):
-                st.markdown('<div class="scrollable-results">', unsafe_allow_html=True)
-                
-                for sku, prod_data in list(st.session_state.bulk_selected_products.items()):
-                    col_info, col_remove = st.columns([5, 1])
-                    with col_info:
-                        status = "🟢" if prod_data.get('enabled', False) else "🔴"
-                        st.write(f"{status} **{sku}** - {format_product_title(prod_data.get('title', sku))}")
-                    with col_remove:
-                        if st.button("🗑️", key=f"remove_{sku}"):
-                            del st.session_state.bulk_selected_products[sku]
-                            st.rerun()
-                
-                st.markdown('</div>', unsafe_allow_html=True)
-                st.markdown("---")
-                
-                col_clear, col_info = st.columns([1, 3])
-                with col_clear:
-                    if st.button("🗑️ Wyczyść wszystkie", use_container_width=True):
-                        st.session_state.bulk_selected_products = {}
-                        st.rerun()
-                with col_info:
-                    st.info(f"Masz {len(st.session_state.bulk_selected_products)} produktów w koszyku")
-        
-        st.markdown("---")
-        
-        # WYSZUKIWARKA
-        st.subheader("🔎 Wyszukaj i dodaj produkty")
-        
-        col_search, col_limit = st.columns([4, 1])
-        
-        with col_search:
-            bulk_search = st.text_input(
-                "Wyszukaj produkty:",
-                placeholder="np. Harry Potter",
-                key="bulk_search"
-            )
-        
-        with col_limit:
-            bulk_limit = st.number_input(
-                "Limit",
-                min_value=5,
-                max_value=100,
-                value=10,
-                key="bulk_limit"
-            )
-        
-        if st.button("🔍 Szukaj produktów", type="primary", use_container_width=True):
-            if not bulk_search:
-                st.warning("⚠️ Wpisz frazę")
-            else:
-                with st.spinner("Wyszukuję..."):
-                    token = akeneo_get_token()
-                    results = akeneo_search_products(bulk_search, token, bulk_limit, locale)
-                    st.session_state.bulk_search_results = results
-                    
-                    if results:
-                        st.success(f"✅ Znaleziono {len(results)} produktów")
-                    else:
-                        st.warning("⚠️ Nie znaleziono produktów")
-        
-        # LISTA PRODUKTÓW DO ZAZNACZENIA
-        if 'bulk_search_results' in st.session_state and st.session_state.bulk_search_results:
-            st.markdown("---")
-            st.subheader("Zaznacz produkty z wyników wyszukiwania:")
-            
-            col_all1, col_all2, col_all3 = st.columns([1, 1, 4])
-            with col_all1:
-                if st.button("✅ Zaznacz widoczne", use_container_width=True):
-                    for prod in st.session_state.bulk_search_results:
-                        st.session_state.bulk_selected_products[prod['identifier']] = {
-                            'title': prod['title'],
-                            'enabled': prod['enabled'],
-                            'family': prod['family']
-                        }
-                    st.rerun()
-            with col_all2:
-                if st.button("❌ Odznacz widoczne", use_container_width=True):
-                    for prod in st.session_state.bulk_search_results:
-                        if prod['identifier'] in st.session_state.bulk_selected_products:
-                            del st.session_state.bulk_selected_products[prod['identifier']]
-                    st.rerun()
-            
-            st.markdown("---")
-            
-            st.markdown('<div class="scrollable-results">', unsafe_allow_html=True)
-            
-            for prod in st.session_state.bulk_search_results:
-                col_check, col_info = st.columns([1, 6])
-                
-                sku = prod['identifier']
-                is_selected = sku in st.session_state.bulk_selected_products
-                
-                with col_check:
-                    checkbox_key = f"check_{sku}_{bulk_search}"
-                    checked = st.checkbox("", value=is_selected, key=checkbox_key, label_visibility="collapsed")
-                    
-                    if checked and not is_selected:
-                        st.session_state.bulk_selected_products[sku] = {
-                            'title': prod['title'],
-                            'enabled': prod['enabled'],
-                            'family': prod['family']
-                        }
-                        st.rerun()
-                    elif not checked and is_selected:
-                        del st.session_state.bulk_selected_products[sku]
-                        st.rerun()
-                
-                with col_info:
-                    status = "🟢" if prod['enabled'] else "🔴"
-                    already_selected = " ✓ (w koszyku)" if is_selected else ""
-                    st.write(f"{status} **{sku}** - {format_product_title(prod['title'])}{already_selected}")
-            
-            st.markdown('</div>', unsafe_allow_html=True)
-    
-    # METODA 2: LISTA SKU
-    else:
-        st.markdown("Wklej listę SKU (jeden na linię):")
-        skus_text = st.text_area(
-            "SKU:",
-            height=200,
-            placeholder="BL-001\nBL-002\nBL-003",
-            label_visibility="collapsed"
-        )
-        
-        if st.button("📋 Załaduj produkty po SKU", type="primary", use_container_width=True):
-            if not skus_text.strip():
-                st.warning("⚠️ Wklej listę SKU")
-            else:
-                skus = [s.strip() for s in skus_text.split('\n') if s.strip()]
-                
-                with st.spinner(f"Ładuję {len(skus)} produktów..."):
-                    token = akeneo_get_token()
-                    for sku in skus:
-                        try:
-                            product = akeneo_get_product_details(sku, token, channel, locale)
-                            if product:
-                                st.session_state.bulk_selected_products[sku] = {
-                                    'title': product.get('title', sku),
-                                    'enabled': product.get('enabled', False),
-                                    'family': product.get('family', '')
-                                }
-                        except:
-                            st.session_state.bulk_selected_products[sku] = {
-                                'title': sku,
-                                'enabled': True,
-                                'family': ''
-                            }
-                
-                st.success(f"✅ Załadowano {len(skus)} produktów do koszyka")
-                st.rerun()
-        
-        if st.session_state.bulk_selected_products:
-            st.markdown("---")
-            st.subheader(f"📋 Załadowane produkty ({len(st.session_state.bulk_selected_products)})")
-            
+    # KOSZYK WYBRANYCH PRODUKTÓW
+    if st.session_state.bulk_selected_products:
+        with st.expander(f"🛒 Wybrane produkty ({len(st.session_state.bulk_selected_products)})", expanded=True):
             st.markdown('<div class="scrollable-results">', unsafe_allow_html=True)
             
             for sku, prod_data in list(st.session_state.bulk_selected_products.items()):
@@ -1479,274 +1004,429 @@ with tab2:
                     status = "🟢" if prod_data.get('enabled', False) else "🔴"
                     st.write(f"{status} **{sku}** - {format_product_title(prod_data.get('title', sku))}")
                 with col_remove:
-                    if st.button("🗑️", key=f"remove_list_{sku}"):
+                    if st.button("🗑️", key=f"remove_{sku}"):
                         del st.session_state.bulk_selected_products[sku]
                         st.rerun()
             
             st.markdown('</div>', unsafe_allow_html=True)
             st.markdown("---")
             
-            if st.button("🗑️ Wyczyść wszystkie", use_container_width=True):
-                st.session_state.bulk_selected_products = {}
-                st.rerun()
+            col_clear, col_info = st.columns([1, 3])
+            with col_clear:
+                if st.button("🗑️ Wyczyść wszystkie", use_container_width=True):
+                    st.session_state.bulk_selected_products = {}
+                    st.rerun()
+            with col_info:
+                st.info(f"Masz {len(st.session_state.bulk_selected_products)} produktów w koszyku")
     
-    # GENEROWANIE ZBIORCZE
+    st.markdown("---")
+    
+    # WYSZUKIWARKA
+    st.subheader("🔎 Wyszukaj i dodaj produkty")
+    
+    col_search, col_limit = st.columns([4, 1])
+    
+    with col_search:
+        bulk_search = st.text_input(
+            "Wyszukaj produkty:",
+            placeholder="np. Harry Potter",
+            key="bulk_search"
+        )
+    
+    with col_limit:
+        bulk_limit = st.number_input(
+            "Limit",
+            min_value=5,
+            max_value=100,
+            value=10,
+            key="bulk_limit"
+        )
+    
+    if st.button("🔍 Szukaj produktów", type="primary", use_container_width=True):
+        if not bulk_search:
+            st.warning("⚠️ Wpisz frazę")
+        else:
+            with st.spinner("Wyszukuję..."):
+                token = akeneo_get_token()
+                results = akeneo_search_products(bulk_search, token, bulk_limit, locale)
+                st.session_state.bulk_search_results = results
+                
+                if results:
+                    st.success(f"✅ Znaleziono {len(results)} produktów")
+                else:
+                    st.warning("⚠️ Nie znaleziono produktów")
+    
+    # LISTA PRODUKTÓW DO ZAZNACZENIA
+    if 'bulk_search_results' in st.session_state and st.session_state.bulk_search_results:
+        st.markdown("---")
+        st.subheader("Zaznacz produkty z wyników wyszukiwania:")
+        
+        col_all1, col_all2, col_all3 = st.columns([1, 1, 4])
+        with col_all1:
+            if st.button("✅ Zaznacz widoczne", use_container_width=True):
+                for prod in st.session_state.bulk_search_results:
+                    st.session_state.bulk_selected_products[prod['identifier']] = {
+                        'title': prod['title'],
+                        'enabled': prod['enabled'],
+                        'family': prod['family']
+                    }
+                st.rerun()
+        with col_all2:
+            if st.button("❌ Odznacz widoczne", use_container_width=True):
+                for prod in st.session_state.bulk_search_results:
+                    if prod['identifier'] in st.session_state.bulk_selected_products:
+                        del st.session_state.bulk_selected_products[prod['identifier']]
+                st.rerun()
+        
+        st.markdown("---")
+        
+        st.markdown('<div class="scrollable-results">', unsafe_allow_html=True)
+        
+        for prod in st.session_state.bulk_search_results:
+            col_check, col_info = st.columns([1, 6])
+            
+            sku = prod['identifier']
+            is_selected = sku in st.session_state.bulk_selected_products
+            
+            with col_check:
+                checkbox_key = f"check_{sku}_{bulk_search}"
+                checked = st.checkbox("", value=is_selected, key=checkbox_key, label_visibility="collapsed")
+                
+                if checked and not is_selected:
+                    st.session_state.bulk_selected_products[sku] = {
+                        'title': prod['title'],
+                        'enabled': prod['enabled'],
+                        'family': prod['family']
+                    }
+                    st.rerun()
+                elif not checked and is_selected:
+                    del st.session_state.bulk_selected_products[sku]
+                    st.rerun()
+            
+            with col_info:
+                status = "🟢" if prod['enabled'] else "🔴"
+                already_selected = " ✓ (w koszyku)" if is_selected else ""
+                st.write(f"{status} **{sku}** - {format_product_title(prod['title'])}{already_selected}")
+        
+        st.markdown('</div>', unsafe_allow_html=True)
+
+# METODA 2: LISTA SKU
+else:
+    st.markdown("Wklej listę SKU (jeden na linię):")
+    skus_text = st.text_area(
+        "SKU:",
+        height=200,
+        placeholder="BL-001\nBL-002\nBL-003",
+        label_visibility="collapsed"
+    )
+    
+    if st.button("📋 Załaduj produkty po SKU", type="primary", use_container_width=True):
+        if not skus_text.strip():
+            st.warning("⚠️ Wklej listę SKU")
+        else:
+            skus = [s.strip() for s in skus_text.split('\n') if s.strip()]
+            
+            with st.spinner(f"Ładuję {len(skus)} produktów..."):
+                token = akeneo_get_token()
+                for sku in skus:
+                    try:
+                        product = akeneo_get_product_details(sku, token, channel, locale)
+                        if product:
+                            st.session_state.bulk_selected_products[sku] = {
+                                'title': product.get('title', sku),
+                                'enabled': product.get('enabled', False),
+                                'family': product.get('family', '')
+                            }
+                    except:
+                        st.session_state.bulk_selected_products[sku] = {
+                            'title': sku,
+                            'enabled': True,
+                            'family': ''
+                        }
+            
+            st.success(f"✅ Załadowano {len(skus)} produktów do koszyka")
+            st.rerun()
+    
     if st.session_state.bulk_selected_products:
         st.markdown("---")
+        st.subheader(f"📋 Załadowane produkty ({len(st.session_state.bulk_selected_products)})")
+        
+        st.markdown('<div class="scrollable-results">', unsafe_allow_html=True)
+        
+        for sku, prod_data in list(st.session_state.bulk_selected_products.items()):
+            col_info, col_remove = st.columns([5, 1])
+            with col_info:
+                status = "🟢" if prod_data.get('enabled', False) else "🔴"
+                st.write(f"{status} **{sku}** - {format_product_title(prod_data.get('title', sku))}")
+            with col_remove:
+                if st.button("🗑️", key=f"remove_list_{sku}"):
+                    del st.session_state.bulk_selected_products[sku]
+                    st.rerun()
+        
+        st.markdown('</div>', unsafe_allow_html=True)
         st.markdown("---")
-        st.subheader("🚀 Generowanie opisów")
         
-        st.metric("Produkty do przetworzenia", len(st.session_state.bulk_selected_products))
-        
-        col_gen, col_clear = st.columns([1, 1])
-        
-        with col_gen:
-            if st.button("🚀 Rozpocznij generowanie zbiorcze", type="primary", use_container_width=True):
-                st.session_state.bulk_results = []
-                st.session_state.products_to_send = {}
-                
-                progress_bar = st.progress(0, text="Rozpoczynam...")
-                status_text = st.empty()
-                
-                token = akeneo_get_token()
-                skus = list(st.session_state.bulk_selected_products.keys())
-                
-                with ThreadPoolExecutor(max_workers=5) as executor:
-                    futures = {
-                        executor.submit(
-                            process_product_from_akeneo,
-                            sku,
-                            client,
-                            token,
-                            channel,
-                            locale,
-                            model_choice
-                        ): sku for sku in skus
-                    }
-                    
-                    results_temp = []
-                    for i, future in enumerate(as_completed(futures)):
-                        result = future.result()
-                        results_temp.append(result)
-                        
-                        # Automatycznie zaznacz pomyślne
-                        if not result['error']:
-                            st.session_state.products_to_send[result['sku']] = True
-                        
-                        progress = (i + 1) / len(skus)
-                        progress_bar.progress(progress, text=f"Przetworzono {i+1}/{len(skus)}")
-                        status_text.text(f"Ostatni: {result['sku']}")
-                
-                st.session_state.bulk_results = results_temp
-                progress_bar.progress(1.0, text="✅ Zakończono!")
-                st.success(f"✅ Przetworzono {len(results_temp)} produktów")
-                time.sleep(1)
-                st.rerun()
-        
-        with col_clear:
-            if st.button("🗑️ Wyczyść koszyk", use_container_width=True):
-                st.session_state.bulk_selected_products = {}
-                st.session_state.bulk_results = []
-                st.session_state.products_to_send = {}
-                st.rerun()
+        if st.button("🗑️ Wyczyść wszystkie", use_container_width=True):
+            st.session_state.bulk_selected_products = {}
+            st.rerun()
+
+# GENEROWANIE ZBIORCZE
+if st.session_state.bulk_selected_products:
+    st.markdown("---")
+    st.markdown("---")
+    st.subheader("🚀 Generowanie opisów")
     
-    # WYNIKI ZBIORCZE
-    if st.session_state.bulk_results:
+    st.metric("Produkty do przetworzenia", len(st.session_state.bulk_selected_products))
+    
+    col_gen, col_clear = st.columns([1, 1])
+    
+    with col_gen:
+        if st.button("🚀 Rozpocznij generowanie zbiorcze", type="primary", use_container_width=True):
+            st.session_state.bulk_results = []
+            st.session_state.products_to_send = {}
+            
+            progress_bar = st.progress(0, text="Rozpoczynam...")
+            status_text = st.empty()
+            
+            token = akeneo_get_token()
+            skus = list(st.session_state.bulk_selected_products.keys())
+            
+            with ThreadPoolExecutor(max_workers=5) as executor:
+                futures = {
+                    executor.submit(
+                        process_product_from_akeneo,
+                        sku,
+                        client,
+                        token,
+                        channel,
+                        locale,
+                        model_choice
+                    ): sku for sku in skus
+                }
+                
+                results_temp = []
+                for i, future in enumerate(as_completed(futures)):
+                    result = future.result()
+                    results_temp.append(result)
+                    
+                    # Automatycznie zaznacz pomyślne
+                    if not result['error']:
+                        st.session_state.products_to_send[result['sku']] = True
+                    
+                    progress = (i + 1) / len(skus)
+                    progress_bar.progress(progress, text=f"Przetworzono {i+1}/{len(skus)}")
+                    status_text.text(f"Ostatni: {result['sku']}")
+            
+            st.session_state.bulk_results = results_temp
+            progress_bar.progress(1.0, text="✅ Zakończono!")
+            st.success(f"✅ Przetworzono {len(results_temp)} produktów")
+            time.sleep(1)
+            st.rerun()
+    
+    with col_clear:
+        if st.button("🗑️ Wyczyść koszyk", use_container_width=True):
+            st.session_state.bulk_selected_products = {}
+            st.session_state.bulk_results = []
+            st.session_state.products_to_send = {}
+            st.rerun()
+
+# WYNIKI ZBIORCZE
+if st.session_state.bulk_results:
+    st.markdown("---")
+    st.subheader("📊 Wyniki")
+    
+    results = st.session_state.bulk_results
+    successful = [r for r in results if not r['error']]
+    errors = [r for r in results if r['error']]
+    
+    quality_warnings = [r for r in successful if 'description_quality' in r and r['description_quality'][0] in ['warning', 'error']]
+    
+    col_m1, col_m2, col_m3, col_m4 = st.columns(4)
+    col_m1.metric("Wszystkie", len(results))
+    col_m2.metric("Sukces", len(successful), delta=f"+{len(successful)}")
+    col_m3.metric("Błędy", len(errors), delta=f"-{len(errors)}" if errors else "0")
+    col_m4.metric("Ostrzeżenia", len(quality_warnings))
+    
+    # CSV Export
+    df = pd.DataFrame(results)
+    st.download_button(
+        "📥 Pobierz CSV",
+        df.to_csv(index=False).encode('utf-8'),
+        'opisy_zbiorcze.csv',
+        'text/csv',
+        use_container_width=True
+    )
+    
+    # Wybór i wysyłka do PIM
+    if successful:
         st.markdown("---")
-        st.subheader("📊 Wyniki")
+        st.subheader("📤 Wysyłka do Akeneo PIM")
         
-        results = st.session_state.bulk_results
-        successful = [r for r in results if not r['error']]
-        errors = [r for r in results if r['error']]
+        # Checkboxy wyboru
+        col_select_all, col_deselect_all, col_info_select = st.columns([1, 1, 2])
+        with col_select_all:
+            if st.button("✅ Zaznacz wszystkie", use_container_width=True):
+                for r in successful:
+                    st.session_state.products_to_send[r['sku']] = True
+                st.rerun()
+        with col_deselect_all:
+            if st.button("❌ Odznacz wszystkie", use_container_width=True):
+                for r in successful:
+                    st.session_state.products_to_send[r['sku']] = False
+                st.rerun()
+        with col_info_select:
+            selected_count = sum(1 for v in st.session_state.products_to_send.values() if v)
+            st.info(f"Wybrano: {selected_count}/{len(successful)}")
         
-        quality_warnings = [r for r in successful if 'description_quality' in r and r['description_quality'][0] in ['warning', 'error']]
-        
-        col_m1, col_m2, col_m3, col_m4 = st.columns(4)
-        col_m1.metric("Wszystkie", len(results))
-        col_m2.metric("Sukces", len(successful), delta=f"+{len(successful)}")
-        col_m3.metric("Błędy", len(errors), delta=f"-{len(errors)}" if errors else "0")
-        col_m4.metric("Ostrzeżenia", len(quality_warnings))
-        
-        # CSV Export
-        df = pd.DataFrame(results)
-        st.download_button(
-            "📥 Pobierz CSV",
-            df.to_csv(index=False).encode('utf-8'),
-            'opisy_zbiorcze.csv',
-            'text/csv',
-            use_container_width=True
-        )
-        
-        # Wybór i wysyłka do PIM
-        if successful:
-            st.markdown("---")
-            st.subheader("📤 Wysyłka do Akeneo PIM")
-            
-            # Checkboxy wyboru
-            col_select_all, col_deselect_all, col_info_select = st.columns([1, 1, 2])
-            with col_select_all:
-                if st.button("✅ Zaznacz wszystkie", use_container_width=True):
-                    for r in successful:
-                        st.session_state.products_to_send[r['sku']] = True
-                    st.rerun()
-            with col_deselect_all:
-                if st.button("❌ Odznacz wszystkie", use_container_width=True):
-                    for r in successful:
-                        st.session_state.products_to_send[r['sku']] = False
-                    st.rerun()
-            with col_info_select:
-                selected_count = sum(1 for v in st.session_state.products_to_send.values() if v)
-                st.info(f"Wybrano: {selected_count}/{len(successful)}")
-            
-            st.markdown("---")
-            
-            # Lista z checkboxami
-            for idx, result in enumerate(successful):
-                col_check, col_sku, col_title = st.columns([0.5, 1.5, 4])
-                
-                with col_check:
-                    checked = st.checkbox(
-                        "",
-                        value=st.session_state.products_to_send.get(result['sku'], True),
-                        key=f"send_check_{result['sku']}_{idx}",
-                        label_visibility="collapsed"
-                    )
-                    st.session_state.products_to_send[result['sku']] = checked
-                
-                with col_sku:
-                    warning_icon = ""
-                    if 'description_quality' in result and result['description_quality'][0] in ['warning', 'error']:
-                        warning_icon = " ⚠️"
-                    st.write(f"**{result['sku']}**{warning_icon}")
-                
-                with col_title:
-                    st.write(format_product_title(result['title']))
-            
-            st.markdown("---")
-            
-            # Przycisk wysyłki
-            selected_to_send = [r for r in successful if st.session_state.products_to_send.get(r['sku'], False)]
-            
-            if selected_to_send:
-                if st.button(f"✅ Wyślij zaznaczone do PIM ({len(selected_to_send)})", type="primary", use_container_width=True):
-                    success_count = 0
-                    error_count = 0
-                    error_msgs = []
-                    
-                    progress_pim = st.progress(0, text="Wysyłam do PIM...")
-                    
-                    for i, result in enumerate(selected_to_send):
-                        try:
-                            akeneo_update_description(
-                                result['sku'],
-                                result['description_html'],
-                                channel,
-                                locale
-                            )
-                            # Dodaj do bazy
-                            add_optimized_product(result['sku'], result['title'], result['url'])
-                            success_count += 1
-                        except Exception as e:
-                            error_count += 1
-                            error_msgs.append(f"{result['sku']}: {str(e)}")
-                        
-                        progress_pim.progress((i + 1) / len(selected_to_send))
-                    
-                    st.success(f"✅ Zaktualizowano {success_count} produktów")
-                    
-                    if error_count > 0:
-                        st.error(f"❌ Błędy: {error_count}")
-                        for msg in error_msgs:
-                            st.text(msg)
-                    
-                    st.balloons()
-            else:
-                st.warning("⚠️ Nie wybrano żadnych produktów do wysyłki")
-        
-        # Szczegóły wyników
         st.markdown("---")
-        st.subheader("📋 Szczegóły wszystkich wyników")
         
-        for idx, result in enumerate(results):
-            if result['error']:
-                with st.expander(f"❌ {result['sku']}", expanded=False):
-                    st.error(result['error'])
-            else:
+        # Lista z checkboxami
+        for idx, result in enumerate(successful):
+            col_check, col_sku, col_title = st.columns([0.5, 1.5, 4])
+            
+            with col_check:
+                checked = st.checkbox(
+                    "",
+                    value=st.session_state.products_to_send.get(result['sku'], True),
+                    key=f"send_check_{result['sku']}_{idx}",
+                    label_visibility="collapsed"
+                )
+                st.session_state.products_to_send[result['sku']] = checked
+            
+            with col_sku:
                 warning_icon = ""
                 if 'description_quality' in result and result['description_quality'][0] in ['warning', 'error']:
                     warning_icon = " ⚠️"
+                st.write(f"**{result['sku']}**{warning_icon}")
+            
+            with col_title:
+                st.write(format_product_title(result['title']))
+        
+        st.markdown("---")
+        
+        # Przycisk wysyłki
+        selected_to_send = [r for r in successful if st.session_state.products_to_send.get(r['sku'], False)]
+        
+        if selected_to_send:
+            if st.button(f"✅ Wyślij zaznaczone do PIM ({len(selected_to_send)})", type="primary", use_container_width=True):
+                success_count = 0
+                error_count = 0
+                error_msgs = []
                 
-                with st.expander(f"✅ {result['sku']} - {format_product_title(result['title'])}{warning_icon}"):
+                progress_pim = st.progress(0, text="Wysyłam do PIM...")
+                
+                for i, result in enumerate(selected_to_send):
+                    try:
+                        akeneo_update_description(
+                            result['sku'],
+                            result['description_html'],
+                            channel,
+                            locale
+                        )
+                        # Dodaj do bazy
+                        add_optimized_product(result['sku'], result['title'], result['url'])
+                        success_count += 1
+                    except Exception as e:
+                        error_count += 1
+                        error_msgs.append(f"{result['sku']}: {str(e)}")
                     
-                    # Ostrzeżenie o jakości
-                    if 'description_quality' in result:
-                        quality_status, quality_msg = result['description_quality']
-                        if quality_status in ['warning', 'error']:
-                            if quality_status == 'error':
-                                st.error(quality_msg)
-                            else:
-                                st.warning(quality_msg)
-                    
-                    # URL produktu
-                    if result.get('url'):
-                        st.info(f"🔗 [{result['url']}]({result['url']})")
-                    
-                    col_regen_info, col_regen_btn = st.columns([3, 1])
-                    with col_regen_info:
-                        st.info(f"💡 Nie podoba Ci się ten opis? Wygeneruj nowy")
-                    with col_regen_btn:
-                        if st.button("♻️ Przeredaguj", key=f"regen_bulk_{result['sku']}_{idx}", use_container_width=True):
-                            with st.spinner(f"Przeredagowuję {result['sku']}..."):
-                                token = akeneo_get_token()
-                                new_result = process_product_from_akeneo(
-                                    result['sku'],
-                                    client,
-                                    token,
-                                    channel,
-                                    locale,
-                                    model_choice
-                                )
-                                
-                                if not new_result['error']:
-                                    st.session_state.bulk_results[idx] = new_result
-                                    st.success(f"✅ Przeredagowano!")
-                                    st.rerun()
-                                else:
-                                    st.error(f"❌ {new_result['error']}")
-                    
-                    st.markdown("---")
-                    
-                    tab_c, tab_p = st.tabs(["💻 Kod HTML", "👁️ Porównanie"])
-                    
-                    with tab_c:
-                        st.code(result['description_html'], language='html')
-                        
-                        col_s1, col_s2, col_s3 = st.columns(3)
-                        with col_s1:
-                            st.metric("Długość", f"{len(result['description_html'])} zn")
-                        with col_s2:
-                            bold_count = result['description_html'].count('<b>')
-                            st.metric("Bold", bold_count)
-                        with col_s3:
-                            h2_count = result['description_html'].count('<h2>')
-                            st.metric("H2", h2_count)
-                    
-                    with tab_p:
-                        if result.get('old_description'):
-                            col_old, col_new = st.columns(2)
-                            with col_old:
-                                st.markdown("**🕰️ Stary opis**")
-                                st.caption(f"📏 {len(result['old_description'])} znaków")
-                                st.markdown("---")
-                                st.markdown(result['old_description'], unsafe_allow_html=True)
-                            with col_new:
-                                st.markdown("**✨ Nowy opis**")
-                                st.caption(f"📏 {len(result['description_html'])} znaków")
-                                st.markdown("---")
-                                st.markdown(result['description_html'], unsafe_allow_html=True)
+                    progress_pim.progress((i + 1) / len(selected_to_send))
+                
+                st.success(f"✅ Zaktualizowano {success_count} produktów")
+                
+                if error_count > 0:
+                    st.error(f"❌ Błędy: {error_count}")
+                    for msg in error_msgs:
+                        st.text(msg)
+                
+                st.balloons()
+        else:
+            st.warning("⚠️ Nie wybrano żadnych produktów do wysyłki")
+    
+    # Szczegóły wyników
+    st.markdown("---")
+    st.subheader("📋 Szczegóły wszystkich wyników")
+    
+    for idx, result in enumerate(results):
+        if result['error']:
+            with st.expander(f"❌ {result['sku']}", expanded=False):
+                st.error(result['error'])
+        else:
+            warning_icon = ""
+            if 'description_quality' in result and result['description_quality'][0] in ['warning', 'error']:
+                warning_icon = " ⚠️"
+            
+            with st.expander(f"✅ {result['sku']} - {format_product_title(result['title'])}{warning_icon}"):
+                
+                # Ostrzeżenie o jakości
+                if 'description_quality' in result:
+                    quality_status, quality_msg = result['description_quality']
+                    if quality_status in ['warning', 'error']:
+                        if quality_status == 'error':
+                            st.error(quality_msg)
                         else:
-                            st.warning("⚠️ Brak starego opisu")
+                            st.warning(quality_msg)
+                
+                # URL produktu
+                if result.get('url'):
+                    st.info(f"🔗 [{result['url']}]({result['url']})")
+                
+                col_regen_info, col_regen_btn = st.columns([3, 1])
+                with col_regen_info:
+                    st.info(f"💡 Nie podoba Ci się ten opis? Wygeneruj nowy")
+                with col_regen_btn:
+                    if st.button("♻️ Przeredaguj", key=f"regen_bulk_{result['sku']}_{idx}", use_container_width=True):
+                        with st.spinner(f"Przeredagowuję {result['sku']}..."):
+                            token = akeneo_get_token()
+                            new_result = process_product_from_akeneo(
+                                result['sku'],
+                                client,
+                                token,
+                                channel,
+                                locale,
+                                model_choice
+                            )
+                            
+                            if not new_result['error']:
+                                st.session_state.bulk_results[idx] = new_result
+                                st.success(f"✅ Przeredagowano!")
+                                st.rerun()
+                            else:
+                                st.error(f"❌ {new_result['error']}")
+                
+                st.markdown("---")
+                
+                tab_c, tab_p = st.tabs(["💻 Kod HTML", "👁️ Porównanie"])
+                
+                with tab_c:
+                    st.code(result['description_html'], language='html')
+                    
+                    col_s1, col_s2, col_s3 = st.columns(3)
+                    with col_s1:
+                        st.metric("Długość", f"{len(result['description_html'])} zn")
+                    with col_s2:
+                        bold_count = result['description_html'].count('<b>')
+                        st.metric("Bold", bold_count)
+                    with col_s3:
+                        h2_count = result['description_html'].count('<h2>')
+                        st.metric("H2", h2_count)
+                
+                with tab_p:
+                    if result.get('old_description'):
+                        col_old, col_new = st.columns(2)
+                        with col_old:
+                            st.markdown("**🕰️ Stary opis**")
+                            st.caption(f"📏 {len(result['old_description'])} znaków")
+                            st.markdown("---")
+                            st.markdown(result['old_description'], unsafe_allow_html=True)
+                        with col_new:
+                            st.markdown("**✨ Nowy opis**")
+                            st.caption(f"📏 {len(result['description_html'])} znaków")
+                            st.markdown("---")
                             st.markdown(result['description_html'], unsafe_allow_html=True)
+                    else:
+                        st.warning("⚠️ Brak starego opisu")
+                        st.markdown(result['description_html'], unsafe_allow_html=True)
 
 # ═══════════════════════════════════════════════════════════════════
 # FOOTER
@@ -1755,10 +1435,10 @@ with tab2:
 st.markdown("---")
 st.markdown("""
 <div style='text-align: center; color: #666; padding: 20px;'>
-    <p><strong>Generator Opisów Produktów v2.2</strong></p>
+    <p><strong>Generator Opisów Produktów v3.0</strong></p>
     <p>Powered by OpenAI GPT-5-nano & GPT-4o-mini | Akeneo PIM Integration</p>
     <p style='font-size: 0.8rem; margin-top: 10px;'>
-        ✨ v2.2: Baza zoptymalizowanych + Wybór opisów do wysyłki + Ukrywanie wyszukiwarki + Auto URL
+        ✨ v3.0: Tylko tryb zbiorczy • Baza zoptymalizowanych • Wybór opisów do wysyłki • Auto URL
     </p>
 </div>
 """, unsafe_allow_html=True)
