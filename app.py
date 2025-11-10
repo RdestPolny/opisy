@@ -52,6 +52,20 @@ st.markdown("""
         border-radius: 0.25rem;
         margin: 1rem 0;
     }
+    .warning-box {
+        padding: 1rem;
+        background: #fff3cd;
+        border-left: 4px solid #ffc107;
+        border-radius: 0.25rem;
+        margin: 1rem 0;
+    }
+    .error-box {
+        padding: 1rem;
+        background: #f8d7da;
+        border-left: 4px solid #dc3545;
+        border-radius: 0.25rem;
+        margin: 1rem 0;
+    }
     .scrollable-results {
         max-height: 400px;
         overflow-y: auto;
@@ -62,12 +76,14 @@ st.markdown("""
     }
     .sticky-actions {
         position: sticky;
-        top: 0;
+        top: 60px;
         z-index: 100;
         background: white;
-        padding: 1rem 0;
-        border-bottom: 2px solid #e0e0e0;
-        margin-bottom: 1rem;
+        padding: 1rem;
+        border: 2px solid #e0e0e0;
+        border-radius: 0.5rem;
+        margin: 1rem 0;
+        box-shadow: 0 2px 8px rgba(0,0,0,0.1);
     }
 </style>
 """, unsafe_allow_html=True)
@@ -94,11 +110,46 @@ def clean_ai_fingerprints(text: str) -> str:
     text = text.replace('…', '...')
     return text
 
+def remove_checklist_from_output(text: str) -> str:
+    """Usuwa checklist z końca odpowiedzi (dla gpt-4o-mini)"""
+    # Usuwa wszystko po słowie "Checklist"
+    if "Checklist:" in text or "checklist:" in text:
+        text = re.split(r'[Cc]hecklist:', text)[0]
+    
+    # Usuwa checkboxy na końcu
+    lines = text.split('\n')
+    cleaned_lines = []
+    for line in lines:
+        # Pomija linie zaczynające się od checkbox
+        if line.strip().startswith('☑'):
+            continue
+        cleaned_lines.append(line)
+    
+    return '\n'.join(cleaned_lines).strip()
+
 def format_product_title(title: str, max_length: int = 80) -> str:
     """Formatuje tytuł produktu"""
     if len(title) > max_length:
         return title[:max_length-3] + "..."
     return title
+
+def validate_description_quality(description: str) -> Tuple[str, str]:
+    """
+    Waliduje jakość oryginalnego opisu
+    Zwraca: (status, message)
+    status: 'ok', 'warning', 'error'
+    """
+    if not description or len(description.strip()) == 0:
+        return 'error', '❌ Brak oryginalnego opisu w Akeneo! Wygenerowany opis może być niskiej jakości.'
+    
+    desc_length = len(description.strip())
+    
+    if desc_length < 100:
+        return 'error', f'❌ Oryginalny opis bardzo krótki ({desc_length} znaków)! AI będzie miał za mało informacji.'
+    elif desc_length < 300:
+        return 'warning', f'⚠️ Oryginalny opis dość krótki ({desc_length} znaków). Rozważ wzbogacenie opisu w Akeneo.'
+    else:
+        return 'ok', f'✅ Oryginalny opis ma odpowiednią długość ({desc_length} znaków)'
 
 # ═══════════════════════════════════════════════════════════════════
 # AKENEO API
@@ -342,6 +393,7 @@ def akeneo_update_description(sku: str, html_description: str, channel: str, loc
 def generate_description(product_data: Dict, client: OpenAI, model: str = "gpt-5-nano", style_variant: str = "default") -> str:
     """Generuje opis produktu z wykorzystaniem wybranego modelu GPT"""
     try:
+        # Podstawowy system prompt (wspólny dla obu modeli)
         system_prompt = """Jesteś EKSPERTEM copywritingu e-commerce i języka polskiego. Twoje opisy są poprawne gramatycznie, angażujące i konwertują.
 
 ╔═══════════════════════════════════════════════════════════════════╗
@@ -472,6 +524,22 @@ H3: "Zamów teraz i dołącz do detektywów w poszukiwaniu zdrowia"
 - 6-10 słów/fraz zboldowanych w całym tekście
 - Ton dostosowany do produktu
 - Tylko myślnik "-" (NIE em dash "—" ani en dash "–")
+"""
+
+        # Dodaj wariant stylu
+        style_additions = {
+            "alternative": "\n\nStyl alternatywny: bardziej bezpośredni ton, krótsze zdania, mocniejsze CTA. Użyj wariantu B lub C.",
+            "concise": "\n\nStyl zwięzły: informacje bez ozdobników, konkretnie. 1500-1900 znaków. Użyj wariantu C.",
+            "detailed": "\n\nStyl szczegółowy: rozbudowany storytelling, głębszy kontekst. 2100-2500 znaków. Użyj wariantu A."
+        }
+        
+        if style_variant in style_additions:
+            system_prompt += style_additions[style_variant]
+
+        # Końcówka promptu - różna dla modeli
+        if model == "gpt-5-nano":
+            # Dla gpt-5-nano - z checklistą (do internal reasoning)
+            system_prompt += """
 
 ╔═══════════════════════════════════════════════════════════════════╗
 ║  OSTATECZNY CHECKLIST PRZED WYSŁANIEM                              ║
@@ -499,15 +567,20 @@ Jeśli któreś NIE - POPRAW przed wysłaniem!
 Zwróć TYLKO czysty HTML.
 Sprawdź WSZYSTKIE punkty checklisty!
 """
+        else:
+            # Dla gpt-4o-mini - BEZ checklisty, tylko instrukcja
+            system_prompt += """
 
-        style_additions = {
-            "alternative": "\n\nStyl alternatywny: bardziej bezpośredni ton, krótsze zdania, mocniejsze CTA. Użyj wariantu B lub C.",
-            "concise": "\n\nStyl zwięzły: informacje bez ozdobników, konkretnie. 1500-1900 znaków. Użyj wariantu C.",
-            "detailed": "\n\nStyl szczegółowy: rozbudowany storytelling, głębszy kontekst. 2100-2500 znaków. Użyj wariantu A."
-        }
-        
-        if style_variant in style_additions:
-            system_prompt += style_additions[style_variant]
+╔═══════════════════════════════════════════════════════════════════╗
+║  TWOJA ODPOWIEDŹ                                                   ║
+╚═══════════════════════════════════════════════════════════════════╝
+
+KRYTYCZNE: Zwróć TYLKO i WYŁĄCZNIE czysty kod HTML opisu produktu.
+NIE dodawaj NICZEGO więcej - żadnych komentarzy, checklistów ani notatek.
+
+Twoja odpowiedź powinna zaczynać się od <p> i kończyć na </h3>.
+Tylko HTML, nic więcej!
+"""
 
         raw_data = f"""
 TYTUŁ PRODUKTU (zbolduj w pierwszym akapicie!):
@@ -522,13 +595,10 @@ SZCZEGÓŁY TECHNICZNE (wpleć NATURALNIE w jeden z akapitów, NIE wszystkie nar
 ORYGINALNY OPIS (główne źródło informacji o produkcie):
 {product_data.get('description', '')}
 
-PAMĘTAJ CHECKLIST:
-☑ Tytuł i autor zboldowane?
-☑ Nazwiska poprawnie (wielkie litery, spacje)?
-☑ Poprawna odmiana (przypadki)?
-☑ ZERO duplicate content?
-☑ CTA tylko RAZ?
-☑ Dane techniczne naturalnie wplecione?
+PAMIĘTAJ:
+- Zwróć TYLKO HTML
+- BEZ checklist w outputcie
+- BEZ dodatkowych komentarzy
 """
         
         # Wywołanie odpowiedniego modelu
@@ -540,7 +610,7 @@ PAMĘTAJ CHECKLIST:
                 text={"verbosity": "medium"}
             )
             result = strip_code_fences(response.output_text)
-        else:  # gpt-4o-mini lub inny model chat
+        else:  # gpt-4o-mini
             response = client.chat.completions.create(
                 model=model,
                 messages=[
@@ -551,6 +621,8 @@ PAMĘTAJ CHECKLIST:
                 max_tokens=2500
             )
             result = strip_code_fences(response.choices[0].message.content)
+            # Usuń ewentualną checklistę z outputu
+            result = remove_checklist_from_output(result)
         
         result = clean_ai_fingerprints(result)
         return result
@@ -625,13 +697,13 @@ def process_product_from_akeneo(sku: str, client: OpenAI, token: str, channel: s
                 'sku': sku,
                 'title': '',
                 'description_html': '',
-                'error': 'Produkt nie znaleziony'
+                'error': 'Produkt nie znaleziony',
+                'description_quality': ('error', 'Produkt nie znaleziony')
             }
         
         # Przygotowanie danych z poprawnym formatowaniem
         details_parts = []
         if product_details.get('author'):
-            # Formatuj autora poprawnie
             author = product_details['author'].strip()
             details_parts.append(f"Autor: {author}")
         if product_details.get('publisher'):
@@ -643,11 +715,15 @@ def process_product_from_akeneo(sku: str, client: OpenAI, token: str, channel: s
         if product_details.get('cover_type'):
             details_parts.append(f"Oprawa: {product_details['cover_type']}")
         
+        # Sprawdź jakość oryginalnego opisu
+        original_desc = product_details.get('description', '') or product_details.get('short_description', '')
+        quality_status, quality_msg = validate_description_quality(original_desc)
+        
         product_data = {
             'title': product_details['title'],
             'author': product_details.get('author', ''),
             'details': '\n'.join(details_parts),
-            'description': product_details.get('description', '') or product_details.get('short_description', '')
+            'description': original_desc
         }
         
         # Generowanie
@@ -658,15 +734,17 @@ def process_product_from_akeneo(sku: str, client: OpenAI, token: str, channel: s
                 'sku': sku,
                 'title': product_details['title'],
                 'description_html': '',
-                'error': description_html
+                'error': description_html,
+                'description_quality': (quality_status, quality_msg)
             }
         
         return {
             'sku': sku,
             'title': product_details['title'],
             'description_html': description_html,
-            'old_description': product_details.get('description', ''),
-            'error': None
+            'old_description': original_desc,
+            'error': None,
+            'description_quality': (quality_status, quality_msg)
         }
         
     except Exception as e:
@@ -674,7 +752,8 @@ def process_product_from_akeneo(sku: str, client: OpenAI, token: str, channel: s
             'sku': sku,
             'title': '',
             'description_html': '',
-            'error': str(e)
+            'error': str(e),
+            'description_quality': ('error', str(e))
         }
 
 # ═══════════════════════════════════════════════════════════════════
@@ -724,13 +803,13 @@ with col_title:
 with st.sidebar:
     st.header("⚙️ Ustawienia")
     
-    # Wybór modelu
+    # Wybór modelu - TYLKO gpt-5-nano i gpt-4o-mini
     st.subheader("🤖 Model AI")
     model_choice = st.selectbox(
         "Wybierz model:",
-        ["gpt-5-nano", "gpt-4o-mini", "gpt-4o"],
+        ["gpt-5-nano", "gpt-4o-mini"],
         index=0,
-        help="gpt-5-nano: najnowszy, szybki, tani\ngpt-4o-mini: bardziej kreatywny\ngpt-4o: najdokładniejszy (droższy)"
+        help="gpt-5-nano: najnowszy, szybki, tani (zalecany)\ngpt-4o-mini: bardziej kreatywny, wolniejszy"
     )
     
     st.markdown("---")
@@ -761,21 +840,20 @@ with st.sidebar:
 **Jak używać:**
 1. Wyszukaj produkt w Akeneo
 2. Wybierz z listy
-3. Wygeneruj opis
-4. Zaktualizuj w PIM
+3. **Sprawdź jakość opisu** oryginalnego
+4. Wygeneruj nowy opis
+5. Zaktualizuj w PIM
 
 **Tryb zbiorczy:**
 - Wyszukuj różne produkty
 - Zaznaczaj interesujące
-- Wszystkie trafiają do "koszyka"
 - Generuj wszystkie naraz
-- Lub wklej listę SKU
 
 **v2.1 - Nowości:**
-- Wybór modelu (GPT-5-nano/4o-mini/4o)
-- Poprawiona gramatyka
-- Bez duplicate content
-- Lepsze formatowanie nazwisk
+✅ Wybór modelu (5-nano/4o-mini)
+✅ Walidacja opisu oryginalnego
+✅ Lepszy UI (mniej scrollowania)
+✅ Poprawiony prompt (bez checklisty)
     """)
 
 # ═══════════════════════════════════════════════════════════════════
@@ -877,10 +955,32 @@ with tab1:
             
             st.markdown("---")
             
-            # GENEROWANIE
+            # GENEROWANIE - ulepszone UI
             st.subheader("✨ Generowanie opisu")
             
-            col_gen1, col_gen2, col_gen3 = st.columns([2, 2, 1])
+            # Najpierw sprawdź jakość opisu
+            token = akeneo_get_token()
+            product_details = akeneo_get_product_details(selected['identifier'], token, channel, locale)
+            
+            if product_details:
+                original_desc = product_details.get('description', '') or product_details.get('short_description', '')
+                quality_status, quality_msg = validate_description_quality(original_desc)
+                
+                # Pokaż ostrzeżenie o jakości opisu
+                if quality_status == 'error':
+                    st.markdown('<div class="error-box">', unsafe_allow_html=True)
+                    st.markdown(quality_msg, unsafe_allow_html=True)
+                    st.markdown('</div>', unsafe_allow_html=True)
+                elif quality_status == 'warning':
+                    st.markdown('<div class="warning-box">', unsafe_allow_html=True)
+                    st.markdown(quality_msg, unsafe_allow_html=True)
+                    st.markdown('</div>', unsafe_allow_html=True)
+                else:
+                    st.markdown('<div class="info-box">', unsafe_allow_html=True)
+                    st.markdown(quality_msg, unsafe_allow_html=True)
+                    st.markdown('</div>', unsafe_allow_html=True)
+            
+            col_gen1, col_gen2, col_gen3, col_gen4 = st.columns([2, 2, 1, 1])
             
             with col_gen1:
                 style_variant = st.selectbox(
@@ -896,7 +996,7 @@ with tab1:
                 st.write("")
                 st.write("")
                 if st.button("🚀 Generuj", type="primary", use_container_width=True):
-                    with st.spinner("Pobieram dane i generuję..."):
+                    with st.spinner("Generuję..."):
                         token = akeneo_get_token()
                         result = process_product_from_akeneo(
                             selected['identifier'],
@@ -925,19 +1025,46 @@ with tab1:
                             
                             st.success("✅ Opis wygenerowany!")
                             st.rerun()
+            
+            with col_gen4:
+                st.write("")
+                st.write("")
+                if st.session_state.generated_description:
+                    if st.button("♻️", use_container_width=True, help="Przeredaguj"):
+                        with st.spinner("Przeredagowuję..."):
+                            import random
+                            variants = ["default", "alternative", "concise", "detailed"]
+                            random_variant = random.choice(variants)
+                            
+                            token = akeneo_get_token()
+                            new_result = process_product_from_akeneo(
+                                st.session_state.generated_description['sku'],
+                                client,
+                                token,
+                                channel,
+                                locale,
+                                model_choice,
+                                random_variant
+                            )
+                            
+                            if not new_result['error']:
+                                st.session_state.generated_description = new_result
+                                st.success(f"✅ Przeredagowano! (wariant: {random_variant})")
+                                st.rerun()
     
-    # WYNIK GENEROWANIA - z lepszym layoutem
+    # WYNIK GENEROWANIA - ulepszone UI z sticky buttons
     if st.session_state.generated_description:
         st.markdown("---")
         
-        # STICKY ACTION BUTTONS na górze
-        st.markdown('<div class="sticky-actions">', unsafe_allow_html=True)
-        col_act1, col_act2, col_act3 = st.columns([2, 2, 2])
-        
         result = st.session_state.generated_description
         
+        # STICKY ACTION BUTTONS na górze
+        st.markdown('<div class="sticky-actions">', unsafe_allow_html=True)
+        st.markdown("### 🎯 Akcje:")
+        col_act1, col_act2, col_act3, col_act4 = st.columns([2, 2, 2, 2])
+        
         with col_act1:
-            if st.button("♻️ Przeredaguj", use_container_width=True, type="secondary"):
+            if st.button("♻️ Przeredaguj", use_container_width=True, type="secondary", key="regen_top"):
                 with st.spinner("Przeredagowuję..."):
                     import random
                     variants = ["default", "alternative", "concise", "detailed"]
@@ -956,10 +1083,8 @@ with tab1:
                     
                     if not new_result['error']:
                         st.session_state.generated_description = new_result
-                        st.success(f"✅ Przeredagowano! (wariant: {random_variant})")
+                        st.success(f"✅ Przeredagowano!")
                         st.rerun()
-                    else:
-                        st.error(f"❌ {new_result['error']}")
         
         with col_act2:
             st.download_button(
@@ -967,11 +1092,23 @@ with tab1:
                 result['description_html'],
                 file_name=f"{result['sku']}_description.html",
                 mime="text/html",
-                use_container_width=True
+                use_container_width=True,
+                key="download_top"
             )
         
         with col_act3:
-            if st.button("✅ Zaktualizuj w PIM", type="primary", use_container_width=True):
+            # Kopiowanie do schowka (przez download trick)
+            st.download_button(
+                "📋 Kopiuj kod",
+                result['description_html'],
+                file_name=f"clipboard.txt",
+                mime="text/plain",
+                use_container_width=True,
+                key="copy_top"
+            )
+        
+        with col_act4:
+            if st.button("✅ Zaktualizuj w PIM", type="primary", use_container_width=True, key="update_top"):
                 try:
                     with st.spinner("Aktualizuję w Akeneo..."):
                         akeneo_update_description(
@@ -980,12 +1117,23 @@ with tab1:
                             channel,
                             locale
                         )
-                        st.success(f"✅ Zaktualizowano produkt: {result['sku']}")
+                        st.success(f"✅ Zaktualizowano: {result['sku']}")
                         st.balloons()
                 except Exception as e:
                     st.error(f"❌ Błąd: {str(e)}")
         
         st.markdown('</div>', unsafe_allow_html=True)
+        
+        # Wyświetl ostrzeżenie o jakości opisu oryginalnego
+        if 'description_quality' in result:
+            quality_status, quality_msg = result['description_quality']
+            if quality_status in ['warning', 'error']:
+                if quality_status == 'error':
+                    st.markdown('<div class="error-box">', unsafe_allow_html=True)
+                else:
+                    st.markdown('<div class="warning-box">', unsafe_allow_html=True)
+                st.markdown(f"**Uwaga o oryginalnym opisie:** {quality_msg}", unsafe_allow_html=True)
+                st.markdown('</div>', unsafe_allow_html=True)
         
         st.subheader("📄 Wygenerowany opis")
         
@@ -996,31 +1144,35 @@ with tab1:
             st.code(result['description_html'], language='html')
             
             # Analiza długości i struktury
-            col_stats1, col_stats2, col_stats3 = st.columns(3)
+            col_stats1, col_stats2, col_stats3, col_stats4 = st.columns(4)
             with col_stats1:
-                st.metric("Długość", f"{len(result['description_html'])} znaków")
+                st.metric("Długość", f"{len(result['description_html'])} zn")
             with col_stats2:
                 bold_count = result['description_html'].count('<b>')
-                st.metric("Elementy bold", bold_count)
+                st.metric("Bold", bold_count)
             with col_stats3:
                 h2_count = result['description_html'].count('<h2>')
-                st.metric("Nagłówki H2", h2_count)
+                st.metric("H2", h2_count)
+            with col_stats4:
+                model_used = model_choice
+                st.metric("Model", model_used)
         
         with tab_preview:
             if result.get('old_description'):
                 col_old, col_new = st.columns(2)
                 with col_old:
-                    st.markdown("### 🕰️ Stary opis (Akeneo)")
+                    st.markdown("### 🕰️ Stary opis")
                     st.caption(f"📏 {len(result['old_description'])} znaków")
                     st.markdown("---")
                     st.markdown(result['old_description'], unsafe_allow_html=True)
                 with col_new:
-                    st.markdown("### ✨ Nowy opis (AI)")
+                    st.markdown("### ✨ Nowy opis")
                     st.caption(f"📏 {len(result['description_html'])} znaków")
                     st.markdown("---")
                     st.markdown(result['description_html'], unsafe_allow_html=True)
             else:
-                st.info("Brak starego opisu w Akeneo - wyświetlam tylko nowy")
+                st.warning("⚠️ Brak starego opisu w Akeneo")
+                st.markdown("### ✨ Wygenerowany opis:")
                 st.markdown(result['description_html'], unsafe_allow_html=True)
         
         # Metatagi
@@ -1032,12 +1184,12 @@ with tab1:
                 title_len = len(st.session_state.meta_title)
                 color = "🟢" if title_len <= 60 else "🔴"
                 st.markdown(f"**Meta Title** {color} ({title_len}/60)")
-                st.text(st.session_state.meta_title)
+                st.code(st.session_state.meta_title)
             with col_meta2:
                 desc_len = len(st.session_state.meta_description)
                 color = "🟢" if desc_len <= 160 else "🔴"
                 st.markdown(f"**Meta Description** {color} ({desc_len}/160)")
-                st.text(st.session_state.meta_description)
+                st.code(st.session_state.meta_description)
 
 # ═══════════════════════════════════════════════════════════════════
 # TAB 2: TRYB ZBIORCZY
@@ -1309,10 +1461,14 @@ with tab2:
         successful = [r for r in results if not r['error']]
         errors = [r for r in results if r['error']]
         
-        col_m1, col_m2, col_m3 = st.columns(3)
+        # Zlicz ostrzeżenia o jakości opisu
+        quality_warnings = [r for r in successful if 'description_quality' in r and r['description_quality'][0] in ['warning', 'error']]
+        
+        col_m1, col_m2, col_m3, col_m4 = st.columns(4)
         col_m1.metric("Wszystkie", len(results))
         col_m2.metric("Sukces", len(successful), delta=f"+{len(successful)}")
         col_m3.metric("Błędy", len(errors), delta=f"-{len(errors)}" if errors else "0")
+        col_m4.metric("Ostrzeżenia", len(quality_warnings), help="Produkty ze słabymi opisami oryginalnymi")
         
         # CSV Export
         df = pd.DataFrame(results)
@@ -1365,12 +1521,27 @@ with tab2:
                 with st.expander(f"❌ {result['sku']}", expanded=False):
                     st.error(result['error'])
             else:
-                with st.expander(f"✅ {result['sku']} - {format_product_title(result['title'])}"):
+                # Pokaż ikonę ostrzeżenia jeśli słaby opis
+                warning_icon = ""
+                if 'description_quality' in result and result['description_quality'][0] in ['warning', 'error']:
+                    warning_icon = " ⚠️"
+                
+                with st.expander(f"✅ {result['sku']} - {format_product_title(result['title'])}{warning_icon}"):
+                    
+                    # Pokaż ostrzeżenie o jakości
+                    if 'description_quality' in result:
+                        quality_status, quality_msg = result['description_quality']
+                        if quality_status in ['warning', 'error']:
+                            if quality_status == 'error':
+                                st.error(quality_msg)
+                            else:
+                                st.warning(quality_msg)
+                    
                     col_regen_info, col_regen_btn = st.columns([3, 1])
                     with col_regen_info:
-                        st.info(f"💡 Nie podoba Ci się ten opis? Wygeneruj nowy tylko dla tego produktu")
+                        st.info(f"💡 Nie podoba Ci się ten opis? Wygeneruj nowy")
                     with col_regen_btn:
-                        if st.button("♻️ Przeredaguj ten", key=f"regen_bulk_{result['sku']}_{idx}", use_container_width=True):
+                        if st.button("♻️ Przeredaguj", key=f"regen_bulk_{result['sku']}_{idx}", use_container_width=True):
                             with st.spinner(f"Przeredagowuję {result['sku']}..."):
                                 import random
                                 variants = ["default", "alternative", "concise", "detailed"]
@@ -1389,7 +1560,7 @@ with tab2:
                                 
                                 if not new_result['error']:
                                     st.session_state.bulk_results[idx] = new_result
-                                    st.success(f"✅ Przeredagowano! (wariant: {random_variant})")
+                                    st.success(f"✅ Przeredagowano!")
                                     st.rerun()
                                 else:
                                     st.error(f"❌ {new_result['error']}")
@@ -1403,7 +1574,7 @@ with tab2:
                         
                         col_s1, col_s2, col_s3 = st.columns(3)
                         with col_s1:
-                            st.metric("Długość", f"{len(result['description_html'])} znaków")
+                            st.metric("Długość", f"{len(result['description_html'])} zn")
                         with col_s2:
                             bold_count = result['description_html'].count('<b>')
                             st.metric("Bold", bold_count)
@@ -1425,7 +1596,7 @@ with tab2:
                                 st.markdown("---")
                                 st.markdown(result['description_html'], unsafe_allow_html=True)
                         else:
-                            st.info("Brak starego opisu")
+                            st.warning("⚠️ Brak starego opisu")
                             st.markdown(result['description_html'], unsafe_allow_html=True)
 
 # ═══════════════════════════════════════════════════════════════════
@@ -1436,9 +1607,9 @@ st.markdown("---")
 st.markdown("""
 <div style='text-align: center; color: #666; padding: 20px;'>
     <p><strong>Generator Opisów Produktów v2.1</strong></p>
-    <p>Powered by OpenAI GPT-5-nano & GPT-4o | Akeneo PIM Integration</p>
+    <p>Powered by OpenAI GPT-5-nano & GPT-4o-mini | Akeneo PIM Integration</p>
     <p style='font-size: 0.8rem; margin-top: 10px;'>
-        ✨ v2.1: Wybór modelu AI, lepsza gramatyka, zero duplicate content
+        ✨ v2.1: Walidacja opisów, lepszy UI, bez checklisty w outputcie
     </p>
 </div>
 """, unsafe_allow_html=True)
