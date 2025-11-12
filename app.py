@@ -15,7 +15,7 @@ from pathlib import Path
 # ═══════════════════════════════════════════════════════════════════
 
 st.set_page_config(
-    page_title="Generator Opisów Produktów v3.0",
+    page_title="Generator Opisów Produktów v3.0.1",
     page_icon="📚",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -194,22 +194,42 @@ def remove_checklist_from_output(text: str) -> str:
     
     return '\n'.join(cleaned_lines).strip()
 
+def safe_string_value(value) -> str:
+    """
+    Bezpiecznie konwertuje wartość na string.
+    Obsługuje zarówno stringi jak i listy z Akeneo.
+    """
+    if value is None:
+        return ""
+    if isinstance(value, list):
+        # Jeśli lista, weź pierwszy element lub pusty string
+        if len(value) > 0:
+            return str(value[0]).strip()
+        return ""
+    if isinstance(value, str):
+        return value.strip()
+    # Dla innych typów (int, float, etc.)
+    return str(value).strip()
+
 def format_product_title(title: str, max_length: int = 80) -> str:
     """Formatuje tytuł produktu"""
     if len(title) > max_length:
         return title[:max_length-3] + "..."
     return title
 
-def validate_description_quality(description: str) -> Tuple[str, str]:
+def validate_description_quality(description) -> Tuple[str, str]:
     """
     Waliduje jakość oryginalnego opisu
     Zwraca: (status, message)
     status: 'ok', 'warning', 'error'
     """
-    if not description or len(description.strip()) == 0:
+    # Bezpieczna konwersja na string
+    desc_str = safe_string_value(description)
+    
+    if not desc_str or len(desc_str.strip()) == 0:
         return 'error', '❌ Brak oryginalnego opisu w Akeneo! Wygenerowany opis może być niskiej jakości.'
     
-    desc_length = len(description.strip())
+    desc_length = len(desc_str.strip())
     
     if desc_length < 100:
         return 'error', f'❌ Oryginalny opis bardzo krótki ({desc_length} znaków)! AI będzie miał za mało informacji.'
@@ -283,7 +303,8 @@ def akeneo_search_products(search_query: str, token: str, limit: int = 20, local
                 name_values = values["name"]
                 for val in name_values:
                     if val.get("locale") == locale or val.get("locale") is None:
-                        title = val.get("data", identifier)
+                        title_data = val.get("data", identifier)
+                        title = safe_string_value(title_data) or identifier
                         break
             
             products_dict[identifier] = {
@@ -317,7 +338,8 @@ def akeneo_search_products(search_query: str, token: str, limit: int = 20, local
                 name_values = values["name"]
                 for val in name_values:
                     if val.get("locale") == locale or val.get("locale") is None:
-                        title = val.get("data", identifier)
+                        title_data = val.get("data", identifier)
+                        title = safe_string_value(title_data) or identifier
                         break
             
             products_dict[identifier] = {
@@ -368,18 +390,26 @@ def akeneo_get_product_details(sku: str, token: str, channel: str = "Bookland", 
         values = product.get("values", {})
         
         def get_value(attr_name: str) -> str:
+            """Pobiera wartość atrybutu i zawsze zwraca string"""
             if attr_name not in values:
                 return ""
             attr_values = values[attr_name]
             if not attr_values:
                 return ""
+            
+            # Szukaj wartości dla odpowiedniego scope/locale
             for val in attr_values:
                 val_scope = val.get("scope")
                 val_locale = val.get("locale")
                 if (val_scope is None or val_scope == channel) and \
                    (val_locale is None or val_locale == locale):
-                    return val.get("data", "")
-            return attr_values[0].get("data", "")
+                    data = val.get("data", "")
+                    # Użyj safe_string_value do konwersji
+                    return safe_string_value(data)
+            
+            # Jeśli nie znaleziono, weź pierwszą wartość
+            first_data = attr_values[0].get("data", "")
+            return safe_string_value(first_data)
         
         product_data = {
             "identifier": product.get("identifier", ""),
@@ -758,30 +788,42 @@ def process_product_from_akeneo(sku: str, client: OpenAI, token: str, channel: s
                 'description_quality': ('error', 'Produkt nie znaleziony')
             }
         
-        # Przygotowanie danych z poprawnym formatowaniem
+        # Przygotowanie danych z poprawnym formatowaniem i bezpieczną konwersją
         details_parts = []
-        if product_details.get('author'):
-            author = product_details['author'].strip()
+        
+        # Bezpieczne pobieranie wartości (obsługa list i stringów)
+        author = safe_string_value(product_details.get('author'))
+        if author:
             details_parts.append(f"Autor: {author}")
-        if product_details.get('publisher'):
-            details_parts.append(f"Wydawnictwo: {product_details['publisher']}")
-        if product_details.get('year'):
-            details_parts.append(f"Rok: {product_details['year']}")
-        if product_details.get('pages'):
-            details_parts.append(f"Strony: {product_details['pages']}")
-        if product_details.get('cover_type'):
-            details_parts.append(f"Oprawa: {product_details['cover_type']}")
+        
+        publisher = safe_string_value(product_details.get('publisher'))
+        if publisher:
+            details_parts.append(f"Wydawnictwo: {publisher}")
+        
+        year = safe_string_value(product_details.get('year'))
+        if year:
+            details_parts.append(f"Rok: {year}")
+        
+        pages = safe_string_value(product_details.get('pages'))
+        if pages:
+            details_parts.append(f"Strony: {pages}")
+        
+        cover_type = safe_string_value(product_details.get('cover_type'))
+        if cover_type:
+            details_parts.append(f"Oprawa: {cover_type}")
         
         # Sprawdź jakość oryginalnego opisu
         original_desc = product_details.get('description', '') or product_details.get('short_description', '')
+        original_desc = safe_string_value(original_desc)
         quality_status, quality_msg = validate_description_quality(original_desc)
         
         # Generuj URL produktu
-        product_url = generate_product_url(product_details['title'])
+        product_title = safe_string_value(product_details['title'])
+        product_url = generate_product_url(product_title)
         
         product_data = {
-            'title': product_details['title'],
-            'author': product_details.get('author', ''),
+            'title': product_title,
+            'author': author,
             'details': '\n'.join(details_parts),
             'description': original_desc
         }
@@ -792,7 +834,7 @@ def process_product_from_akeneo(sku: str, client: OpenAI, token: str, channel: s
         if "BŁĄD" in description_html:
             return {
                 'sku': sku,
-                'title': product_details['title'],
+                'title': product_title,
                 'description_html': '',
                 'url': product_url,
                 'error': description_html,
@@ -801,7 +843,7 @@ def process_product_from_akeneo(sku: str, client: OpenAI, token: str, channel: s
         
         return {
             'sku': sku,
-            'title': product_details['title'],
+            'title': product_title,
             'description_html': description_html,
             'url': product_url,
             'old_description': original_desc,
@@ -1435,10 +1477,10 @@ if st.session_state.bulk_results:
 st.markdown("---")
 st.markdown("""
 <div style='text-align: center; color: #666; padding: 20px;'>
-    <p><strong>Generator Opisów Produktów v3.0</strong></p>
+    <p><strong>Generator Opisów Produktów v3.0.1</strong></p>
     <p>Powered by OpenAI GPT-5-nano & GPT-4o-mini | Akeneo PIM Integration</p>
     <p style='font-size: 0.8rem; margin-top: 10px;'>
-        ✨ v3.0: Tylko tryb zbiorczy • Baza zoptymalizowanych • Wybór opisów do wysyłki • Auto URL
+        ✨ v3.0.1: Naprawa błędu 'list' object has no attribute 'strip' - pełna obsługa typów danych Akeneo
     </p>
 </div>
 """, unsafe_allow_html=True)
