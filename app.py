@@ -15,7 +15,7 @@ from pathlib import Path
 # ═══════════════════════════════════════════════════════════════════
 
 st.set_page_config(
-    page_title="Generator Opisów Produktów v3.0.1",
+    page_title="Generator Opisów Produktów v3.0.2",
     page_icon="📚",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -239,7 +239,7 @@ def validate_description_quality(description) -> Tuple[str, str]:
         return 'ok', f'✅ Oryginalny opis ma odpowiednią długość ({desc_length} znaków)'
 
 # ═══════════════════════════════════════════════════════════════════
-# AKENEO API
+# AKENEO API - POPRAWIONE
 # ═══════════════════════════════════════════════════════════════════
 
 def _akeneo_root():
@@ -249,18 +249,49 @@ def _akeneo_root():
         return base[:-len("/api/rest/v1")]
     return base
 
+@st.cache_data(ttl=3000, show_spinner=False)
 def akeneo_get_token() -> str:
-    """Pobiera access token dla Akeneo API"""
-    token_url = _akeneo_root() + "/api/oauth/v1/token"
-    auth = (st.secrets["AKENEO_CLIENT_ID"], st.secrets["AKENEO_SECRET"])
-    data = {
-        "grant_type": "password",
-        "username": st.secrets["AKENEO_USERNAME"],
-        "password": st.secrets["AKENEO_PASSWORD"],
-    }
-    r = requests.post(token_url, auth=auth, data=data, timeout=30)
-    r.raise_for_status()
-    return r.json()["access_token"]
+    """
+    Pobiera access token dla Akeneo API z cachem i lepszą obsługą błędów.
+    TTL 3000s = 50 minut.
+    """
+    try:
+        token_url = _akeneo_root() + "/api/oauth/v1/token"
+        
+        # Sprawdzenie czy mamy dane w secrets
+        if not all(k in st.secrets for k in ["AKENEO_CLIENT_ID", "AKENEO_SECRET", "AKENEO_USERNAME", "AKENEO_PASSWORD"]):
+            st.error("❌ Brak kompletnych danych logowania w secrets.toml")
+            st.stop()
+
+        auth = (st.secrets["AKENEO_CLIENT_ID"], st.secrets["AKENEO_SECRET"])
+        data = {
+            "grant_type": "password",
+            "username": st.secrets["AKENEO_USERNAME"],
+            "password": st.secrets["AKENEO_PASSWORD"],
+        }
+        
+        r = requests.post(token_url, auth=auth, data=data, timeout=30)
+        
+        # Jeśli status nie jest 200, rzuć wyjątek i pokaż treść błędu
+        if r.status_code != 200:
+            st.error(f"❌ Błąd autoryzacji Akeneo (Kod: {r.status_code})")
+            st.markdown(f"**URL:** {token_url}")
+            try:
+                error_details = r.json()
+                st.json(error_details) # Wyświetli dokładny powód błędu z API
+            except:
+                st.text(r.text) # Wyświetli surowy tekst jeśli to nie JSON
+            st.stop()
+            
+        return r.json()["access_token"]
+        
+    except requests.exceptions.ConnectionError:
+        st.error(f"❌ Nie można połączyć się z Akeneo pod adresem: {_akeneo_root()}")
+        st.info("Sprawdź czy URL w AKENEO_BASE_URL jest poprawny.")
+        st.stop()
+    except Exception as e:
+        st.error(f"❌ Nieoczekiwany błąd podczas pobierania tokenu: {str(e)}")
+        st.stop()
 
 def akeneo_get_attribute(code: str, token: str) -> Dict:
     """Pobiera definicję atrybutu z Akeneo"""
@@ -1008,13 +1039,10 @@ with st.sidebar:
 5. **Wybierz które wysłać** do PIM
 6. Zaktualizuj zaznaczone w Akeneo
 
-**v3.0 - Nowości:**
-✅ Tylko tryb zbiorczy (uproszczony interfejs)
-✅ Baza zoptymalizowanych produktów z historią
-✅ Wybór które opisy wysłać do PIM
-✅ Automatyczne URL produktów
-✅ Model: tylko default, bez wariantów
-✅ Walidacja jakości opisów oryginalnych
+**v3.0.2 - Nowości:**
+✅ Naprawiono błąd HTTPError przy logowaniu
+✅ Caching tokenu (szybsze działanie)
+✅ Lepsza diagnostyka błędów Akeneo
     """)
 
 # ═══════════════════════════════════════════════════════════════════
@@ -1477,10 +1505,10 @@ if st.session_state.bulk_results:
 st.markdown("---")
 st.markdown("""
 <div style='text-align: center; color: #666; padding: 20px;'>
-    <p><strong>Generator Opisów Produktów v3.0.1</strong></p>
+    <p><strong>Generator Opisów Produktów v3.0.2</strong></p>
     <p>Powered by OpenAI GPT-5-nano & GPT-4o-mini | Akeneo PIM Integration</p>
     <p style='font-size: 0.8rem; margin-top: 10px;'>
-        ✨ v3.0.1: Naprawa błędu 'list' object has no attribute 'strip' - pełna obsługa typów danych Akeneo
+        ✨ v3.0.2: Poprawiona obsługa logowania do Akeneo (cache + error handling)
     </p>
 </div>
 """, unsafe_allow_html=True)
