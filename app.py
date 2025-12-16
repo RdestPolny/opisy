@@ -10,12 +10,15 @@ import time
 from datetime import datetime
 from pathlib import Path
 
+# Dodajemy obsługę Google Gemini
+import google.generativeai as genai
+
 # ═══════════════════════════════════════════════════════════════════
 # KONFIGURACJA STRONY
 # ═══════════════════════════════════════════════════════════════════
 
 st.set_page_config(
-    page_title="Generator Opisów Produktów v3.0.2",
+    page_title="Generator Opisów Produktów v3.1.0",
     page_icon="📚",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -181,7 +184,7 @@ def clean_ai_fingerprints(text: str) -> str:
     return text
 
 def remove_checklist_from_output(text: str) -> str:
-    """Usuwa checklist z końca odpowiedzi (dla gpt-4o-mini)"""
+    """Usuwa checklist z końca odpowiedzi (dla gpt-4o-mini i gemini)"""
     if "Checklist:" in text or "checklist:" in text:
         text = re.split(r'[Cc]hecklist:', text)[0]
     
@@ -239,7 +242,7 @@ def validate_description_quality(description) -> Tuple[str, str]:
         return 'ok', f'✅ Oryginalny opis ma odpowiednią długość ({desc_length} znaków)'
 
 # ═══════════════════════════════════════════════════════════════════
-# AKENEO API - POPRAWIONE
+# AKENEO API
 # ═══════════════════════════════════════════════════════════════════
 
 def _akeneo_root():
@@ -272,15 +275,14 @@ def akeneo_get_token() -> str:
         
         r = requests.post(token_url, auth=auth, data=data, timeout=30)
         
-        # Jeśli status nie jest 200, rzuć wyjątek i pokaż treść błędu
         if r.status_code != 200:
             st.error(f"❌ Błąd autoryzacji Akeneo (Kod: {r.status_code})")
             st.markdown(f"**URL:** {token_url}")
             try:
                 error_details = r.json()
-                st.json(error_details) # Wyświetli dokładny powód błędu z API
+                st.json(error_details)
             except:
-                st.text(r.text) # Wyświetli surowy tekst jeśli to nie JSON
+                st.text(r.text)
             st.stop()
             
         return r.json()["access_token"]
@@ -390,24 +392,6 @@ def akeneo_search_products(search_query: str, token: str, limit: int = 20, local
         st.error(f"Błąd wyszukiwania: {str(e)}")
         return []
 
-def akeneo_get_products_by_skus(skus: List[str], token: str, locale: str = "pl_PL") -> List[Dict]:
-    """Pobiera wiele produktów po listach SKU"""
-    products = []
-    for sku in skus:
-        try:
-            product = akeneo_get_product_details(sku.strip(), token, "Bookland", locale)
-            if product:
-                products.append({
-                    "identifier": sku.strip(),
-                    "title": product.get('title', sku.strip()),
-                    "family": product.get('family', ''),
-                    "enabled": product.get('enabled', False),
-                    "product_details": product
-                })
-        except:
-            pass
-    return products
-
 def akeneo_get_product_details(sku: str, token: str, channel: str = "Bookland", locale: str = "pl_PL") -> Optional[Dict]:
     """Pobiera pełne dane produktu z Akeneo"""
     url = _akeneo_root() + f"/api/rest/v1/products/{sku}"
@@ -421,24 +405,20 @@ def akeneo_get_product_details(sku: str, token: str, channel: str = "Bookland", 
         values = product.get("values", {})
         
         def get_value(attr_name: str) -> str:
-            """Pobiera wartość atrybutu i zawsze zwraca string"""
             if attr_name not in values:
                 return ""
             attr_values = values[attr_name]
             if not attr_values:
                 return ""
             
-            # Szukaj wartości dla odpowiedniego scope/locale
             for val in attr_values:
                 val_scope = val.get("scope")
                 val_locale = val.get("locale")
                 if (val_scope is None or val_scope == channel) and \
                    (val_locale is None or val_locale == locale):
                     data = val.get("data", "")
-                    # Użyj safe_string_value do konwersji
                     return safe_string_value(data)
             
-            # Jeśli nie znaleziono, weź pierwszą wartość
             first_data = attr_values[0].get("data", "")
             return safe_string_value(first_data)
         
@@ -515,13 +495,13 @@ def akeneo_update_description(sku: str, html_description: str, channel: str, loc
     raise RuntimeError(f"Błąd Akeneo ({r.status_code})")
 
 # ═══════════════════════════════════════════════════════════════════
-# GENEROWANIE OPISÓW - UNIWERSALNA FUNKCJA
+# GENEROWANIE OPISÓW - OBSŁUGA GEMINI I GPT
 # ═══════════════════════════════════════════════════════════════════
 
 def generate_description(product_data: Dict, client: OpenAI, model: str = "gpt-5-nano", style_variant: str = "default") -> str:
-    """Generuje opis produktu z wykorzystaniem wybranego modelu GPT"""
+    """Generuje opis produktu z wykorzystaniem wybranego modelu (GPT lub Gemini)"""
     try:
-        # Podstawowy system prompt (wspólny dla obu modeli)
+        # Podstawowy system prompt (wspólny)
         system_prompt = """Jesteś EKSPERTEM copywritingu e-commerce i języka polskiego. Twoje opisy są poprawne gramatycznie, angażujące i konwertują.
 
 ╔═══════════════════════════════════════════════════════════════════╗
@@ -654,11 +634,9 @@ H3: "Zamów teraz i dołącz do detektywów w poszukiwaniu zdrowia"
 - Tylko myślnik "-" (NIE em dash "—" ani en dash "–")
 """
 
-        # Końcówka promptu - różna dla modeli
+        # Modyfikacja promptu dla modeli
         if model == "gpt-5-nano":
-            # Dla gpt-5-nano - z checklistą (do internal reasoning)
             system_prompt += """
-
 ╔═══════════════════════════════════════════════════════════════════╗
 ║  OSTATECZNY CHECKLIST PRZED WYSŁANIEM                              ║
 ╚═══════════════════════════════════════════════════════════════════╝
@@ -678,15 +656,11 @@ H3: "Zamów teraz i dołącz do detektywów w poszukiwaniu zdrowia"
 
 Jeśli któreś NIE - POPRAW przed wysłaniem!
 
-╔═══════════════════════════════════════════════════════════════════╗
-║  TWOJA ODPOWIEDŹ                                                   ║
-╚═══════════════════════════════════════════════════════════════════╝
-
 Zwróć TYLKO czysty HTML.
 Sprawdź WSZYSTKIE punkty checklisty!
 """
         else:
-            # Dla gpt-4o-mini - BEZ checklisty, tylko instrukcja
+            # Dla gpt-4o-mini i GEMINI - instrukcja formatowania bez checklisty w output
             system_prompt += """
 
 ╔═══════════════════════════════════════════════════════════════════╗
@@ -695,6 +669,7 @@ Sprawdź WSZYSTKIE punkty checklisty!
 
 KRYTYCZNE: Zwróć TYLKO i WYŁĄCZNIE czysty kod HTML opisu produktu.
 NIE dodawaj NICZEGO więcej - żadnych komentarzy, checklistów ani notatek.
+Nie używaj znaczników markdown (```html).
 
 Twoja odpowiedź powinna zaczynać się od <p> i kończyć na </h3>.
 Tylko HTML, nic więcej!
@@ -712,37 +687,58 @@ SZCZEGÓŁY TECHNICZNE (wpleć NATURALNIE w jeden z akapitów, NIE wszystkie nar
 
 ORYGINALNY OPIS (główne źródło informacji o produkcie):
 {product_data.get('description', '')}
-
-PAMIĘTAJ:
-- Zwróć TYLKO HTML
-- BEZ checklist w outputcie
-- BEZ dodatkowych komentarzy
 """
-        
-        # Wywołanie odpowiedniego modelu
-        if model == "gpt-5-nano":
-            response = client.responses.create(
-                model="gpt-5-nano",
-                input=f"{system_prompt}\n\n{raw_data}",
-                reasoning={"effort": "high"},
-                text={"verbosity": "medium"}
+
+        # ---------------------------------------------------------
+        # OBSŁUGA GOOGLE GEMINI
+        # ---------------------------------------------------------
+        if "gemini" in model.lower():
+            if "GOOGLE_API_KEY" not in st.secrets:
+                return "BŁĄD: Brak klucza GOOGLE_API_KEY w secrets.toml"
+
+            genai.configure(api_key=st.secrets["GOOGLE_API_KEY"])
+            
+            # Inicjalizacja modelu z system instruction
+            model_instance = genai.GenerativeModel(
+                model_name=model,
+                system_instruction=system_prompt
             )
-            result = strip_code_fences(response.output_text)
-        else:  # gpt-4o-mini
-            response = client.chat.completions.create(
-                model=model,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": raw_data}
-                ],
-                temperature=0.7,
-                max_tokens=2500
-            )
-            result = strip_code_fences(response.choices[0].message.content)
+            
+            # Wywołanie generowania
+            response = model_instance.generate_content(raw_data)
+            
+            result = strip_code_fences(response.text)
             result = remove_checklist_from_output(result)
-        
-        result = clean_ai_fingerprints(result)
-        return result
+            result = clean_ai_fingerprints(result)
+            return result
+
+        # ---------------------------------------------------------
+        # OBSŁUGA OPENAI GPT
+        # ---------------------------------------------------------
+        else:
+            if model == "gpt-5-nano":
+                response = client.responses.create(
+                    model="gpt-5-nano",
+                    input=f"{system_prompt}\n\n{raw_data}",
+                    reasoning={"effort": "high"},
+                    text={"verbosity": "medium"}
+                )
+                result = strip_code_fences(response.output_text)
+            else:  # gpt-4o-mini
+                response = client.chat.completions.create(
+                    model=model,
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": raw_data}
+                    ],
+                    temperature=0.7,
+                    max_tokens=2500
+                )
+                result = strip_code_fences(response.choices[0].message.content)
+                result = remove_checklist_from_output(result)
+            
+            result = clean_ai_fingerprints(result)
+            return result
         
     except Exception as e:
         return f"BŁĄD: {str(e)}"
@@ -761,25 +757,44 @@ Meta description: [treść]"""
         
         user_prompt = f"Produkt: {product_data.get('title', '')}\nDane: {product_data.get('details', '')} {product_data.get('description', '')}"
 
-        if model == "gpt-5-nano":
-            response = client.responses.create(
-                model="gpt-5-nano",
-                input=f"{system_prompt}\n\n{user_prompt}",
-                reasoning={"effort": "medium"},
-                text={"verbosity": "low"}
-            )
-            result = response.output_text
+        # ---------------------------------------------------------
+        # OBSŁUGA GOOGLE GEMINI
+        # ---------------------------------------------------------
+        if "gemini" in model.lower():
+             if "GOOGLE_API_KEY" not in st.secrets:
+                return "", ""
+             
+             genai.configure(api_key=st.secrets["GOOGLE_API_KEY"])
+             model_instance = genai.GenerativeModel(
+                model_name=model,
+                system_instruction=system_prompt
+             )
+             response = model_instance.generate_content(user_prompt)
+             result = response.text
+
+        # ---------------------------------------------------------
+        # OBSŁUGA OPENAI GPT
+        # ---------------------------------------------------------
         else:
-            response = client.chat.completions.create(
-                model=model,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt}
-                ],
-                temperature=0.5,
-                max_tokens=300
-            )
-            result = response.choices[0].message.content
+            if model == "gpt-5-nano":
+                response = client.responses.create(
+                    model="gpt-5-nano",
+                    input=f"{system_prompt}\n\n{user_prompt}",
+                    reasoning={"effort": "medium"},
+                    text={"verbosity": "low"}
+                )
+                result = response.output_text
+            else:
+                response = client.chat.completions.create(
+                    model=model,
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt}
+                    ],
+                    temperature=0.5,
+                    max_tokens=300
+                )
+                result = response.choices[0].message.content
         
         meta_title = ""
         meta_description = ""
@@ -859,7 +874,7 @@ def process_product_from_akeneo(sku: str, client: OpenAI, token: str, channel: s
             'description': original_desc
         }
         
-        # Generowanie - zawsze default
+        # Generowanie - model przekazywany dalej
         description_html = generate_description(product_data, client, model, "default")
         
         if "BŁĄD" in description_html:
@@ -917,6 +932,7 @@ if missing:
     st.error(f"❌ Brak konfiguracji Akeneo: {', '.join(missing)}")
     st.stop()
 
+# Initialize OpenAI client (used even if Gemini is selected, passed as argument)
 client = OpenAI()
 
 # ═══════════════════════════════════════════════════════════════════
@@ -926,7 +942,7 @@ client = OpenAI()
 col_logo, col_title = st.columns([1, 5])
 with col_title:
     st.markdown('<h1 class="main-header">📚 Generator Opisów Produktów</h1>', unsafe_allow_html=True)
-    st.markdown('<p class="sub-header">Masowe generowanie opisów produktów z Akeneo PIM • Powered by OpenAI GPT</p>', unsafe_allow_html=True)
+    st.markdown('<p class="sub-header">Masowe generowanie opisów produktów z Akeneo PIM • Powered by OpenAI & Gemini</p>', unsafe_allow_html=True)
 
 # ═══════════════════════════════════════════════════════════════════
 # SIDEBAR
@@ -935,14 +951,17 @@ with col_title:
 with st.sidebar:
     st.header("⚙️ Ustawienia")
     
-    # Wybór modelu - TYLKO gpt-5-nano i gpt-4o-mini
+    # Wybór modelu - ZAKTUALIZOWANA LISTA O GEMINI
     st.subheader("🤖 Model AI")
     model_choice = st.selectbox(
         "Wybierz model:",
-        ["gpt-5-nano", "gpt-4o-mini"],
+        ["gpt-5-nano", "gpt-4o-mini", "gemini-1.5-flash", "gemini-2.0-flash-exp"],
         index=0,
-        help="gpt-5-nano: najnowszy, szybki, tani (zalecany)\ngpt-4o-mini: bardziej kreatywny, wolniejszy"
+        help="gpt-5-nano: szybki/tani OpenAI\ngemini-1.5-flash: szybki/tani Google\ngemini-2.0-flash-exp: najnowszy eksperymentalny Google"
     )
+
+    if "gemini" in model_choice.lower() and "GOOGLE_API_KEY" not in st.secrets:
+        st.error("⚠️ Brak GOOGLE_API_KEY w secrets.toml!")
     
     st.markdown("---")
     
@@ -1039,10 +1058,10 @@ with st.sidebar:
 5. **Wybierz które wysłać** do PIM
 6. Zaktualizuj zaznaczone w Akeneo
 
-**v3.0.2 - Nowości:**
+**v3.1.0 - Nowości:**
+✅ **Obsługa Gemini Flash** (Google AI)
 ✅ Naprawiono błąd HTTPError przy logowaniu
 ✅ Caching tokenu (szybsze działanie)
-✅ Lepsza diagnostyka błędów Akeneo
     """)
 
 # ═══════════════════════════════════════════════════════════════════
@@ -1247,6 +1266,7 @@ if st.session_state.bulk_selected_products:
     st.subheader("🚀 Generowanie opisów")
     
     st.metric("Produkty do przetworzenia", len(st.session_state.bulk_selected_products))
+    st.info(f"Wybrany model: {model_choice}")
     
     col_gen, col_clear = st.columns([1, 1])
     
@@ -1505,10 +1525,7 @@ if st.session_state.bulk_results:
 st.markdown("---")
 st.markdown("""
 <div style='text-align: center; color: #666; padding: 20px;'>
-    <p><strong>Generator Opisów Produktów v3.0.2</strong></p>
-    <p>Powered by OpenAI GPT-5-nano & GPT-4o-mini | Akeneo PIM Integration</p>
-    <p style='font-size: 0.8rem; margin-top: 10px;'>
-        ✨ v3.0.2: Poprawiona obsługa logowania do Akeneo (cache + error handling)
-    </p>
+    <p><strong>Generator Opisów Produktów v3.1.0</strong></p>
+    <p>Powered by OpenAI & Google Gemini | Akeneo PIM Integration</p>
 </div>
 """, unsafe_allow_html=True)
