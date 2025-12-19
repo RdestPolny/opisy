@@ -10,7 +10,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-# Obsługa Google Gemini
+# Dodajemy obsługę Google Gemini
 import google.generativeai as genai
 
 # ═══════════════════════════════════════════════════════════════════
@@ -18,7 +18,7 @@ import google.generativeai as genai
 # ═══════════════════════════════════════════════════════════════════
 
 st.set_page_config(
-    page_title="Generator Opisów Produktów v3.2.0 (Gemini 3)",
+    page_title="Generator Opisów Produktów v3.2.0",
     page_icon="📚",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -42,6 +42,34 @@ st.markdown("""
         padding: 1rem;
         border-radius: 0.5rem;
         text-align: center;
+    }
+    .success-box {
+        padding: 1rem;
+        background: #d4edda;
+        border-left: 4px solid #28a745;
+        border-radius: 0.25rem;
+        margin: 1rem 0;
+    }
+    .info-box {
+        padding: 1rem;
+        background: #d1ecf1;
+        border-left: 4px solid #17a2b8;
+        border-radius: 0.25rem;
+        margin: 1rem 0;
+    }
+    .warning-box {
+        padding: 1rem;
+        background: #fff3cd;
+        border-left: 4px solid #ffc107;
+        border-radius: 0.25rem;
+        margin: 1rem 0;
+    }
+    .error-box {
+        padding: 1rem;
+        background: #f8d7da;
+        border-left: 4px solid #dc3545;
+        border-radius: 0.25rem;
+        margin: 1rem 0;
     }
     .scrollable-results {
         max-height: 400px;
@@ -155,6 +183,20 @@ def clean_ai_fingerprints(text: str) -> str:
     text = text.replace('…', '...')
     return text
 
+def remove_checklist_from_output(text: str) -> str:
+    """Usuwa checklist z końca odpowiedzi (zabezpieczenie)"""
+    if "Checklist:" in text or "checklist:" in text:
+        text = re.split(r'[Cc]hecklist:', text)[0]
+    
+    lines = text.split('\n')
+    cleaned_lines = []
+    for line in lines:
+        if line.strip().startswith('☑'):
+            continue
+        cleaned_lines.append(line)
+    
+    return '\n'.join(cleaned_lines).strip()
+
 def safe_string_value(value) -> str:
     """Bezpiecznie konwertuje wartość na string."""
     if value is None:
@@ -178,16 +220,16 @@ def validate_description_quality(description) -> Tuple[str, str]:
     desc_str = safe_string_value(description)
     
     if not desc_str or len(desc_str.strip()) == 0:
-        return 'error', '❌ Brak oryginalnego opisu w Akeneo!'
+        return 'error', '❌ Brak oryginalnego opisu w Akeneo! Wygenerowany opis może być niskiej jakości.'
     
     desc_length = len(desc_str.strip())
     
-    if desc_length < 50:
-        return 'error', f'❌ Oryginalny opis krytycznie krótki ({desc_length} znaków)!'
-    elif desc_length < 200:
-        return 'warning', f'⚠️ Oryginalny opis dość krótki ({desc_length} znaków).'
+    if desc_length < 100:
+        return 'error', f'❌ Oryginalny opis bardzo krótki ({desc_length} znaków)! AI będzie miał za mało informacji.'
+    elif desc_length < 300:
+        return 'warning', f'⚠️ Oryginalny opis dość krótki ({desc_length} znaków). Rozważ wzbogacenie opisu w Akeneo.'
     else:
-        return 'ok', f'✅ Opis źródłowy OK ({desc_length} znaków)'
+        return 'ok', f'✅ Oryginalny opis ma odpowiednią długość ({desc_length} znaków)'
 
 # ═══════════════════════════════════════════════════════════════════
 # AKENEO API
@@ -225,79 +267,85 @@ def akeneo_get_token() -> str:
             
         return r.json()["access_token"]
         
+    except requests.exceptions.ConnectionError:
+        st.error(f"❌ Nie można połączyć się z Akeneo pod adresem: {_akeneo_root()}")
+        st.stop()
     except Exception as e:
-        st.error(f"❌ Błąd połączenia z Akeneo: {str(e)}")
+        st.error(f"❌ Nieoczekiwany błąd podczas pobierania tokenu: {str(e)}")
         st.stop()
 
 def akeneo_get_attribute(code: str, token: str) -> Dict:
+    """Pobiera definicję atrybutu z Akeneo"""
     url = _akeneo_root() + f"/api/rest/v1/attributes/{code}"
     r = requests.get(url, headers={"Authorization": f"Bearer {token}"}, timeout=30)
     r.raise_for_status()
     return r.json()
 
 def akeneo_product_exists(sku: str, token: str) -> bool:
+    """Sprawdza czy produkt istnieje w Akeneo"""
     url = _akeneo_root() + f"/api/rest/v1/products/{sku}"
     r = requests.get(url, headers={"Authorization": f"Bearer {token}"}, timeout=30)
     return r.status_code == 200
 
 def akeneo_search_products(search_query: str, token: str, limit: int = 20, locale: str = "pl_PL") -> List[Dict]:
-    """Wyszukuje produkty w Akeneo"""
+    """Wyszukuje produkty w Akeneo po nazwie lub SKU"""
     url = _akeneo_root() + "/api/rest/v1/products"
     headers = {"Authorization": f"Bearer {token}"}
     products_dict = {}
     
     try:
-        # 1. Szukaj po SKU
+        # Wyszukiwanie po identyfikatorze (SKU)
         params_identifier = {
             "limit": limit,
             "search": json.dumps({"identifier": [{"operator": "CONTAINS", "value": search_query}]})
         }
         r1 = requests.get(url, headers=headers, params=params_identifier, timeout=30)
-        if r1.status_code == 200:
-            for item in r1.json().get("_embedded", {}).get("items", []):
-                identifier = item.get("identifier", "")
-                title = identifier
-                # Próba wyciągnięcia nazwy
-                values = item.get("values", {})
-                if "name" in values:
-                    for val in values["name"]:
-                        if val.get("locale") == locale or val.get("locale") is None:
-                            title = safe_string_value(val.get("data", identifier)) or identifier
-                            break
-                products_dict[identifier] = {
-                    "identifier": identifier, "title": title,
-                    "family": item.get("family", ""), "enabled": item.get("enabled", False)
-                }
-
-        # 2. Szukaj po nazwie
+        r1.raise_for_status()
+        
+        for item in r1.json().get("_embedded", {}).get("items", []):
+            identifier = item.get("identifier", "")
+            title = identifier
+            values = item.get("values", {})
+            if "name" in values:
+                for val in values["name"]:
+                    if val.get("locale") == locale or val.get("locale") is None:
+                        title = safe_string_value(val.get("data", identifier)) or identifier
+                        break
+            products_dict[identifier] = {
+                "identifier": identifier, "title": title, 
+                "family": item.get("family", ""), "enabled": item.get("enabled", False)
+            }
+        
+        # Wyszukiwanie po atrybucie "name"
         params_name = {
             "limit": limit,
             "search": json.dumps({"name": [{"operator": "CONTAINS", "value": search_query, "locale": locale}]})
         }
         r2 = requests.get(url, headers=headers, params=params_name, timeout=30)
-        if r2.status_code == 200:
-            for item in r2.json().get("_embedded", {}).get("items", []):
-                identifier = item.get("identifier", "")
-                if identifier not in products_dict:
-                    title = identifier
-                    values = item.get("values", {})
-                    if "name" in values:
-                        for val in values["name"]:
-                            if val.get("locale") == locale or val.get("locale") is None:
-                                title = safe_string_value(val.get("data", identifier)) or identifier
-                                break
-                    products_dict[identifier] = {
-                        "identifier": identifier, "title": title,
-                        "family": item.get("family", ""), "enabled": item.get("enabled", False)
-                    }
+        r2.raise_for_status()
         
-        return list(products_dict.values())[:limit]
+        for item in r2.json().get("_embedded", {}).get("items", []):
+            identifier = item.get("identifier", "")
+            if identifier not in products_dict:
+                title = identifier
+                if "name" in item.get("values", {}):
+                    for val in item["values"]["name"]:
+                        if val.get("locale") == locale or val.get("locale") is None:
+                            title = safe_string_value(val.get("data", identifier)) or identifier
+                            break
+                products_dict[identifier] = {
+                    "identifier": identifier, "title": title, 
+                    "family": item.get("family", ""), "enabled": item.get("enabled", False)
+                }
+        
+        return sorted(list(products_dict.values()), key=lambda x: x['title'].lower())[:limit]
+        
     except Exception as e:
         st.error(f"Błąd wyszukiwania: {str(e)}")
         return []
 
 def akeneo_get_product_details(sku: str, token: str, channel: str = "Bookland", locale: str = "pl_PL") -> Optional[Dict]:
-    """Pobiera szczegóły produktu"""
+    """Pobiera pełne dane produktu z Akeneo"""
     url = _akeneo_root() + f"/api/rest/v1/products/{sku}"
     headers = {"Authorization": f"Bearer {token}"}
     
@@ -309,16 +357,10 @@ def akeneo_get_product_details(sku: str, token: str, channel: str = "Bookland", 
         
         def get_value(attr_name: str) -> str:
             if attr_name not in values: return ""
-            attr_values = values[attr_name]
-            if not attr_values: return ""
-            for val in attr_values:
-                # Preferuj dany kanał i locale
-                v_scope = val.get("scope")
-                v_locale = val.get("locale")
-                if (v_scope is None or v_scope == channel) and (v_locale is None or v_locale == locale):
+            for val in values[attr_name]:
+                if (val.get("scope") in [None, channel]) and (val.get("locale") in [None, locale]):
                     return safe_string_value(val.get("data", ""))
-            # Fallback
-            return safe_string_value(attr_values[0].get("data", ""))
+            return safe_string_value(values[attr_name][0].get("data", "")) if values[attr_name] else ""
         
         return {
             "identifier": product.get("identifier", ""),
@@ -329,53 +371,48 @@ def akeneo_get_product_details(sku: str, token: str, channel: str = "Bookland", 
             "year": get_value("year") or get_value("rok_wydania"),
             "pages": get_value("pages") or get_value("liczba_stron"),
             "cover_type": get_value("cover_type") or get_value("oprawa"),
-            "enabled": product.get("enabled", False)
+            "raw_values": values
         }
     except requests.exceptions.HTTPError as e:
         if e.response.status_code == 404: return None
         raise e
 
 def akeneo_update_description(sku: str, html_description: str, channel: str, locale: str = "pl_PL") -> bool:
-    """Wysyła opis do Akeneo"""
+    """Aktualizuje opis produktu w Akeneo"""
     token = akeneo_get_token()
     if not akeneo_product_exists(sku, token):
-        raise ValueError(f"Produkt '{sku}' nie istnieje.")
+        raise ValueError(f"Produkt '{sku}' nie istnieje w Akeneo.")
     
     attr_desc = akeneo_get_attribute("description", token)
-    is_scopable = bool(attr_desc.get("scopable", False))
-    is_localizable = bool(attr_desc.get("localizable", False))
     
-    value_obj = {
+    value_obj_desc = {
         "data": html_description,
-        "scope": channel if is_scopable else None,
-        "locale": locale if is_localizable else None,
+        "scope": channel if attr_desc.get("scopable") else None,
+        "locale": locale if attr_desc.get("localizable") else None,
     }
     
-    payload = {"values": {"description": [value_obj]}}
+    payload = {"values": {"description": [value_obj_desc]}}
     
     # Próba ustawienia flagi SEO jeśli istnieje
     try:
         attr_seo = akeneo_get_attribute("opisy_seo", token)
-        seo_scopable = bool(attr_seo.get("scopable", False))
-        seo_localizable = bool(attr_seo.get("localizable", False))
         payload["values"]["opisy_seo"] = [{
             "data": True,
-            "scope": channel if seo_scopable else None,
-            "locale": locale if seo_localizable else None
+            "scope": channel if attr_seo.get("scopable") else None,
+            "locale": locale if attr_seo.get("localizable") else None,
         }]
     except:
         pass
 
     url = _akeneo_root() + f"/api/rest/v1/products/{sku}"
-    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+    r = requests.patch(url, headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"}, data=json.dumps(payload), timeout=30)
     
-    r = requests.patch(url, headers=headers, data=json.dumps(payload), timeout=30)
     if r.status_code in (200, 204):
         return True
-    raise RuntimeError(f"Błąd zapisu Akeneo ({r.status_code}): {r.text}")
+    raise RuntimeError(f"Błąd Akeneo ({r.status_code})")
 
 # ═══════════════════════════════════════════════════════════════════
-# GENEROWANIE OPISÓW - ZMODYFIKOWANA SEKCJA
+# GENEROWANIE OPISÓW - ZAKTUALIZOWANE O SUPREME SELLING MODE
 # ═══════════════════════════════════════════════════════════════════
 
 def generate_description(product_data: Dict, client: OpenAI, model: str = "gemini-3-flash-preview", style_variant: str = "default") -> str:
@@ -394,13 +431,13 @@ TWOJE CELE:
 3. Zachować absolutną poprawność językową i typograficzną (polska gramatyka).
 
 KRĘGOSŁUP STRUKTURALNY (Ściśle przestrzegaj HTML):
-Twój output musi być czystym kodem HTML (bez ```html, bez <html>, bez <body>). Użyj poniższej struktury:
+Twój output musi być czystym kodem HTML (bez ```html, bez <html>, bez <body>). Użyj dokładnie tej struktury:
 
 <p>[HOOK: Pierwszy akapit (4-5 zdań). Musi chwytać za serce/rozum. W tym akapicie OBOWIĄZKOWO pogrub <b>Tytuł</b> oraz <b>Autora</b> (pełne imię i nazwisko).]</p>
 
 <h2>[NAGŁÓWEK H2: Obietnica korzyści lub intrygujące pytanie związane z treścią]</h2>
 
-<p>[ROZWINIĘCIE: Opis fabuły/treści (bez spoilerów!) lub zastosowania produktu. Tutaj budujesz pożądanie. Wpleć tutaj NATURALNIE dane techniczne (wydawnictwo, rok, oprawa) - nie rób z nich listy, uczyń z nich atut.]</p>
+<p>[ROZWINIĘCIE: Opis fabuły/treści (bez spoilerów!) lub zastosowania produktu. Tutaj budujesz pożądanie. Wpleć tutaj NATURALNIE dane techniczne (wydawnictwo, rok, oprawa) - nie rób z nich listy, uczyń z nich atut narracji.]</p>
 
 <h3>[NAGŁÓWEK H3: Krótkie wezwanie do działania (CTA) - np. "Sprawdź, dlaczego warto", "Dołącz do czytelników"]</h3>
 
@@ -421,8 +458,8 @@ ZASADY ŻELAZNE (Błędy krytyczne):
    - Nigdy nie powtarzaj tych samych fraz w różnych akapitach.
    - Dane techniczne (strony, rok) wymień TYLKO RAZ w całym tekście.
 
-4. WPROWADZANIE DANYCH:
-   - Nie pisz "Dane techniczne:". Wpleć to w zdanie: "Ta licząca 320 stron powieść, wydana nakładem wydawnictwa Znak, to..."
+4. CZYSTY HTML:
+   - Zwróć tylko kod HTML zaczynający się od <p> i kończący na </p>. Żadnych markdownów.
 
 Oto dane produktu do opisania:
 """
@@ -436,11 +473,10 @@ SZCZEGÓŁY (rok, strony, oprawa, itp.): {product_data.get('details', '')}
 ORYGINALNY OPIS (Baza wiedzy - przetwórz to swoimi słowami, nie kopiuj 1:1):
 {product_data.get('description', '')}
 """
-
-        final_instruction = "\n\nWygeneruj TYLKO kod HTML. Nie dodawaj żadnych komentarzy przed ani po."
+        final_instruction = "\n\nWygeneruj TYLKO kod HTML. Nie dodawaj żadnych komentarzy."
 
         # ---------------------------------------------------------
-        # OBSŁUGA GOOGLE GEMINI (DOMYŚLNY MODEL)
+        # OBSŁUGA GOOGLE GEMINI (DEFAULT & PREFERRED)
         # ---------------------------------------------------------
         if "gemini" in model.lower():
             if "GOOGLE_API_KEY" not in st.secrets:
@@ -448,7 +484,7 @@ ORYGINALNY OPIS (Baza wiedzy - przetwórz to swoimi słowami, nie kopiuj 1:1):
 
             genai.configure(api_key=st.secrets["GOOGLE_API_KEY"])
             
-            # Konfiguracja generacji dla lepszej jakości (kreatywność + precyzja)
+            # Konfiguracja generowania dla maksymalnej jakości
             generation_config = {
                 "temperature": 0.7,
                 "top_p": 0.95,
@@ -465,11 +501,12 @@ ORYGINALNY OPIS (Baza wiedzy - przetwórz to swoimi słowami, nie kopiuj 1:1):
             response = model_instance.generate_content(raw_data + final_instruction)
             
             result = strip_code_fences(response.text)
+            result = remove_checklist_from_output(result)
             result = clean_ai_fingerprints(result)
             return result
 
         # ---------------------------------------------------------
-        # OBSŁUGA OPENAI GPT
+        # OBSŁUGA OPENAI GPT (FALLBACK)
         # ---------------------------------------------------------
         else:
             response = client.chat.completions.create(
@@ -482,65 +519,43 @@ ORYGINALNY OPIS (Baza wiedzy - przetwórz to swoimi słowami, nie kopiuj 1:1):
                 max_tokens=2500
             )
             result = strip_code_fences(response.choices[0].message.content)
+            result = remove_checklist_from_output(result)
             result = clean_ai_fingerprints(result)
             return result
         
     except Exception as e:
-        return f"BŁĄD GENEROWANIA: {str(e)}"
-
-def generate_meta_tags(product_data: Dict, client: OpenAI, model: str) -> Tuple[str, str]:
-    """Generuje meta title i meta description"""
-    try:
-        system_prompt = "Ekspert SEO. Meta Title (max 60 znaków), Meta Description (max 160 znaków, CTA). Format:\nMeta title: ...\nMeta description: ..."
-        user_prompt = f"Produkt: {product_data.get('title')}\nInfo: {product_data.get('description')}"
-
-        if "gemini" in model.lower():
-             if "GOOGLE_API_KEY" not in st.secrets: return "", ""
-             genai.configure(api_key=st.secrets["GOOGLE_API_KEY"])
-             model_instance = genai.GenerativeModel(model_name=model, system_instruction=system_prompt)
-             response = model_instance.generate_content(user_prompt)
-             result = response.text
-        else:
-            response = client.chat.completions.create(
-                model=model,
-                messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}],
-                temperature=0.5,
-                max_tokens=300
-            )
-            result = response.choices[0].message.content
-        
-        meta_title = ""
-        meta_description = ""
-        for line in result.splitlines():
-            if "Meta title:" in line: meta_title = line.split(":", 1)[1].strip()
-            if "Meta description:" in line: meta_description = line.split(":", 1)[1].strip()
-            
-        return clean_ai_fingerprints(meta_title)[:60], clean_ai_fingerprints(meta_description)[:160]
-    except:
-        return "", ""
+        return f"BŁĄD: {str(e)}"
 
 def process_product_from_akeneo(sku: str, client: OpenAI, token: str, channel: str, locale: str, model: str) -> Dict:
-    """Przetwarza pojedynczy produkt"""
+    """Przetwarza pojedynczy produkt z Akeneo"""
     try:
         product_details = akeneo_get_product_details(sku, token, channel, locale)
         
         if not product_details:
-            return {'sku': sku, 'title': '', 'description_html': '', 'error': 'Produkt nie znaleziony'}
+            return {
+                'sku': sku, 'title': '', 'description_html': '', 'url': '',
+                'error': 'Produkt nie znaleziony',
+                'description_quality': ('error', 'Produkt nie znaleziony')
+            }
         
-        # Przygotowanie danych
         details_parts = []
         author = safe_string_value(product_details.get('author'))
         if author: details_parts.append(f"Autor: {author}")
+        
         publisher = safe_string_value(product_details.get('publisher'))
         if publisher: details_parts.append(f"Wydawnictwo: {publisher}")
+        
         year = safe_string_value(product_details.get('year'))
         if year: details_parts.append(f"Rok: {year}")
+        
         pages = safe_string_value(product_details.get('pages'))
         if pages: details_parts.append(f"Strony: {pages}")
-        cover = safe_string_value(product_details.get('cover_type'))
-        if cover: details_parts.append(f"Oprawa: {cover}")
         
-        original_desc = safe_string_value(product_details.get('description', ''))
+        cover_type = safe_string_value(product_details.get('cover_type'))
+        if cover_type: details_parts.append(f"Oprawa: {cover_type}")
+        
+        original_desc = product_details.get('description', '') or product_details.get('short_description', '')
+        original_desc = safe_string_value(original_desc)
         quality_status, quality_msg = validate_description_quality(original_desc)
         
         product_title = safe_string_value(product_details['title'])
@@ -549,187 +564,240 @@ def process_product_from_akeneo(sku: str, client: OpenAI, token: str, channel: s
         product_data = {
             'title': product_title,
             'author': author,
+            'details': '\n'.join(details_parts),
             'publisher': publisher,
-            'details': ', '.join(details_parts),
             'description': original_desc
         }
         
-        description_html = generate_description(product_data, client, model)
+        description_html = generate_description(product_data, client, model, "default")
         
         if "BŁĄD" in description_html:
-            return {'sku': sku, 'title': product_title, 'error': description_html, 'description_quality': (quality_status, quality_msg)}
+            return {
+                'sku': sku, 'title': product_title, 'description_html': '', 'url': product_url,
+                'error': description_html, 'description_quality': (quality_status, quality_msg)
+            }
         
         return {
-            'sku': sku,
-            'title': product_title,
-            'description_html': description_html,
-            'url': product_url,
-            'old_description': original_desc,
-            'error': None,
+            'sku': sku, 'title': product_title, 'description_html': description_html,
+            'url': product_url, 'old_description': original_desc, 'error': None,
             'description_quality': (quality_status, quality_msg)
         }
         
     except Exception as e:
-        return {'sku': sku, 'title': '', 'error': str(e)}
+        return {
+            'sku': sku, 'title': '', 'description_html': '', 'url': '',
+            'error': str(e), 'description_quality': ('error', str(e))
+        }
 
 # ═══════════════════════════════════════════════════════════════════
-# SESSION STATE & WALIDACJA
+# SESSION STATE
 # ═══════════════════════════════════════════════════════════════════
 
-if 'bulk_results' not in st.session_state: st.session_state.bulk_results = []
-if 'bulk_selected_products' not in st.session_state: st.session_state.bulk_selected_products = {}
-if 'products_to_send' not in st.session_state: st.session_state.products_to_send = {}
+if 'bulk_results' not in st.session_state:
+    st.session_state.bulk_results = []
+if 'bulk_selected_products' not in st.session_state:
+    st.session_state.bulk_selected_products = {}
+if 'products_to_send' not in st.session_state:
+    st.session_state.products_to_send = {}
 
-if "OPENAI_API_KEY" not in st.secrets:
-    st.error("❌ Brak OPENAI_API_KEY w secrets.")
+# ═══════════════════════════════════════════════════════════════════
+# WALIDACJA
+# ═══════════════════════════════════════════════════════════════════
+
+# Initialize OpenAI client (required arg for functions, even if unused with Gemini)
+if "OPENAI_API_KEY" in st.secrets:
+    client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
+else:
+    client = None # Obsługa braku klucza OpenAI jeśli używamy tylko Gemini
+
+required = ["AKENEO_BASE_URL", "AKENEO_CLIENT_ID", "AKENEO_SECRET", "AKENEO_USERNAME", "AKENEO_PASSWORD"]
+missing = [k for k in required if k not in st.secrets]
+if missing:
+    st.error(f"❌ Brak konfiguracji Akeneo: {', '.join(missing)}")
     st.stop()
-if "GOOGLE_API_KEY" not in st.secrets:
-    st.error("❌ Brak GOOGLE_API_KEY w secrets.")
-    st.stop()
-
-client = OpenAI()
 
 # ═══════════════════════════════════════════════════════════════════
-# HEADER & SIDEBAR
+# HEADER
 # ═══════════════════════════════════════════════════════════════════
 
 col_logo, col_title = st.columns([1, 5])
 with col_title:
     st.markdown('<h1 class="main-header">📚 Generator Opisów Produktów</h1>', unsafe_allow_html=True)
-    st.markdown('<p class="sub-header">Powered by Google Gemini 3 & OpenAI</p>', unsafe_allow_html=True)
+    st.markdown('<p class="sub-header">Masowe generowanie opisów produktów z Akeneo PIM • Powered by Google Gemini</p>', unsafe_allow_html=True)
+
+# ═══════════════════════════════════════════════════════════════════
+# SIDEBAR
+# ═══════════════════════════════════════════════════════════════════
 
 with st.sidebar:
     st.header("⚙️ Ustawienia")
     
+    # Wybór modelu - GEMINI 3 FLASH PREVIEW DOMYŚLNY
     st.subheader("🤖 Model AI")
-    # ZAKTUALIZOWANA LISTA Z GEMINI 3 JAKO DOMYŚLNYM
     model_choice = st.selectbox(
         "Wybierz model:",
-        ["gemini-3-flash-preview", "gpt-4o-mini", "gpt-4o"],
+        ["gemini-3-flash-preview", "gpt-4o-mini"],
         index=0,
-        help="Gemini 3 Flash: Najnowszy, najszybszy model Google.\nGPT-4o-mini: Ekonomiczny model OpenAI."
+        help="Gemini 3 Flash: Super szybki model Google\nGPT-4o Mini: Ekonomiczny model OpenAI"
     )
+
+    if "gemini" in model_choice.lower() and "GOOGLE_API_KEY" not in st.secrets:
+        st.error("⚠️ Brak GOOGLE_API_KEY w secrets.toml!")
     
     st.markdown("---")
-    channel = st.selectbox("Kanał:", ["Bookland", "B2B"], index=0)
+    
+    channel = st.selectbox("Kanał (scope):", ["Bookland", "B2B"], index=0)
     locale = st.text_input("Locale:", value=st.secrets.get("AKENEO_DEFAULT_LOCALE", "pl_PL"))
     
     st.markdown("---")
-    st.header("📊 Baza")
-    optimized_products = load_optimized_products()
-    st.metric("Zoptymalizowane", len(optimized_products))
     
-    if st.button("🗑️ Wyczyść bazę"):
-        if st.checkbox("Potwierdź"):
+    # BAZA ZOPTYMALIZOWANYCH
+    st.header("📊 Baza zoptymalizowanych")
+    optimized_products = load_optimized_products()
+    if optimized_products:
+        st.metric("Produkty w bazie", len(optimized_products))
+        if st.button("🗑️ Wyczyść bazę"):
             save_optimized_products([])
             st.rerun()
+    else:
+        st.info("Baza jest pusta")
+        
+    st.markdown("---")
+    st.info("**v3.2.0**\nSupreme Selling Mode Prompts\nGemini 3 Flash Default")
 
 # ═══════════════════════════════════════════════════════════════════
-# GŁÓWNA APLIKACJA
+# GŁÓWNA FUNKCJONALNOŚĆ - TRYB ZBIORCZY
 # ═══════════════════════════════════════════════════════════════════
 
-st.subheader("📦 Przetwarzanie produktów")
-method = st.radio("Metoda:", ["🔍 Wyszukiwarka", "📋 Lista SKU"], horizontal=True)
+st.subheader("📦 Przetwarzanie wielu produktów")
 
-if method == "🔍 Wyszukiwarka":
-    col_s, col_l = st.columns([4, 1])
-    with col_s: search_q = st.text_input("Szukaj:", placeholder="Harry Potter")
-    with col_l: limit_q = st.number_input("Limit", 5, 50, 10)
+method = st.radio("Wybierz metodę:", ["🔍 Wyszukaj i zaznacz produkty", "📋 Wklej listę SKU"], horizontal=True)
+st.markdown("---")
+
+# METODA 1: WYSZUKIWANIE
+if method == "🔍 Wyszukaj i zaznacz produkty":
+    if st.session_state.bulk_selected_products:
+        with st.expander(f"🛒 Wybrane produkty ({len(st.session_state.bulk_selected_products)})", expanded=True):
+            st.markdown('<div class="scrollable-results">', unsafe_allow_html=True)
+            for sku, prod_data in list(st.session_state.bulk_selected_products.items()):
+                c1, c2 = st.columns([5, 1])
+                c1.write(f"**{sku}** - {format_product_title(prod_data.get('title', sku))}")
+                if c2.button("🗑️", key=f"del_{sku}"):
+                    del st.session_state.bulk_selected_products[sku]
+                    st.rerun()
+            st.markdown('</div>', unsafe_allow_html=True)
+            if st.button("🗑️ Wyczyść koszyk"):
+                st.session_state.bulk_selected_products = {}
+                st.rerun()
     
-    if st.button("🔍 Szukaj") and search_q:
+    st.subheader("🔎 Szukaj")
+    c_s, c_l = st.columns([4, 1])
+    search_q = c_s.text_input("Szukaj:", key="search_q")
+    limit = c_l.number_input("Limit", 5, 100, 10)
+    
+    if st.button("🔍 Szukaj", type="primary"):
         with st.spinner("Szukam..."):
-            res = akeneo_search_products(search_q, akeneo_get_token(), limit_q, locale)
-            st.session_state.search_res = res
-            if not res: st.warning("Brak wyników")
-
-    if 'search_res' in st.session_state and st.session_state.search_res:
+            token = akeneo_get_token()
+            st.session_state.bulk_search_results = akeneo_search_products(search_q, token, limit, locale)
+    
+    if 'bulk_search_results' in st.session_state and st.session_state.bulk_search_results:
         st.markdown("---")
-        if st.button("✅ Zaznacz wszystkie widoczne"):
-            for p in st.session_state.search_res:
-                st.session_state.bulk_selected_products[p['identifier']] = p
-            st.rerun()
-            
-        for p in st.session_state.search_res:
-            sku = p['identifier']
-            sel = sku in st.session_state.bulk_selected_products
-            c = st.checkbox(f"{sku} - {p['title']}", value=sel, key=f"s_{sku}")
-            if c and not sel:
-                st.session_state.bulk_selected_products[sku] = p
-                st.rerun()
-            elif not c and sel:
+        st.markdown('<div class="scrollable-results">', unsafe_allow_html=True)
+        for prod in st.session_state.bulk_search_results:
+            sku = prod['identifier']
+            checked = st.checkbox(
+                f"{sku} - {format_product_title(prod['title'])}",
+                value=(sku in st.session_state.bulk_selected_products),
+                key=f"check_{sku}"
+            )
+            if checked:
+                st.session_state.bulk_selected_products[sku] = {'title': prod['title']}
+            elif sku in st.session_state.bulk_selected_products:
                 del st.session_state.bulk_selected_products[sku]
-                st.rerun()
+        st.markdown('</div>', unsafe_allow_html=True)
 
-else: # Lista SKU
-    txt = st.text_area("SKU (jeden na linię):", height=150)
-    if st.button("📋 Załaduj SKU") and txt:
-        skus = [s.strip() for s in txt.split('\n') if s.strip()]
-        for sku in skus:
-            st.session_state.bulk_selected_products[sku] = {'identifier': sku, 'title': sku}
-        st.success(f"Dodano {len(skus)} SKU")
+# METODA 2: SKU LISTA
+else:
+    skus_text = st.text_area("Wklej SKU (jeden w linii):", height=200)
+    if st.button("📋 Załaduj", type="primary"):
+        skus = [s.strip() for s in skus_text.split('\n') if s.strip()]
+        with st.spinner(f"Ładuję {len(skus)}..."):
+            token = akeneo_get_token()
+            for sku in skus:
+                prod = akeneo_get_product_details(sku, token, channel, locale)
+                if prod:
+                    st.session_state.bulk_selected_products[sku] = {'title': prod['title']}
+        st.success("Załadowano!")
         st.rerun()
 
-# KOSZYK
+# GENEROWANIE
 if st.session_state.bulk_selected_products:
     st.markdown("---")
-    st.subheader(f"🛒 Koszyk ({len(st.session_state.bulk_selected_products)})")
-    
-    if st.button("🗑️ Wyczyść koszyk"):
-        st.session_state.bulk_selected_products = {}
-        st.rerun()
-        
-    if st.button("🚀 GENERUJ OPISY", type="primary"):
+    st.subheader("🚀 Generowanie")
+    if st.button("🚀 START", type="primary"):
         st.session_state.bulk_results = []
+        st.session_state.products_to_send = {}
+        prog = st.progress(0)
         token = akeneo_get_token()
         skus = list(st.session_state.bulk_selected_products.keys())
-        bar = st.progress(0, "Start...")
         
-        with ThreadPoolExecutor(max_workers=5) as exe:
-            futures = {exe.submit(process_product_from_akeneo, sku, client, token, channel, locale, model_choice): sku for sku in skus}
-            results = []
-            for i, f in enumerate(as_completed(futures)):
-                res = f.result()
-                results.append(res)
-                if not res.get('error'): st.session_state.products_to_send[res['sku']] = True
-                bar.progress((i+1)/len(skus), f"Przetworzono {res['sku']}")
-        
-        st.session_state.bulk_results = results
-        st.success("Gotowe!")
+        with ThreadPoolExecutor(max_workers=5) as executor:
+            futures = {executor.submit(process_product_from_akeneo, sku, client, token, channel, locale, model_choice): sku for sku in skus}
+            for i, future in enumerate(as_completed(futures)):
+                res = future.result()
+                st.session_state.bulk_results.append(res)
+                if not res['error']:
+                    st.session_state.products_to_send[res['sku']] = True
+                prog.progress((i+1)/len(skus))
         st.rerun()
 
 # WYNIKI
 if st.session_state.bulk_results:
     st.markdown("---")
-    st.subheader("📊 Wyniki generowania")
+    st.subheader("📊 Wyniki")
+    results = st.session_state.bulk_results
+    successful = [r for r in results if not r['error']]
     
-    succ = [r for r in st.session_state.bulk_results if not r.get('error')]
-    errs = [r for r in st.session_state.bulk_results if r.get('error')]
+    # CSV
+    df = pd.DataFrame(results)
+    st.download_button("📥 CSV", df.to_csv(index=False).encode('utf-8'), 'wyniki.csv')
     
-    c1, c2 = st.columns(2)
-    c1.metric("Sukces", len(succ))
-    c2.metric("Błędy", len(errs))
-    
-    if succ:
-        if st.button(f"📤 Wyślij zaznaczone ({sum(st.session_state.products_to_send.values())}) do Akeneo"):
-            pro = st.progress(0)
-            sent, fail = 0, 0
-            for i, r in enumerate(succ):
-                if st.session_state.products_to_send.get(r['sku']):
-                    try:
-                        akeneo_update_description(r['sku'], r['description_html'], channel, locale)
-                        add_optimized_product(r['sku'], r['title'], r['url'])
-                        sent += 1
-                    except: fail += 1
-                pro.progress((i+1)/len(succ))
-            st.success(f"Wysłano: {sent}, Błędy: {fail}")
-    
-    st.markdown("### Podgląd")
-    for r in succ:
-        with st.expander(f"✅ {r['sku']} - {r['title']}"):
-            st.checkbox("Wyślij", key=f"snd_{r['sku']}", value=st.session_state.products_to_send.get(r['sku'], True))
-            c1, c2 = st.columns(2)
-            with c1: st.markdown(r['description_html'], unsafe_allow_html=True)
-            with c2: st.code(r['description_html'], language='html')
+    # WYSYŁKA
+    if successful:
+        st.markdown("---")
+        st.subheader("📤 Wysyłka do PIM")
+        
+        for r in successful:
+            st.session_state.products_to_send[r['sku']] = st.checkbox(
+                f"{r['sku']} - {format_product_title(r['title'])}",
+                value=st.session_state.products_to_send.get(r['sku'], True),
+                key=f"send_{r['sku']}"
+            )
+            
+        if st.button("✅ Wyślij zaznaczone"):
+            to_send = [r for r in successful if st.session_state.products_to_send.get(r['sku'])]
+            prog = st.progress(0)
+            cnt = 0
+            for i, r in enumerate(to_send):
+                try:
+                    akeneo_update_description(r['sku'], r['description_html'], channel, locale)
+                    add_optimized_product(r['sku'], r['title'], r['url'])
+                    cnt += 1
+                except: pass
+                prog.progress((i+1)/len(to_send))
+            st.success(f"Wysłano {cnt}")
 
-    for r in errs:
-        st.error(f"{r['sku']}: {r['error']}")
+    # SZCZEGÓŁY
+    st.markdown("---")
+    for r in results:
+        with st.expander(f"{'✅' if not r['error'] else '❌'} {r['sku']} - {format_product_title(r['title'])}"):
+            if r['error']:
+                st.error(r['error'])
+            else:
+                st.code(r['description_html'], language='html')
+                st.markdown(r['description_html'], unsafe_allow_html=True)
+                if st.button("♻️ Regeneruj", key=f"regen_{r['sku']}"):
+                    token = akeneo_get_token()
+                    new_res = process_product_from_akeneo(r['sku'], client, token, channel, locale, model_choice)
+                    # Update results list logic needed here in real app
+                    st.info("Regeneracja w toku - odśwież wyniki")
