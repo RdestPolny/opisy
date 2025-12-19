@@ -955,7 +955,7 @@ with st.sidebar:
     st.subheader("🤖 Model AI")
     model_choice = st.selectbox(
         "Wybierz model:",
-        ["gpt-5-nano", "gpt-4o-mini", "gemini-2.5-flash"],
+        ["gpt-4o-mini", "gemini-3-flash-preview"],
         index=0,
         help="gpt-5-nano: szybki/tani OpenAI\ngemini-1.5-flash: szybki/tani Google\ngemini-2.0-flash-exp: najnowszy eksperymentalny Google"
     )
