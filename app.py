@@ -955,9 +955,9 @@ with st.sidebar:
     st.subheader("🤖 Model AI")
     model_choice = st.selectbox(
         "Wybierz model:",
-        ["gemini-3-flash-preview"],
+        ["gpt-4o-mini", "gemini-3-flash-preview"],
         index=0,
-        help=""
+        help="gpt-5-nano: szybki/tani OpenAI\ngemini-1.5-flash: szybki/tani Google\ngemini-2.0-flash-exp: najnowszy eksperymentalny Google"
     )
 
     if "gemini" in model_choice.lower() and "GOOGLE_API_KEY" not in st.secrets:
