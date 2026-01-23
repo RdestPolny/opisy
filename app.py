@@ -308,7 +308,7 @@ def akeneo_update_description(sku: str, html_description: str, channel: str, loc
 # GENEROWANIE OPISÓW - TYLKO GEMINI
 # ═══════════════════════════════════════════════════════════════════
 
-def generate_description(product_data: Dict, model: str = "gemini-3-flash-preview", internal_link: Optional[Dict] = None) -> str:
+def generate_description(product_data: Dict, model: str = "gemini-3-flash-preview", internal_link: Optional[Dict] = None, link_only: bool = False) -> str:
     """
     Generuje opis produktu korzystając WYŁĄCZNIE z Google Gemini.
     """
@@ -329,7 +329,20 @@ def generate_description(product_data: Dict, model: str = "gemini-3-flash-previe
    - UWAGA: Brak linku w tekście zostanie uznany za błąd krytyczny.
 """
 
-        system_prompt = f"""Jesteś wybitnym ekspertem SEO, specjalistą od Semantic SEO i doświadczonym copywriterem e-commerce. Tworzysz angażujące, sprzedażowe opisy produktów, które nie tylko konwertują, ale budują silną strukturę semantyczną sklepu.
+        if link_only:
+            system_prompt = f"""Jesteś wybitnym ekspertem SEO i Semantic SEO. Twoim zadaniem jest EDYCJA istniejącego opisu produktu w celu dodania linku wewnętrznego.
+
+ZASADY TRYBU "TYLKO LINKOWANIE":
+1. ZACHOWAJ ORYGINALNY OPIS: Nie zmieniaj stylu, nie przepisuj całego tekstu. Pozostaw treść z sekcji "ORYGINALNY OPIS" prawie nienaruszoną.
+2. DODAJ LINK: Znajdź najbardziej naturalne miejsce w tekście, aby wpleść link wewnętrzny.
+3. KONTEKST: Jeśli to konieczne, możesz dodać lub zmodyfikować JEDNO LUB DWA zdania, aby stworzyć naturalne przejście do linku.
+4. WYMAGANIA TECHNICZNE: Zwróć opis w formacie HTML (<p>, <b>, <a>, <h2>). Jeśli oryginalny opis nie ma HTML, dodaj podstawowe tagi <p> i <b>.
+5. ZAKAZ MARKDOWNA: Nie używaj składni Markdown (np. brak **). Używaj <b>.
+{link_instruction}
+
+Zwróć kompletny, gotowy kod HTML opisu z wplecionym linkiem."""
+        else:
+            system_prompt = f"""Jesteś wybitnym ekspertem SEO, specjalistą od Semantic SEO i doświadczonym copywriterem e-commerce. Tworzysz angażujące, sprzedażowe opisy produktów, które nie tylko konwertują, ale budują silną strukturę semantyczną sklepu.
 
 WYTYCZNE DOTYCZĄCE TREŚCI I STYLU:
 1. Unikalność: Każde zdanie musi wnosić nową wartość. Unikaj powtórzeń (duplicate content) i "lania wody".
@@ -385,7 +398,7 @@ ORYGINALNY OPIS: {product_data.get('description', '')}
     except Exception as e:
         return f"BŁĄD GEMINI: {str(e)}"
 
-def process_product_from_akeneo(sku: str, token: str, channel: str, locale: str, internal_link: Optional[Dict] = None) -> Dict:
+def process_product_from_akeneo(sku: str, token: str, channel: str, locale: str, internal_link: Optional[Dict] = None, link_only: bool = False) -> Dict:
     try:
         product_details = akeneo_get_product_details(sku, token, channel, locale)
         
@@ -413,7 +426,7 @@ def process_product_from_akeneo(sku: str, token: str, channel: str, locale: str,
         }
         
         # Wywołanie generowania (bez wyboru modelu - zawsze Gemini)
-        description_html = generate_description(product_data, internal_link=internal_link)
+        description_html = generate_description(product_data, internal_link=internal_link, link_only=link_only)
         
         return {
             'sku': sku,
@@ -464,6 +477,7 @@ with st.sidebar:
     st.markdown("---")
     st.header("🔗 Linkowanie wewnętrzne")
     st.session_state.link_active = st.checkbox("Włącz linkowanie", value=st.session_state.get("link_active", False))
+    st.session_state.link_only = st.checkbox("Tryb: Tylko dopisanie linku (nie zmieniaj opisu)", value=st.session_state.get("link_only", False))
     st.session_state.link_url = st.text_input("URL linku:", placeholder="np. https://bookland.com.pl/beletrystyka", value=st.session_state.get("link_url", ""))
     st.session_state.link_category = st.text_input("Kategoria/Anchor hint:", placeholder="np. Beletrystyka", value=st.session_state.get("link_category", ""))
     
@@ -552,6 +566,7 @@ if st.session_state.bulk_selected_products:
         
         # Przygotowanie danych o linkowaniu w głównym wątku
         internal_link = None
+        link_only = st.session_state.get("link_only", False)
         if st.session_state.get("link_active") and st.session_state.get("link_url") and st.session_state.get("link_category"):
             internal_link = {
                 "url": st.session_state.link_url,
@@ -559,7 +574,7 @@ if st.session_state.bulk_selected_products:
             }
 
         with ThreadPoolExecutor(max_workers=5) as ex:
-            futs = {ex.submit(process_product_from_akeneo, s, token, channel, locale, internal_link): s for s in skus}
+            futs = {ex.submit(process_product_from_akeneo, s, token, channel, locale, internal_link, link_only): s for s in skus}
             for i, f in enumerate(as_completed(futs)):
                 res = f.result()
                 st.session_state.bulk_results.append(res)
@@ -640,12 +655,13 @@ if st.session_state.bulk_results:
                     token = akeneo_get_token()
                     # Przygotowanie danych o linkowaniu
                     internal_link = None
+                    link_only = st.session_state.get("link_only", False)
                     if st.session_state.get("link_active") and st.session_state.get("link_url") and st.session_state.get("link_category"):
                         internal_link = {
                             "url": st.session_state.link_url,
                             "category": st.session_state.link_category
                         }
-                    new_res = process_product_from_akeneo(r['sku'], token, channel, locale, internal_link)
+                    new_res = process_product_from_akeneo(r['sku'], token, channel, locale, internal_link, link_only)
                     # Update result in list
                     for i, existing in enumerate(st.session_state.bulk_results):
                         if existing['sku'] == r['sku']:
