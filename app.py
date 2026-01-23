@@ -127,6 +127,8 @@ def clean_ai_fingerprints(text: str) -> str:
     # Wymuszenie polskich myślników zgodnie z promptem
     text = text.replace('—', '-') 
     text = text.replace('–', '-')
+    # Konwersja Markdown bold (**) na HTML (<b>) jako safety fallback
+    text = re.sub(r'\*\*(.*?)\*\*', r'<b>\1</b>', text)
     return text
 
 def safe_string_value(value) -> str:
@@ -332,8 +334,8 @@ def generate_description(product_data: Dict, model: str = "gemini-3-flash-previe
 WYTYCZNE DOTYCZĄCE TREŚCI I STYLU:
 1. Unikalność: Każde zdanie musi wnosić nową wartość. Unikaj powtórzeń (duplicate content) i "lania wody".
 2. Dane techniczne: NIGDY nie twórz listy danych technicznych. Wpleć je naturalnie w treść akapitów.
-3. Formatowanie (HTML): Używaj wyłącznie tagów <p>, <h2>, <h3>, <b>, <a>.
-4. Boldowanie: W pierwszym akapicie <p> pogrub tagiem <b>: tytuł produktu, autora/markę oraz 2-3 kluczowe frazy. W całym tekście użyj max 8-10 pogrubień.
+3. Formatowanie (HTML): Używaj WYŁĄCZNIE tagów <p>, <h2>, <h3>, <b>, <a>. ABSOLUTNY ZAKAZ używania składni Markdown (np. NIGDY nie używaj ** do pogrubień).
+4. Boldowanie: W pierwszym akapicie <p> pogrub tagiem <b>: tytuł produktu, autora/markę oraz 2-3 kluczowe frazy. W całym tekście użyj max 8-10 pogrubień tagiem <b>.
 5. Interpunkcja: Używaj wyłącznie dywizu (półpauzy) "-" jako myślnika.{link_instruction}
 
 STRUKTURA OPISU (Elastyczna: 2 lub 3 sekcje główne):
