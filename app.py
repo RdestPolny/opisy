@@ -306,7 +306,7 @@ def akeneo_update_description(sku: str, html_description: str, channel: str, loc
 # GENEROWANIE OPISÓW - TYLKO GEMINI
 # ═══════════════════════════════════════════════════════════════════
 
-def generate_description(product_data: Dict, model: str = "gemini-3-flash-preview") -> str:
+def generate_description(product_data: Dict, model: str = "gemini-3-flash-preview", internal_link: Optional[Dict] = None) -> str:
     """
     Generuje opis produktu korzystając WYŁĄCZNIE z Google Gemini.
     """
@@ -315,32 +315,42 @@ def generate_description(product_data: Dict, model: str = "gemini-3-flash-previe
         if "GOOGLE_API_KEY" not in st.secrets:
             return "BŁĄD: Brak klucza GOOGLE_API_KEY w secrets.toml"
 
-        # 2. Nowy, uproszczony prompt
-        system_prompt = """Jesteś ekspertem copywritingu e-commerce. Tworzysz angażujące, sprzedażowe opisy produktów w języku polskim, zoptymalizowane pod SEO i konwersję. Twoim celem jest przekonanie klienta do zakupu poprzez język korzyści.
+        # 2. Promt z opcjonalnym linkowaniem
+        link_instruction = ""
+        if internal_link and internal_link.get('url') and internal_link.get('category'):
+            link_instruction = f"""
+6. Linkowanie wewnętrzne (Kluczowe): Musisz wpleść w tekst naturalnie brzmiący link do kategorii: {internal_link['category']}.
+   - URL linku: {internal_link['url']}
+   - Zadanie: Jako ekspert SEO i Semantic SEO, dobierz naturalny kontekst i anchor. Anchor nie musi być identyczny z nazwą kategorii (może być odmianą, frazą powiązaną).
+   - Umiejscowienie: Wpleć link tam, gdzie pasuje najlepiej (najlepiej w 2. lub 3. akapicie).
+   - Format: <a href="{internal_link['url']}">naturalny anchor</a>.
+"""
+
+        system_prompt = f"""Jesteś wybitnym ekspertem SEO, specjalistą od Semantic SEO i doświadczonym copywriterem e-commerce. Tworzysz angażujące, sprzedażowe opisy produktów, które nie tylko konwertują, ale budują silną strukturę semantyczną sklepu.
 
 WYTYCZNE DOTYCZĄCE TREŚCI I STYLU:
 1. Unikalność: Każde zdanie musi wnosić nową wartość. Unikaj powtórzeń (duplicate content) i "lania wody".
-2. Dane techniczne: NIGDY nie twórz listy danych technicznych. Wpleć je naturalnie w treść akapitów (np. "Dzięki twardej oprawie książka jest trwała...").
-3. Formatowanie (HTML): Używaj wyłącznie tagów <p>, <h2>, <h3>, <b>.
+2. Dane techniczne: NIGDY nie twórz listy danych technicznych. Wpleć je naturalnie w treść akapitów.
+3. Formatowanie (HTML): Używaj wyłącznie tagów <p>, <h2>, <h3>, <b>, <a>.
 4. Boldowanie: W pierwszym akapicie <p> pogrub tagiem <b>: tytuł produktu, autora/markę oraz 2-3 kluczowe frazy. W całym tekście użyj max 8-10 pogrubień.
-5. Interpunkcja: Używaj wyłącznie dywizu (półpauzy) "-" jako myślnika.
+5. Interpunkcja: Używaj wyłącznie dywizu (półpauzy) "-" jako myślnika.{link_instruction}
 
-STRUKTURA OPISU (Elastyczna: 2 lub 3 sekcje główne w zależności od złożoności produktu):
+STRUKTURA OPISU (Elastyczna: 2 lub 3 sekcje główne):
 
 [SEKCJA 1]
 <p> Wstęp (4-6 zdań). Przedstaw produkt, zbolduj nazwę i autora. Zbuduj zainteresowanie. </p>
 
 [SEKCJA 2]
 <h2> Nagłówek mówiący o korzyści </h2>
-<p> Rozwinięcie (5-8 zdań). Tutaj naturalnie wpleć specyfikację techniczną (wymiary, materiał, wydawnictwo itp.), łącząc cechy z korzyściami dla klienta. </p>
+<p> Rozwinięcie (5-8 zdań). Tutaj naturalnie wpleć specyfikację techniczną, łącząc cechy z korzyściami dla klienta. </p>
 
-[SEKCJA 3 - Opcjonalna dla prostszych produktów]
+[SEKCJA 3 - Opcjonalna]
 <h2> Drugi nagłówek z inną korzyścią </h2>
 <p> Dalszy opis (4-6 zdań). </p>
 
 [ZAKOŃCZENIE I CTA]
-W ostatnim akapicie <p> (niezależnie czy jest to sekcja 2 czy 3) ostatnie 1-2 zdania to Call To Action (np. "Zamów teraz...").
-<h3> Krótkie hasło podsumowujące (np. "Postaw na jakość") - to jest ostatni element tekstu. </h3>"""
+W ostatnim akapicie <p> (niezależnie czy jest to sekcja 2 czy 3) ostatnie 1-2 zdania to Call To Action.
+<h3> Krótkie hasło podsumowujące - to jest ostatni element tekstu. </h3>"""
 
         # 3. Przygotowanie danych wejściowych
         raw_data = f"""
@@ -348,14 +358,14 @@ TYTUŁ PRODUKTU: {product_data.get('title', '')}
 AUTOR/MARKA: {product_data.get('author', '')}
 DANE TECHNICZNE: {product_data.get('details', '')}
 ORYGINALNY OPIS: {product_data.get('description', '')}
-
-Zwróć TYLKO kod HTML.
 """
+        if internal_link:
+            raw_data += f"\nLINK DO WPLECENIA: {internal_link['url']} (Kategoria: {internal_link['category']})\n"
+
+        raw_data += "\nZwróć TYLKO kod HTML."
 
         # 4. Konfiguracja i wywołanie Gemini
         genai.configure(api_key=st.secrets["GOOGLE_API_KEY"])
-        
-        # WAŻNE: Wymuszenie modelu gemini-3-flash-preview zgodnie z żądaniem
         model_instance = genai.GenerativeModel(
             model_name="gemini-3-flash-preview",
             system_instruction=system_prompt
@@ -400,7 +410,14 @@ def process_product_from_akeneo(sku: str, token: str, channel: str, locale: str)
         }
         
         # Wywołanie generowania (bez wyboru modelu - zawsze Gemini)
-        description_html = generate_description(product_data)
+        internal_link = None
+        if st.session_state.get("link_url") and st.session_state.get("link_category"):
+            internal_link = {
+                "url": st.session_state.link_url,
+                "category": st.session_state.link_category
+            }
+        
+        description_html = generate_description(product_data, internal_link=internal_link)
         
         return {
             'sku': sku,
@@ -447,6 +464,11 @@ with st.sidebar:
     st.markdown("---")
     channel = st.selectbox("Kanał:", ["Bookland", "B2B"], index=0)
     locale = st.text_input("Locale:", value="pl_PL")
+    
+    st.markdown("---")
+    st.header("🔗 Linkowanie wewnętrzne")
+    st.session_state.link_url = st.text_input("URL linku:", placeholder="np. https://bookland.com.pl/beletrystyka")
+    st.session_state.link_category = st.text_input("Kategoria/Anchor hint:", placeholder="np. Beletrystyka")
     
     st.markdown("---")
     st.header("📊 Baza produktów")
