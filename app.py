@@ -319,11 +319,12 @@ def generate_description(product_data: Dict, model: str = "gemini-3-flash-previe
         link_instruction = ""
         if internal_link and internal_link.get('url') and internal_link.get('category'):
             link_instruction = f"""
-6. Linkowanie wewnętrzne (Kluczowe): Musisz wpleść w tekst naturalnie brzmiący link do kategorii: {internal_link['category']}.
+6. LINKOWANIE WEWNĘTRZNE (KRYTYCZNE): MÓJ SYSTEM SEO WYMAGA, abyś ABSOLUTNIE I BEZWYJĄTKOWO wplótł w tekst naturalnie brzmiący link do kategorii: {internal_link['category']}.
    - URL linku: {internal_link['url']}
-   - Zadanie: Jako ekspert SEO i Semantic SEO, dobierz naturalny kontekst i anchor. Anchor nie musi być identyczny z nazwą kategorii (może być odmianą, frazą powiązaną).
+   - Zadanie: Jako wybitny ekspert SEO i Semantic SEO, dobierz naturalny kontekst i anchor. Anchor nie musi być identyczny z nazwą kategorii (może być odmianą, frazą powiązaną), ale musi pasować do tematu.
    - Umiejscowienie: Wpleć link tam, gdzie pasuje najlepiej (najlepiej w 2. lub 3. akapicie).
-   - Format: <a href="{internal_link['url']}">naturalny anchor</a>.
+   - Format HTML: <a href="{internal_link['url']}">wybrany przez Ciebie naturalny anchor</a>.
+   - UWAGA: Brak linku w tekście zostanie uznany za błąd krytyczny.
 """
 
         system_prompt = f"""Jesteś wybitnym ekspertem SEO, specjalistą od Semantic SEO i doświadczonym copywriterem e-commerce. Tworzysz angażujące, sprzedażowe opisy produktów, które nie tylko konwertują, ale budują silną strukturę semantyczną sklepu.
@@ -411,7 +412,7 @@ def process_product_from_akeneo(sku: str, token: str, channel: str, locale: str)
         
         # Wywołanie generowania (bez wyboru modelu - zawsze Gemini)
         internal_link = None
-        if st.session_state.get("link_url") and st.session_state.get("link_category"):
+        if st.session_state.get("link_active") and st.session_state.get("link_url") and st.session_state.get("link_category"):
             internal_link = {
                 "url": st.session_state.link_url,
                 "category": st.session_state.link_category
@@ -467,8 +468,9 @@ with st.sidebar:
     
     st.markdown("---")
     st.header("🔗 Linkowanie wewnętrzne")
-    st.session_state.link_url = st.text_input("URL linku:", placeholder="np. https://bookland.com.pl/beletrystyka")
-    st.session_state.link_category = st.text_input("Kategoria/Anchor hint:", placeholder="np. Beletrystyka")
+    st.session_state.link_active = st.checkbox("Włącz linkowanie", value=st.session_state.get("link_active", False))
+    st.session_state.link_url = st.text_input("URL linku:", placeholder="np. https://bookland.com.pl/beletrystyka", value=st.session_state.get("link_url", ""))
+    st.session_state.link_category = st.text_input("Kategoria/Anchor hint:", placeholder="np. Beletrystyka", value=st.session_state.get("link_category", ""))
     
     st.markdown("---")
     st.header("📊 Baza produktów")
