@@ -383,7 +383,7 @@ ORYGINALNY OPIS: {product_data.get('description', '')}
     except Exception as e:
         return f"BŁĄD GEMINI: {str(e)}"
 
-def process_product_from_akeneo(sku: str, token: str, channel: str, locale: str) -> Dict:
+def process_product_from_akeneo(sku: str, token: str, channel: str, locale: str, internal_link: Optional[Dict] = None) -> Dict:
     try:
         product_details = akeneo_get_product_details(sku, token, channel, locale)
         
@@ -411,13 +411,6 @@ def process_product_from_akeneo(sku: str, token: str, channel: str, locale: str)
         }
         
         # Wywołanie generowania (bez wyboru modelu - zawsze Gemini)
-        internal_link = None
-        if st.session_state.get("link_active") and st.session_state.get("link_url") and st.session_state.get("link_category"):
-            internal_link = {
-                "url": st.session_state.link_url,
-                "category": st.session_state.link_category
-            }
-        
         description_html = generate_description(product_data, internal_link=internal_link)
         
         return {
@@ -555,8 +548,16 @@ if st.session_state.bulk_selected_products:
         skus = list(st.session_state.bulk_selected_products.keys())
         bar = st.progress(0, "Start...")
         
+        # Przygotowanie danych o linkowaniu w głównym wątku
+        internal_link = None
+        if st.session_state.get("link_active") and st.session_state.get("link_url") and st.session_state.get("link_category"):
+            internal_link = {
+                "url": st.session_state.link_url,
+                "category": st.session_state.link_category
+            }
+
         with ThreadPoolExecutor(max_workers=5) as ex:
-            futs = {ex.submit(process_product_from_akeneo, s, token, channel, locale): s for s in skus}
+            futs = {ex.submit(process_product_from_akeneo, s, token, channel, locale, internal_link): s for s in skus}
             for i, f in enumerate(as_completed(futs)):
                 res = f.result()
                 st.session_state.bulk_results.append(res)
@@ -635,7 +636,14 @@ if st.session_state.bulk_results:
                 # REGENERATE BUTTON
                 if st.button("♻️ Regeneruj", key=f"reg_{r['sku']}"):
                     token = akeneo_get_token()
-                    new_res = process_product_from_akeneo(r['sku'], token, channel, locale)
+                    # Przygotowanie danych o linkowaniu
+                    internal_link = None
+                    if st.session_state.get("link_active") and st.session_state.get("link_url") and st.session_state.get("link_category"):
+                        internal_link = {
+                            "url": st.session_state.link_url,
+                            "category": st.session_state.link_category
+                        }
+                    new_res = process_product_from_akeneo(r['sku'], token, channel, locale, internal_link)
                     # Update result in list
                     for i, existing in enumerate(st.session_state.bulk_results):
                         if existing['sku'] == r['sku']:
