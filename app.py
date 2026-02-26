@@ -158,6 +158,16 @@ def validate_description_quality(description) -> Tuple[str, str]:
 # AKENEO API
 # ═══════════════════════════════════════════════════════════════════
 
+DEFAULT_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+}
+
+def get_public_ip():
+    try:
+        return requests.get("https://api.ipify.org", timeout=5).text
+    except:
+        return "Nieznane"
+
 def _akeneo_root():
     url = st.secrets.get("AKENEO_BASE_URL", "").strip()
     if not url:
@@ -183,7 +193,7 @@ def akeneo_get_token() -> str:
             "username": username,
             "password": password,
         }
-        r = requests.post(token_url, auth=auth, data=data, timeout=30)
+        r = requests.post(token_url, auth=auth, data=data, headers=DEFAULT_HEADERS, timeout=30)
         if r.status_code != 200:
             st.error(f"❌ Błąd autoryzacji Akeneo (Kod: {r.status_code})")
             try:
@@ -199,18 +209,23 @@ def akeneo_get_token() -> str:
 
 def akeneo_get_attribute(code: str, token: str) -> Dict:
     url = _akeneo_root() + f"/api/rest/v1/attributes/{code}"
-    r = requests.get(url, headers={"Authorization": f"Bearer {token}"}, timeout=30)
+    headers = DEFAULT_HEADERS.copy()
+    headers["Authorization"] = f"Bearer {token}"
+    r = requests.get(url, headers=headers, timeout=30)
     r.raise_for_status()
     return r.json()
 
 def akeneo_product_exists(sku: str, token: str) -> bool:
     url = _akeneo_root() + f"/api/rest/v1/products/{sku}"
-    r = requests.get(url, headers={"Authorization": f"Bearer {token}"}, timeout=30)
+    headers = DEFAULT_HEADERS.copy()
+    headers["Authorization"] = f"Bearer {token}"
+    r = requests.get(url, headers=headers, timeout=30)
     return r.status_code == 200
 
 def akeneo_search_products(search_query: str, token: str, limit: int = 20, locale: str = "pl_PL") -> List[Dict]:
     url = _akeneo_root() + "/api/rest/v1/products"
-    headers = {"Authorization": f"Bearer {token}"}
+    headers = DEFAULT_HEADERS.copy()
+    headers["Authorization"] = f"Bearer {token}"
     products_dict = {}
     
     try:
@@ -250,7 +265,8 @@ def akeneo_search_products(search_query: str, token: str, limit: int = 20, local
 
 def akeneo_get_product_details(sku: str, token: str, channel: str = "Bookland", locale: str = "pl_PL") -> Optional[Dict]:
     url = _akeneo_root() + f"/api/rest/v1/products/{sku}"
-    headers = {"Authorization": f"Bearer {token}"}
+    headers = DEFAULT_HEADERS.copy()
+    headers["Authorization"] = f"Bearer {token}"
     try:
         r = requests.get(url, headers=headers, timeout=30)
         r.raise_for_status()
@@ -312,7 +328,8 @@ def akeneo_update_description(sku: str, html_description: str, channel: str, loc
         pass
 
     url = _akeneo_root() + f"/api/rest/v1/products/{sku}"
-    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+    headers = DEFAULT_HEADERS.copy()
+    headers.update({"Authorization": f"Bearer {token}", "Content-Type": "application/json"})
     r = requests.patch(url, headers=headers, data=json.dumps(payload), timeout=30)
     
     if r.status_code in (200, 204): return True
@@ -504,6 +521,12 @@ with st.sidebar:
     if st.button("🗑️ Wyczyść bazę", type="secondary"):
         save_optimized_products([])
         st.rerun()
+
+    st.markdown("---")
+    st.header("🌐 Diagnostyka")
+    app_ip = get_public_ip()
+    st.info(f"Twoje IP: **{app_ip}**")
+    st.caption("Jeśli błąd 403 nadal występuje, przekaż to IP administratorowi serwera.")
 
 # ═══════════════════════════════════════════════════════════════════
 # LOGIKA GŁÓWNA
