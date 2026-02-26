@@ -159,7 +159,11 @@ def validate_description_quality(description) -> Tuple[str, str]:
 # ═══════════════════════════════════════════════════════════════════
 
 def _akeneo_root():
-    base = st.secrets["AKENEO_BASE_URL"].rstrip("/")
+    url = st.secrets.get("AKENEO_BASE_URL", "").strip()
+    if not url:
+        st.error("❌ Brak AKENEO_BASE_URL w secrets!")
+        st.stop()
+    base = url.rstrip("/")
     if base.endswith("/api/rest/v1"):
         return base[:-len("/api/rest/v1")]
     return base
@@ -168,15 +172,25 @@ def _akeneo_root():
 def akeneo_get_token() -> str:
     try:
         token_url = _akeneo_root() + "/api/oauth/v1/token"
-        auth = (st.secrets["AKENEO_CLIENT_ID"], st.secrets["AKENEO_SECRET"])
+        client_id = st.secrets["AKENEO_CLIENT_ID"].strip()
+        client_secret = st.secrets["AKENEO_SECRET"].strip()
+        username = st.secrets["AKENEO_USERNAME"].strip()
+        password = st.secrets["AKENEO_PASSWORD"].strip()
+        
+        auth = (client_id, client_secret)
         data = {
             "grant_type": "password",
-            "username": st.secrets["AKENEO_USERNAME"],
-            "password": st.secrets["AKENEO_PASSWORD"],
+            "username": username,
+            "password": password,
         }
         r = requests.post(token_url, auth=auth, data=data, timeout=30)
         if r.status_code != 200:
             st.error(f"❌ Błąd autoryzacji Akeneo (Kod: {r.status_code})")
+            try:
+                err_detail = r.json()
+                st.write(f"Szczegóły błędu: {err_detail}")
+            except:
+                st.write(f"Odpowiedź serwera: {r.text[:500]}")
             st.stop()
         return r.json()["access_token"]
     except Exception as e:
@@ -314,7 +328,8 @@ def generate_description(product_data: Dict, model: str = "gemini-3-flash-previe
     """
     try:
         # 1. Sprawdzenie klucza API
-        if "GOOGLE_API_KEY" not in st.secrets:
+        google_key = st.secrets.get("GOOGLE_API_KEY", "").strip()
+        if not google_key:
             return "BŁĄD: Brak klucza GOOGLE_API_KEY w secrets.toml"
 
         # 2. Promt z opcjonalnym linkowaniem
@@ -381,7 +396,7 @@ ORYGINALNY OPIS: {product_data.get('description', '')}
         raw_data += "\nZwróć TYLKO kod HTML."
 
         # 4. Konfiguracja i wywołanie Gemini
-        genai.configure(api_key=st.secrets["GOOGLE_API_KEY"])
+        genai.configure(api_key=google_key)
         model_instance = genai.GenerativeModel(
             model_name="gemini-3-flash-preview",
             system_instruction=system_prompt
