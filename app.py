@@ -11,7 +11,8 @@ from datetime import datetime
 from pathlib import Path
 
 # Obsługa Google Gemini
-import google.generativeai as genai
+from google import genai
+from google.genai import types
 
 # ═══════════════════════════════════════════════════════════════════
 # KONFIGURACJA STRONY
@@ -158,29 +159,8 @@ def validate_description_quality(description) -> Tuple[str, str]:
 # AKENEO API
 # ═══════════════════════════════════════════════════════════════════
 
-DEFAULT_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
-}
-
-def get_proxies() -> Optional[Dict[str, str]]:
-    proxy_url = st.secrets.get("AKENEO_PROXY", "").strip()
-    if proxy_url:
-        # PIMBL Akeneo działa po HTTPS
-        return {"https": proxy_url, "http": proxy_url}
-    return None
-
-def get_public_ip():
-    try:
-        return requests.get("https://api.ipify.org", timeout=5).text
-    except:
-        return "Nieznane"
-
 def _akeneo_root():
-    url = st.secrets.get("AKENEO_BASE_URL", "").strip()
-    if not url:
-        st.error("❌ Brak AKENEO_BASE_URL w secrets!")
-        st.stop()
-    base = url.rstrip("/")
+    base = st.secrets["AKENEO_BASE_URL"].rstrip("/")
     if base.endswith("/api/rest/v1"):
         return base[:-len("/api/rest/v1")]
     return base
@@ -189,25 +169,15 @@ def _akeneo_root():
 def akeneo_get_token() -> str:
     try:
         token_url = _akeneo_root() + "/api/oauth/v1/token"
-        client_id = st.secrets["AKENEO_CLIENT_ID"].strip()
-        client_secret = st.secrets["AKENEO_SECRET"].strip()
-        username = st.secrets["AKENEO_USERNAME"].strip()
-        password = st.secrets["AKENEO_PASSWORD"].strip()
-        
-        auth = (client_id, client_secret)
+        auth = (st.secrets["AKENEO_CLIENT_ID"], st.secrets["AKENEO_SECRET"])
         data = {
             "grant_type": "password",
-            "username": username,
-            "password": password,
+            "username": st.secrets["AKENEO_USERNAME"],
+            "password": st.secrets["AKENEO_PASSWORD"],
         }
-        r = requests.post(token_url, auth=auth, data=data, headers=DEFAULT_HEADERS, proxies=get_proxies(), timeout=30)
+        r = requests.post(token_url, auth=auth, data=data, timeout=30)
         if r.status_code != 200:
             st.error(f"❌ Błąd autoryzacji Akeneo (Kod: {r.status_code})")
-            try:
-                err_detail = r.json()
-                st.write(f"Szczegóły błędu: {err_detail}")
-            except:
-                st.write(f"Odpowiedź serwera: {r.text[:500]}")
             st.stop()
         return r.json()["access_token"]
     except Exception as e:
@@ -216,29 +186,24 @@ def akeneo_get_token() -> str:
 
 def akeneo_get_attribute(code: str, token: str) -> Dict:
     url = _akeneo_root() + f"/api/rest/v1/attributes/{code}"
-    headers = DEFAULT_HEADERS.copy()
-    headers["Authorization"] = f"Bearer {token}"
-    r = requests.get(url, headers=headers, proxies=get_proxies(), timeout=30)
+    r = requests.get(url, headers={"Authorization": f"Bearer {token}"}, timeout=30)
     r.raise_for_status()
     return r.json()
 
 def akeneo_product_exists(sku: str, token: str) -> bool:
     url = _akeneo_root() + f"/api/rest/v1/products/{sku}"
-    headers = DEFAULT_HEADERS.copy()
-    headers["Authorization"] = f"Bearer {token}"
-    r = requests.get(url, headers=headers, proxies=get_proxies(), timeout=30)
+    r = requests.get(url, headers={"Authorization": f"Bearer {token}"}, timeout=30)
     return r.status_code == 200
 
 def akeneo_search_products(search_query: str, token: str, limit: int = 20, locale: str = "pl_PL") -> List[Dict]:
     url = _akeneo_root() + "/api/rest/v1/products"
-    headers = DEFAULT_HEADERS.copy()
-    headers["Authorization"] = f"Bearer {token}"
+    headers = {"Authorization": f"Bearer {token}"}
     products_dict = {}
     
     try:
         # Search by identifier
         params_id = {"limit": limit, "search": json.dumps({"identifier": [{"operator": "CONTAINS", "value": search_query}]})}
-        r1 = requests.get(url, headers=headers, params=params_id, proxies=get_proxies(), timeout=30)
+        r1 = requests.get(url, headers=headers, params=params_id, timeout=30)
         if r1.status_code == 200:
             for item in r1.json().get("_embedded", {}).get("items", []):
                 ident = item.get("identifier", "")
@@ -252,7 +217,7 @@ def akeneo_search_products(search_query: str, token: str, limit: int = 20, local
 
         # Search by name
         params_name = {"limit": limit, "search": json.dumps({"name": [{"operator": "CONTAINS", "value": search_query, "locale": locale}]})}
-        r2 = requests.get(url, headers=headers, params=params_name, proxies=get_proxies(), timeout=30)
+        r2 = requests.get(url, headers=headers, params=params_name, timeout=30)
         if r2.status_code == 200:
             for item in r2.json().get("_embedded", {}).get("items", []):
                 ident = item.get("identifier", "")
@@ -272,10 +237,9 @@ def akeneo_search_products(search_query: str, token: str, limit: int = 20, local
 
 def akeneo_get_product_details(sku: str, token: str, channel: str = "Bookland", locale: str = "pl_PL") -> Optional[Dict]:
     url = _akeneo_root() + f"/api/rest/v1/products/{sku}"
-    headers = DEFAULT_HEADERS.copy()
-    headers["Authorization"] = f"Bearer {token}"
+    headers = {"Authorization": f"Bearer {token}"}
     try:
-        r = requests.get(url, headers=headers, proxies=get_proxies(), timeout=30)
+        r = requests.get(url, headers=headers, timeout=30)
         r.raise_for_status()
         product = r.json()
         values = product.get("values", {})
@@ -335,9 +299,8 @@ def akeneo_update_description(sku: str, html_description: str, channel: str, loc
         pass
 
     url = _akeneo_root() + f"/api/rest/v1/products/{sku}"
-    headers = DEFAULT_HEADERS.copy()
-    headers.update({"Authorization": f"Bearer {token}", "Content-Type": "application/json"})
-    r = requests.patch(url, headers=headers, data=json.dumps(payload), proxies=get_proxies(), timeout=30)
+    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+    r = requests.patch(url, headers=headers, data=json.dumps(payload), timeout=30)
     
     if r.status_code in (200, 204): return True
     raise RuntimeError(f"Błąd Akeneo ({r.status_code})")
@@ -352,8 +315,7 @@ def generate_description(product_data: Dict, model: str = "gemini-3-flash-previe
     """
     try:
         # 1. Sprawdzenie klucza API
-        google_key = st.secrets.get("GOOGLE_API_KEY", "").strip()
-        if not google_key:
+        if "GOOGLE_API_KEY" not in st.secrets:
             return "BŁĄD: Brak klucza GOOGLE_API_KEY w secrets.toml"
 
         # 2. Promt z opcjonalnym linkowaniem
@@ -420,13 +382,14 @@ ORYGINALNY OPIS: {product_data.get('description', '')}
         raw_data += "\nZwróć TYLKO kod HTML."
 
         # 4. Konfiguracja i wywołanie Gemini
-        genai.configure(api_key=google_key)
-        model_instance = genai.GenerativeModel(
-            model_name="gemini-3-flash-preview",
-            system_instruction=system_prompt
+        client = genai.Client(api_key=st.secrets["GOOGLE_API_KEY"])
+        response = client.models.generate_content(
+            model="gemini-3-flash-preview",
+            contents=raw_data,
+            config=types.GenerateContentConfig(
+                system_instruction=system_prompt,
+            )
         )
-        
-        response = model_instance.generate_content(raw_data)
         
         # 5. Cleaning
         result = strip_code_fences(response.text)
@@ -528,18 +491,6 @@ with st.sidebar:
     if st.button("🗑️ Wyczyść bazę", type="secondary"):
         save_optimized_products([])
         st.rerun()
-
-    st.markdown("---")
-    st.header("🌐 Diagnostyka & Proxy")
-    app_ip = get_public_ip()
-    st.info(f"Twoje IP: **{app_ip}**")
-    
-    # Wyświetlanie statusu proxy
-    proxy_url = st.secrets.get("AKENEO_PROXY", "").strip()
-    if proxy_url:
-        st.success(f"Działa przez proxy: `{proxy_url}`")
-    else:
-        st.caption("Brak Proxy. Jeśli błąd 403 występuje, dodaj `AKENEO_PROXY` w konfiguracji (secrets).")
 
 # ═══════════════════════════════════════════════════════════════════
 # LOGIKA GŁÓWNA

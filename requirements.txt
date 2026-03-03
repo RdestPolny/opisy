@@ -1,10 +1,4 @@
 streamlit
-httpx
-beautifulsoup4
-lxml
 pandas
-openai>=1.0.0
-# opcjonalnie, żeby rzadziej wpadać w 403:
-curl-cffi[requests]
-cloudscraper
-google-generativeai
+requests
+google-genai
