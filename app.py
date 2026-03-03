@@ -19,7 +19,7 @@ from google.genai import types
 
 APP_VERSION = "3.3.0"
 APP_NAME = "Generator Opisów Produktów"
-GEMINI_MODEL = "gemini-3-flash-preview"
+GEMINI_MODEL = "gemini-3-flash"
 DEFAULT_CHANNEL = "Bookland"
 DEFAULT_LOCALE = "pl_PL"
 MAX_WORKERS = 5
