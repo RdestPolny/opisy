@@ -17,17 +17,21 @@ from google.genai import types
 # STAŁE I KONFIGURACJA
 # ═══════════════════════════════════════════════════════════════════
 
-APP_VERSION = "3.3.0"
+APP_VERSION = "3.4.0"
 APP_NAME = "Generator Opisów Produktów"
-GEMINI_MODEL = "gemini-2.5-flash"
+GEMINI_MODEL = "gemini-3.1-flash-lite-preview"
+PERPLEXITY_MODEL = "sonar"
+PERPLEXITY_API_URL = "https://api.perplexity.ai/chat/completions"
 DEFAULT_CHANNEL = "Bookland"
 DEFAULT_LOCALE = "pl_PL"
 MAX_WORKERS = 5
 AKENEO_TIMEOUT = 30
+PERPLEXITY_TIMEOUT = 30
 
 REQUIRED_SECRETS = [
     "AKENEO_BASE_URL", "AKENEO_CLIENT_ID", "AKENEO_SECRET",
-    "AKENEO_USERNAME", "AKENEO_PASSWORD", "GOOGLE_API_KEY"
+    "AKENEO_USERNAME", "AKENEO_PASSWORD", "GOOGLE_API_KEY",
+    "PERPLEXITY_API_KEY",
 ]
 
 DB_PATH = Path(".streamlit/optimized_products.json")
@@ -232,18 +236,79 @@ def build_system_prompt_link_only(internal_link: Dict) -> str:
 Zwróć kompletny, gotowy kod HTML opisu z wplecionym linkiem — bez dodatkowych komentarzy."""
 
 
-def build_user_message(product_data: Dict, internal_link: Optional[Dict] = None) -> str:
-    """Buduje wiadomość użytkownika (dane produktu) dla modelu."""
+def build_user_message(
+    product_data: Dict,
+    internal_link: Optional[Dict] = None,
+    research: Optional[str] = None,
+) -> str:
+    """Buduje wiadomość użytkownika (dane produktu + opcjonalny research) dla modelu."""
     parts = [
         f"TYTUŁ PRODUKTU: {product_data.get('title', '')}",
         f"AUTOR/MARKA: {product_data.get('author', '')}",
         f"DANE TECHNICZNE: {product_data.get('details', '')}",
         f"ORYGINALNY OPIS: {product_data.get('description', '')}",
     ]
+    if research:
+        parts.append(
+            f"\nRESEARCH (zweryfikowane informacje o książce - wykorzystaj je w opisie):\n{research}"
+        )
     if internal_link:
         parts.append(f"LINK DO WPLECENIA: {internal_link['url']} (Kategoria: {internal_link['category']})")
     parts.append("\nZwróć TYLKO kod HTML opisu.")
     return "\n".join(parts)
+
+# ═══════════════════════════════════════════════════════════════════
+# RESEARCH - PERPLEXITY SONAR
+# ═══════════════════════════════════════════════════════════════════
+
+PERPLEXITY_SYSTEM_PROMPT = """Jesteś asystentem badającym książki i autorów. Odpowiadaj wyłącznie po polsku.
+Podaj TYLKO zweryfikowane, konkretne fakty. Nie generalizuj. Bądź zwięzły."""
+
+def research_book_with_perplexity(title: str, author: str) -> Optional[str]:
+    """
+    Wywołuje Perplexity Sonar, by zebrać informacje o książce przed generowaniem opisu.
+    Zwraca string z wynikami lub None w przypadku błędu.
+    """
+    api_key = st.secrets.get("PERPLEXITY_API_KEY", "")
+    if not api_key:
+        return None
+
+    query = (
+        f"Podaj kluczowe informacje o książce '{title}'"
+        + (f" autorstwa {author}" if author else "")
+        + ". Uwzględnij: główne tematy i przesłanie, gatunek literacki, odbiór przez krytyków i czytelników,"
+        " najważniejsze cechy wyróżniające tę pozycję, dla kogo jest przeznaczona."
+        " Odpowiedz konkretnie i zwięźle, max 300 słów."
+    )
+
+    payload = {
+        "model": PERPLEXITY_MODEL,
+        "messages": [
+            {"role": "system", "content": PERPLEXITY_SYSTEM_PROMPT},
+            {"role": "user", "content": query},
+        ],
+        "max_tokens": 600,
+        "return_citations": False,
+        "return_images": False,
+    }
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+
+    try:
+        r = requests.post(
+            PERPLEXITY_API_URL,
+            headers=headers,
+            json=payload,
+            timeout=PERPLEXITY_TIMEOUT,
+        )
+        r.raise_for_status()
+        data = r.json()
+        return data["choices"][0]["message"]["content"].strip()
+    except Exception as e:
+        return None  # Research nieobowiązkowy - nie blokuje generowania
+
 
 # ═══════════════════════════════════════════════════════════════════
 # GENEROWANIE OPISÓW - GEMINI
@@ -252,7 +317,8 @@ def build_user_message(product_data: Dict, internal_link: Optional[Dict] = None)
 def generate_description(
     product_data: Dict,
     internal_link: Optional[Dict] = None,
-    link_only: bool = False
+    link_only: bool = False,
+    research: Optional[str] = None,
 ) -> str:
     """Generuje opis produktu przy użyciu Google Gemini."""
     if "GOOGLE_API_KEY" not in st.secrets:
@@ -264,7 +330,7 @@ def generate_description(
         else:
             system_prompt = build_system_prompt_full(internal_link)
 
-        user_message = build_user_message(product_data, internal_link)
+        user_message = build_user_message(product_data, internal_link, research)
 
         client = genai.Client(api_key=st.secrets["GOOGLE_API_KEY"])
         response = client.models.generate_content(
@@ -310,9 +376,10 @@ def process_product_from_akeneo(
     channel: str,
     locale: str,
     internal_link: Optional[Dict] = None,
-    link_only: bool = False
+    link_only: bool = False,
+    use_research: bool = True,
 ) -> Dict:
-    """Pobiera dane produktu z Akeneo i generuje dla niego opis."""
+    """Pobiera dane produktu z Akeneo, opcjonalnie bada go przez Perplexity i generuje opis."""
     try:
         product_details = akeneo_get_product_details(sku, token, channel, locale)
 
@@ -327,7 +394,20 @@ def process_product_from_akeneo(
         quality_status, quality_msg = validate_description_quality(original_desc)
         product_data = _prepare_product_data(product_details)
 
-        description_html = generate_description(product_data, internal_link=internal_link, link_only=link_only)
+        # Research przez Perplexity Sonar (jeśli włączony)
+        research = None
+        if use_research and not link_only:
+            research = research_book_with_perplexity(
+                product_data['title'],
+                product_data['author'],
+            )
+
+        description_html = generate_description(
+            product_data,
+            internal_link=internal_link,
+            link_only=link_only,
+            research=research,
+        )
 
         return {
             'sku': sku,
@@ -335,6 +415,7 @@ def process_product_from_akeneo(
             'description_html': description_html,
             'url': generate_product_url(product_data['title']),
             'old_description': original_desc,
+            'research': research,
             'error': description_html if "BŁĄD" in description_html else None,
             'description_quality': (quality_status, quality_msg),
         }
@@ -504,6 +585,7 @@ def _init_session_state():
         'link_url': '',
         'link_category': '',
         'search_res': [],
+        'use_research': True,
     }
     for key, default in defaults.items():
         if key not in st.session_state:
@@ -534,17 +616,29 @@ def _get_internal_link() -> Optional[Dict]:
     return None
 
 def _render_result_preview(r: Dict, token: str, channel: str, locale: str):
-    """Renderuje podgląd jednego wyniku (HTML + preview + przycisk regeneracji)."""
-    c_html, c_preview = st.tabs(["HTML", "Podgląd"])
-    with c_html:
+    """Renderuje podgląd jednego wyniku (HTML + preview + research + przycisk regeneracji)."""
+    research = r.get('research')
+    tab_labels = ["HTML", "Podgląd"]
+    if research:
+        tab_labels.append("🔎 Research")
+
+    tabs = st.tabs(tab_labels)
+    with tabs[0]:
         st.code(r['description_html'], language='html')
-    with c_preview:
+    with tabs[1]:
         st.markdown(r['description_html'], unsafe_allow_html=True)
+    if research and len(tabs) > 2:
+        with tabs[2]:
+            st.caption(f"Perplexity `{PERPLEXITY_MODEL}` - dane użyte do wygenerowania opisu:")
+            st.markdown(research)
 
     if st.button("♻️ Regeneruj", key=f"reg_{r['sku']}"):
         internal_link = _get_internal_link()
         link_only = st.session_state.get("link_only", False)
-        new_res = process_product_from_akeneo(r['sku'], token, channel, locale, internal_link, link_only)
+        use_research = st.session_state.get("use_research", True)
+        new_res = process_product_from_akeneo(
+            r['sku'], token, channel, locale, internal_link, link_only, use_research
+        )
         for i, existing in enumerate(st.session_state.bulk_results):
             if existing['sku'] == r['sku']:
                 st.session_state.bulk_results[i] = new_res
@@ -589,7 +683,17 @@ with st.sidebar:
     )
 
     st.markdown("---")
-    st.header("📊 Baza produktów")
+    st.header("� Perplexity Research")
+    st.session_state.use_research = st.checkbox(
+        "Wzbogacaj opis researche (Sonar)",
+        value=st.session_state["use_research"],
+        help="Przed wygenerowaniem opisu Gemini pobierze zweryfikowane informacje o książce z Perplexity Sonar.",
+    )
+    if st.session_state.use_research:
+        st.caption(f"📚 Model: `{PERPLEXITY_MODEL}` | Research nie blokuje generowania w razie błędu.")
+
+    st.markdown("---")
+    st.header("�📊 Baza produktów")
     optimized = load_optimized_products()
     st.metric("Zoptymalizowane", len(optimized))
     if st.button("🗑️ Wyczyść bazę", type="secondary"):
@@ -670,12 +774,14 @@ if st.session_state.bulk_selected_products:
         skus = list(st.session_state.bulk_selected_products.keys())
         internal_link = _get_internal_link()
         link_only = st.session_state.get("link_only", False)
+        use_research = st.session_state.get("use_research", True)
 
         bar = st.progress(0, "Start...")
         with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
             futures = {
                 executor.submit(
-                    process_product_from_akeneo, s, token, channel, locale, internal_link, link_only
+                    process_product_from_akeneo,
+                    s, token, channel, locale, internal_link, link_only, use_research
                 ): s
                 for s in skus
             }
