@@ -162,6 +162,13 @@ DEFAULT_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
 }
 
+def get_proxies() -> Optional[Dict[str, str]]:
+    proxy_url = st.secrets.get("AKENEO_PROXY", "").strip()
+    if proxy_url:
+        # PIMBL Akeneo działa po HTTPS
+        return {"https": proxy_url, "http": proxy_url}
+    return None
+
 def get_public_ip():
     try:
         return requests.get("https://api.ipify.org", timeout=5).text
@@ -193,7 +200,7 @@ def akeneo_get_token() -> str:
             "username": username,
             "password": password,
         }
-        r = requests.post(token_url, auth=auth, data=data, headers=DEFAULT_HEADERS, timeout=30)
+        r = requests.post(token_url, auth=auth, data=data, headers=DEFAULT_HEADERS, proxies=get_proxies(), timeout=30)
         if r.status_code != 200:
             st.error(f"❌ Błąd autoryzacji Akeneo (Kod: {r.status_code})")
             try:
@@ -211,7 +218,7 @@ def akeneo_get_attribute(code: str, token: str) -> Dict:
     url = _akeneo_root() + f"/api/rest/v1/attributes/{code}"
     headers = DEFAULT_HEADERS.copy()
     headers["Authorization"] = f"Bearer {token}"
-    r = requests.get(url, headers=headers, timeout=30)
+    r = requests.get(url, headers=headers, proxies=get_proxies(), timeout=30)
     r.raise_for_status()
     return r.json()
 
@@ -219,7 +226,7 @@ def akeneo_product_exists(sku: str, token: str) -> bool:
     url = _akeneo_root() + f"/api/rest/v1/products/{sku}"
     headers = DEFAULT_HEADERS.copy()
     headers["Authorization"] = f"Bearer {token}"
-    r = requests.get(url, headers=headers, timeout=30)
+    r = requests.get(url, headers=headers, proxies=get_proxies(), timeout=30)
     return r.status_code == 200
 
 def akeneo_search_products(search_query: str, token: str, limit: int = 20, locale: str = "pl_PL") -> List[Dict]:
@@ -231,7 +238,7 @@ def akeneo_search_products(search_query: str, token: str, limit: int = 20, local
     try:
         # Search by identifier
         params_id = {"limit": limit, "search": json.dumps({"identifier": [{"operator": "CONTAINS", "value": search_query}]})}
-        r1 = requests.get(url, headers=headers, params=params_id, timeout=30)
+        r1 = requests.get(url, headers=headers, params=params_id, proxies=get_proxies(), timeout=30)
         if r1.status_code == 200:
             for item in r1.json().get("_embedded", {}).get("items", []):
                 ident = item.get("identifier", "")
@@ -245,7 +252,7 @@ def akeneo_search_products(search_query: str, token: str, limit: int = 20, local
 
         # Search by name
         params_name = {"limit": limit, "search": json.dumps({"name": [{"operator": "CONTAINS", "value": search_query, "locale": locale}]})}
-        r2 = requests.get(url, headers=headers, params=params_name, timeout=30)
+        r2 = requests.get(url, headers=headers, params=params_name, proxies=get_proxies(), timeout=30)
         if r2.status_code == 200:
             for item in r2.json().get("_embedded", {}).get("items", []):
                 ident = item.get("identifier", "")
@@ -268,7 +275,7 @@ def akeneo_get_product_details(sku: str, token: str, channel: str = "Bookland", 
     headers = DEFAULT_HEADERS.copy()
     headers["Authorization"] = f"Bearer {token}"
     try:
-        r = requests.get(url, headers=headers, timeout=30)
+        r = requests.get(url, headers=headers, proxies=get_proxies(), timeout=30)
         r.raise_for_status()
         product = r.json()
         values = product.get("values", {})
@@ -330,7 +337,7 @@ def akeneo_update_description(sku: str, html_description: str, channel: str, loc
     url = _akeneo_root() + f"/api/rest/v1/products/{sku}"
     headers = DEFAULT_HEADERS.copy()
     headers.update({"Authorization": f"Bearer {token}", "Content-Type": "application/json"})
-    r = requests.patch(url, headers=headers, data=json.dumps(payload), timeout=30)
+    r = requests.patch(url, headers=headers, data=json.dumps(payload), proxies=get_proxies(), timeout=30)
     
     if r.status_code in (200, 204): return True
     raise RuntimeError(f"Błąd Akeneo ({r.status_code})")
@@ -523,10 +530,16 @@ with st.sidebar:
         st.rerun()
 
     st.markdown("---")
-    st.header("🌐 Diagnostyka")
+    st.header("🌐 Diagnostyka & Proxy")
     app_ip = get_public_ip()
     st.info(f"Twoje IP: **{app_ip}**")
-    st.caption("Jeśli błąd 403 nadal występuje, przekaż to IP administratorowi serwera.")
+    
+    # Wyświetlanie statusu proxy
+    proxy_url = st.secrets.get("AKENEO_PROXY", "").strip()
+    if proxy_url:
+        st.success(f"Działa przez proxy: `{proxy_url}`")
+    else:
+        st.caption("Brak Proxy. Jeśli błąd 403 występuje, dodaj `AKENEO_PROXY` w konfiguracji (secrets).")
 
 # ═══════════════════════════════════════════════════════════════════
 # LOGIKA GŁÓWNA
