@@ -17,7 +17,7 @@ from google.genai import types
 # STAŁE I KONFIGURACJA
 # ═══════════════════════════════════════════════════════════════════
 
-APP_VERSION = "3.5.0"
+APP_VERSION = "3.6.0"
 APP_NAME = "Generator Opisów Produktów"
 GEMINI_MODEL = "gemini-3.1-flash-lite-preview"
 PERPLEXITY_MODEL = "sonar"
@@ -349,6 +349,35 @@ def generate_description(
         return f"BŁĄD GEMINI: {str(e)}"
 
 
+def generate_meta_fields(product_data: Dict, description_html: str) -> Dict:
+    """Generuje meta_title i meta_description dla importu do Magento."""
+    if "GOOGLE_API_KEY" not in st.secrets:
+        return {'meta_title': '', 'meta_description': ''}
+
+    prompt = (
+        f"Na podstawie danych książki wygeneruj meta_title i meta_description dla sklepu e-commerce Bookland.\n\n"
+        f"TYTUŁ: {product_data.get('title', '')}\n"
+        f"AUTOR: {product_data.get('author', '')}\n"
+        f"OPIS (fragment): {description_html[:400]}\n\n"
+        f"ZASADY:\n"
+        f"- meta_title: max 60 znaków, zawiera tytuł i autora, nie dodawaj nazwy sklepu\n"
+        f"- meta_description: 140-160 znaków, zachęcający tekst po polsku, bez cudzysłowów\n\n"
+        f'Odpowiedz TYLKO w formacie JSON: {{"meta_title": "...", "meta_description": "..."}}'
+    )
+
+    try:
+        client = genai.Client(api_key=st.secrets["GOOGLE_API_KEY"])
+        response = client.models.generate_content(model=GEMINI_MODEL, contents=prompt)
+        text = strip_code_fences(response.text)
+        data = json.loads(text)
+        return {
+            'meta_title': str(data.get('meta_title', ''))[:60],
+            'meta_description': str(data.get('meta_description', ''))[:160],
+        }
+    except Exception:
+        return {'meta_title': '', 'meta_description': ''}
+
+
 def _prepare_product_data(product_details: Dict) -> Dict:
     """Buduje słownik danych wejściowych do promptu na podstawie danych z Akeneo."""
     details_parts = []
@@ -409,6 +438,8 @@ def process_product_from_akeneo(
             research=research,
         )
 
+        meta = generate_meta_fields(product_data, description_html) if "BŁĄD" not in description_html else {}
+
         return {
             'sku': sku,
             'title': product_data['title'],
@@ -416,6 +447,8 @@ def process_product_from_akeneo(
             'url': generate_product_url(product_data['title']),
             'old_description': original_desc,
             'research': research,
+            'meta_title': meta.get('meta_title', ''),
+            'meta_description': meta.get('meta_description', ''),
             'error': description_html if "BŁĄD" in description_html else None,
             'description_quality': (quality_status, quality_msg),
         }
@@ -607,6 +640,7 @@ def _init_session_state():
         'link_category': '',
         'search_res': [],
         'use_research': True,
+        'magento_store_view': 'default',
     }
     for key, default in defaults.items():
         if key not in st.session_state:
@@ -671,6 +705,18 @@ def _render_result_preview(r: Dict, token: str, channel: str, locale: str):
             st.caption(f"Perplexity `{PERPLEXITY_MODEL}` - dane użyte do wygenerowania opisu:")
             st.markdown(research)
 
+    meta_title = r.get('meta_title', '')
+    meta_description = r.get('meta_description', '')
+    if meta_title or meta_description:
+        with st.expander("🔍 Metatagi Magento"):
+            st.text_input("meta_title", value=meta_title, disabled=True, key=f"mt_{sku}")
+            st.text_area("meta_description", value=meta_description, disabled=True, height=80, key=f"md_{sku}")
+            chars_mt = len(meta_title)
+            chars_md = len(meta_description)
+            col_mt, col_md = st.columns(2)
+            col_mt.caption(f"{'✅' if chars_mt <= 60 else '⚠️'} {chars_mt}/60 zn.")
+            col_md.caption(f"{'✅' if 140 <= chars_md <= 160 else '⚠️'} {chars_md}/160 zn.")
+
     if st.button("♻️ Regeneruj", key=f"reg_{sku}"):
         internal_link = _get_internal_link()
         link_only = st.session_state.get("link_only", False)
@@ -732,6 +778,14 @@ with st.sidebar:
     )
     if st.session_state.use_research:
         st.caption(f"📚 Model: `{PERPLEXITY_MODEL}` | Research nie blokuje generowania w razie błędu.")
+
+    st.markdown("---")
+    st.header("🛒 Magento")
+    st.session_state.magento_store_view = st.text_input(
+        "store_view_code:",
+        value=st.session_state["magento_store_view"],
+        help="Kod widoku sklepu w Magento (np. 'default', 'pl'). Używany w eksporcie CSV metatagów.",
+    )
 
     st.markdown("---")
     st.header("�📊 Baza produktów")
@@ -851,7 +905,29 @@ if st.session_state.bulk_results:
     c2.metric("❌ Błędy", len(err))
 
     df = pd.DataFrame(results)
-    st.download_button("⬇️ Pobierz CSV", df.to_csv(index=False).encode('utf-8'), 'wyniki.csv', 'text/csv')
+    col_csv1, col_csv2 = st.columns(2)
+    col_csv1.download_button("⬇️ Pobierz CSV (wyniki)", df.to_csv(index=False).encode('utf-8'), 'wyniki.csv', 'text/csv')
+
+    # CSV do importu metatagów w Magento
+    store_view = st.session_state.get("magento_store_view", "default")
+    meta_rows = [
+        {
+            'sku': r['sku'],
+            'store_view_code': store_view,
+            'meta_title': r.get('meta_title', ''),
+            'meta_description': r.get('meta_description', ''),
+        }
+        for r in ok
+        if r.get('meta_title') or r.get('meta_description')
+    ]
+    if meta_rows:
+        meta_df = pd.DataFrame(meta_rows, columns=['sku', 'store_view_code', 'meta_title', 'meta_description'])
+        col_csv2.download_button(
+            "⬇️ Pobierz CSV Magento (metatagi)",
+            meta_df.to_csv(index=False, sep='\t').encode('utf-8'),
+            'magento_metatagi.csv',
+            'text/csv',
+        )
 
     # Wysyłka do Akeneo
     if ok:
