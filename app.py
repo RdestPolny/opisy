@@ -17,7 +17,7 @@ from google.genai import types
 # STAŁE I KONFIGURACJA
 # ═══════════════════════════════════════════════════════════════════
 
-APP_VERSION = "3.7.0"
+APP_VERSION = "3.8.0"
 APP_NAME = "Generator Opisów Produktów"
 GEMINI_MODEL = "gemini-3.1-flash-lite-preview"
 PERPLEXITY_MODEL = "sonar"
@@ -536,13 +536,47 @@ def akeneo_search_products(search_query: str, token: str, limit: int = 20, local
         st.error(f"Błąd wyszukiwania: {e}")
         return []
 
+@st.cache_data(ttl=3600, show_spinner=False)
+def akeneo_fetch_categories(token: str, locale: str) -> List[Dict]:
+    """Pobiera wszystkie kategorie z Akeneo (z cache 1h). Zwraca [{code, label, parent}]."""
+    url = _akeneo_root() + "/api/rest/v1/categories"
+    headers = {"Authorization": f"Bearer {token}"}
+    categories = []
+    page = 1
+    while True:
+        try:
+            r = requests.get(url, headers=headers, params={"limit": 100, "page": page}, timeout=AKENEO_TIMEOUT)
+            if r.status_code != 200:
+                break
+            items = r.json().get("_embedded", {}).get("items", [])
+            if not items:
+                break
+            for item in items:
+                labels = item.get("labels", {})
+                label = labels.get(locale) or labels.get("pl_PL") or item.get("code", "")
+                categories.append({
+                    "code": item.get("code", ""),
+                    "label": label,
+                    "parent": item.get("parent"),
+                })
+            page += 1
+            if len(items) < 100:
+                break
+        except Exception:
+            break
+    return sorted(categories, key=lambda x: x["label"])
+
+
 def akeneo_fetch_backlog(
-    token: str, channel: str, locale: str, limit: int = 100
+    token: str, channel: str, locale: str, limit: int = 100,
+    category: Optional[str] = None,
 ) -> List[Dict]:
     """
-    Pobiera aktywne produkty bez zoptymalizowanego opisu.
+    Pobiera aktywne (enabled=true) produkty bez zoptymalizowanego opisu.
+    Opcjonalnie filtruje po kategorii Akeneo.
     Strategia: dwa zapytania (opisy_seo=false + description EMPTY), merge po SKU.
     Sortuje: brak opisu → krótki opis.
+    Uwaga: stan magazynowy trzyma Magento, nie Akeneo — enabled=true to max co można sprawdzić po stronie PIM.
     """
     url = _akeneo_root() + "/api/rest/v1/products"
     headers = {"Authorization": f"Bearer {token}"}
@@ -551,15 +585,13 @@ def akeneo_fetch_backlog(
     per_page = 100  # Akeneo max
     pages_needed = max(1, (limit + 99) // 100)
 
+    base: Dict = {"enabled": [{"operator": "=", "value": True}]}
+    if category:
+        base["categories"] = [{"operator": "IN", "value": [category]}]
+
     filter_sets = [
-        json.dumps({
-            "enabled": [{"operator": "=", "value": True}],
-            "opisy_seo": [{"operator": "=", "value": False, "scope": channel}],
-        }),
-        json.dumps({
-            "enabled": [{"operator": "=", "value": True}],
-            "description": [{"operator": "EMPTY", "scope": channel, "locale": locale}],
-        }),
+        json.dumps({**base, "opisy_seo": [{"operator": "=", "value": False, "scope": channel}]}),
+        json.dumps({**base, "description": [{"operator": "EMPTY", "scope": channel, "locale": locale}]}),
     ]
 
     for search_filter in filter_sets:
@@ -702,6 +734,7 @@ def _init_session_state():
         'use_research': True,
         'magento_store_view': 'store_view_bookland',
         'backlog_items': [],
+        'backlog_category': '',
     }
     for key, default in defaults.items():
         if key not in st.session_state:
@@ -916,15 +949,35 @@ elif method == "📋 Wklej listę SKU":
             st.rerun()
 
 else:  # 📦 Backlog
-    st.markdown("Produkty aktywne bez zoptymalizowanego opisu (`opisy_seo = false` lub brak opisu).")
+    st.markdown("Produkty **aktywne** (`enabled=true`) bez zoptymalizowanego opisu. Stany magazynowe w Magento — tu filtrujemy tylko po aktywności w Akeneo.")
+
+    # Kategorie
+    tok_bl = akeneo_get_token()
+    with st.spinner("Ładuję kategorie..."):
+        all_categories = akeneo_fetch_categories(tok_bl, locale)
+
+    cat_options = {"": "📂 Wszystkie kategorie"}
+    for c in all_categories:
+        cat_options[c["code"]] = f"{c['label']} ({c['code']})"
+
+    selected_cat_code = st.selectbox(
+        "Filtruj po kategorii:",
+        options=list(cat_options.keys()),
+        format_func=lambda x: cat_options[x],
+        index=0,
+        key="backlog_category_select",
+    )
+    st.session_state.backlog_category = selected_cat_code
 
     col_bl, col_lim = st.columns([3, 1])
     backlog_limit = col_lim.number_input("Ile załadować:", min_value=10, max_value=500, value=100, step=10)
 
     if col_bl.button("🔄 Załaduj backlog", type="primary"):
         with st.spinner("Pobieram backlog z Akeneo..."):
-            tok = akeneo_get_token()
-            st.session_state.backlog_items = akeneo_fetch_backlog(tok, channel, locale, backlog_limit)
+            st.session_state.backlog_items = akeneo_fetch_backlog(
+                tok_bl, channel, locale, backlog_limit,
+                category=selected_cat_code or None,
+            )
         st.rerun()
 
     backlog = st.session_state.backlog_items
