@@ -640,7 +640,7 @@ def _init_session_state():
         'link_category': '',
         'search_res': [],
         'use_research': True,
-        'magento_store_view': 'default',
+        'magento_store_view': 'store_view_bookland',
     }
     for key, default in defaults.items():
         if key not in st.session_state:
