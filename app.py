@@ -17,7 +17,7 @@ from google.genai import types
 # STAŁE I KONFIGURACJA
 # ═══════════════════════════════════════════════════════════════════
 
-APP_VERSION = "3.6.0"
+APP_VERSION = "3.7.0"
 APP_NAME = "Generator Opisów Produktów"
 GEMINI_MODEL = "gemini-3.1-flash-lite-preview"
 PERPLEXITY_MODEL = "sonar"
@@ -536,6 +536,66 @@ def akeneo_search_products(search_query: str, token: str, limit: int = 20, local
         st.error(f"Błąd wyszukiwania: {e}")
         return []
 
+def akeneo_fetch_backlog(
+    token: str, channel: str, locale: str, limit: int = 100
+) -> List[Dict]:
+    """
+    Pobiera aktywne produkty bez zoptymalizowanego opisu.
+    Strategia: dwa zapytania (opisy_seo=false + description EMPTY), merge po SKU.
+    Sortuje: brak opisu → krótki opis.
+    """
+    url = _akeneo_root() + "/api/rest/v1/products"
+    headers = {"Authorization": f"Bearer {token}"}
+    products_dict: Dict[str, Dict] = {}
+
+    per_page = 100  # Akeneo max
+    pages_needed = max(1, (limit + 99) // 100)
+
+    filter_sets = [
+        json.dumps({
+            "enabled": [{"operator": "=", "value": True}],
+            "opisy_seo": [{"operator": "=", "value": False, "scope": channel}],
+        }),
+        json.dumps({
+            "enabled": [{"operator": "=", "value": True}],
+            "description": [{"operator": "EMPTY", "scope": channel, "locale": locale}],
+        }),
+    ]
+
+    for search_filter in filter_sets:
+        for page in range(1, pages_needed + 1):
+            if len(products_dict) >= limit * 2:  # pobierz 2x, przytnij po merge
+                break
+            params = {"limit": per_page, "page": page, "search": search_filter}
+            try:
+                r = requests.get(url, headers=headers, params=params, timeout=AKENEO_TIMEOUT)
+                if r.status_code != 200:
+                    break
+                items = r.json().get("_embedded", {}).get("items", [])
+                if not items:
+                    break
+                for item in items:
+                    ident = item.get("identifier", "")
+                    if not ident or ident in products_dict:
+                        continue
+                    desc_len = 0
+                    for val in item.get("values", {}).get("description", []):
+                        if val.get("scope") in (None, channel) and val.get("locale") in (None, locale):
+                            desc_len = len(str(val.get("data", "") or ""))
+                            break
+                    products_dict[ident] = {
+                        "identifier": ident,
+                        "title": _extract_product_title(item, locale),
+                        "desc_len": desc_len,
+                    }
+            except Exception:
+                break
+
+    results = list(products_dict.values())
+    results.sort(key=lambda x: x["desc_len"])
+    return results[:limit]
+
+
 def akeneo_get_product_details(sku: str, token: str, channel: str = DEFAULT_CHANNEL, locale: str = DEFAULT_LOCALE) -> Optional[Dict]:
     url = _akeneo_root() + f"/api/rest/v1/products/{sku}"
     try:
@@ -641,6 +701,7 @@ def _init_session_state():
         'search_res': [],
         'use_research': True,
         'magento_store_view': 'store_view_bookland',
+        'backlog_items': [],
     }
     for key, default in defaults.items():
         if key not in st.session_state:
@@ -800,7 +861,7 @@ with st.sidebar:
 # ═══════════════════════════════════════════════════════════════════
 
 st.subheader("📦 Przetwarzanie produktów")
-method = st.radio("Metoda:", ["🔍 Wyszukaj i zaznacz", "📋 Wklej listę SKU"], horizontal=True)
+method = st.radio("Metoda:", ["🔍 Wyszukaj i zaznacz", "📋 Wklej listę SKU", "📦 Backlog"], horizontal=True)
 
 if method == "🔍 Wyszukaj i zaznacz":
     # Koszyk
@@ -839,7 +900,7 @@ if method == "🔍 Wyszukaj i zaznacz":
                 del st.session_state.bulk_selected_products[sku]
         st.markdown('</div>', unsafe_allow_html=True)
 
-else:
+elif method == "📋 Wklej listę SKU":
     txt = st.text_area("SKU (jeden na linię):", height=150)
     if st.button("Załaduj SKU", type="primary"):
         skus = [s.strip() for s in txt.splitlines() if s.strip()]
@@ -853,6 +914,48 @@ else:
         if st.button("Wyczyść"):
             st.session_state.bulk_selected_products = {}
             st.rerun()
+
+else:  # 📦 Backlog
+    st.markdown("Produkty aktywne bez zoptymalizowanego opisu (`opisy_seo = false` lub brak opisu).")
+
+    col_bl, col_lim = st.columns([3, 1])
+    backlog_limit = col_lim.number_input("Ile załadować:", min_value=10, max_value=500, value=100, step=10)
+
+    if col_bl.button("🔄 Załaduj backlog", type="primary"):
+        with st.spinner("Pobieram backlog z Akeneo..."):
+            tok = akeneo_get_token()
+            st.session_state.backlog_items = akeneo_fetch_backlog(tok, channel, locale, backlog_limit)
+        st.rerun()
+
+    backlog = st.session_state.backlog_items
+    if backlog:
+        st.caption(f"Znaleziono **{len(backlog)}** produktów w backlogu. Sortowanie: brak opisu → krótki opis.")
+
+        col_n, col_sel_btn, col_clr = st.columns([2, 2, 2])
+        n_select = col_n.number_input("Zaznacz pierwszych N:", min_value=1, max_value=len(backlog), value=min(10, len(backlog)), step=1)
+        if col_sel_btn.button(f"✅ Zaznacz pierwsze {n_select}"):
+            for p in backlog[:n_select]:
+                st.session_state.bulk_selected_products[p['identifier']] = {'title': p['title']}
+            st.rerun()
+        if col_clr.button("🗑️ Wyczyść zaznaczenie"):
+            for p in backlog:
+                st.session_state.bulk_selected_products.pop(p['identifier'], None)
+            st.rerun()
+
+        st.markdown('<div class="scrollable-results">', unsafe_allow_html=True)
+        for p in backlog:
+            sku_bl = p['identifier']
+            is_sel = sku_bl in st.session_state.bulk_selected_products
+            desc_info = f"({p['desc_len']} zn.)" if p['desc_len'] > 0 else "(brak opisu)"
+            label = f"{sku_bl} — {p['title']} {desc_info}"
+            if st.checkbox(label, value=is_sel, key=f"bl_{sku_bl}"):
+                st.session_state.bulk_selected_products[sku_bl] = {'title': p['title']}
+            elif is_sel:
+                del st.session_state.bulk_selected_products[sku_bl]
+        st.markdown('</div>', unsafe_allow_html=True)
+
+        if st.session_state.bulk_selected_products:
+            st.success(f"🛒 W kolejce: **{len(st.session_state.bulk_selected_products)}** produktów — przejdź niżej do sekcji Generowanie.")
 
 # ═══════════════════════════════════════════════════════════════════
 # UI – GENEROWANIE
