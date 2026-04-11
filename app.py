@@ -17,7 +17,7 @@ from google.genai import types
 # STAŁE I KONFIGURACJA
 # ═══════════════════════════════════════════════════════════════════
 
-APP_VERSION = "3.9.0"
+APP_VERSION = "3.9.1"
 APP_NAME = "Generator Opisów Produktów"
 GEMINI_MODEL = "gemini-3.1-flash-lite-preview"
 PERPLEXITY_MODEL = "sonar"
@@ -591,7 +591,7 @@ def akeneo_fetch_backlog(
     if category:
         base["categories"] = [{"operator": "IN", "value": [category]}]
     if exclude_updated_days:
-        cutoff = (datetime.now() - timedelta(days=exclude_updated_days)).strftime("%Y-%m-%dT%H:%M:%S")
+        cutoff = (datetime.now() - timedelta(days=exclude_updated_days)).strftime("%Y-%m-%d %H:%M:%S")
         base["updated"] = [{"operator": "<", "value": cutoff}]
 
     filter_sets = [
@@ -607,6 +607,7 @@ def akeneo_fetch_backlog(
             try:
                 r = requests.get(url, headers=headers, params=params, timeout=AKENEO_TIMEOUT)
                 if r.status_code != 200:
+                    st.warning(f"⚠️ Backlog: Akeneo zwrócił {r.status_code} — {r.text[:200]}")
                     break
                 items = r.json().get("_embedded", {}).get("items", [])
                 if not items:
