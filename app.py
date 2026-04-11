@@ -17,7 +17,7 @@ from google.genai import types
 # STAŁE I KONFIGURACJA
 # ═══════════════════════════════════════════════════════════════════
 
-APP_VERSION = "3.8.0"
+APP_VERSION = "3.9.0"
 APP_NAME = "Generator Opisów Produktów"
 GEMINI_MODEL = "gemini-3.1-flash-lite-preview"
 PERPLEXITY_MODEL = "sonar"
@@ -244,7 +244,7 @@ def build_user_message(
     """Buduje wiadomość użytkownika (dane produktu + opcjonalny research) dla modelu."""
     parts = [
         f"TYTUŁ PRODUKTU: {product_data.get('title', '')}",
-        f"AUTOR/MARKA: {product_data.get('author', '')}",
+        f"AUTOR/MARKA: {product_data.get('author', '')} (uwaga: może być zapisany bez spacji i wielkich liter, np. 'jolantabartos' — zawsze użyj poprawnej formy imienia i nazwiska z właściwą pisownią i spacją)",
         f"DANE TECHNICZNE: {product_data.get('details', '')}",
         f"ORYGINALNY OPIS: {product_data.get('description', '')}",
     ]
@@ -570,14 +570,16 @@ def akeneo_fetch_categories(token: str, locale: str) -> List[Dict]:
 def akeneo_fetch_backlog(
     token: str, channel: str, locale: str, limit: int = 100,
     category: Optional[str] = None,
+    exclude_updated_days: Optional[int] = None,
 ) -> List[Dict]:
     """
     Pobiera aktywne (enabled=true) produkty bez zoptymalizowanego opisu.
-    Opcjonalnie filtruje po kategorii Akeneo.
+    Opcjonalnie filtruje po kategorii i wyklucza produkty aktualizowane w ciągu N dni.
     Strategia: dwa zapytania (opisy_seo=false + description EMPTY), merge po SKU.
     Sortuje: brak opisu → krótki opis.
     Uwaga: stan magazynowy trzyma Magento, nie Akeneo — enabled=true to max co można sprawdzić po stronie PIM.
     """
+    from datetime import timedelta
     url = _akeneo_root() + "/api/rest/v1/products"
     headers = {"Authorization": f"Bearer {token}"}
     products_dict: Dict[str, Dict] = {}
@@ -588,6 +590,9 @@ def akeneo_fetch_backlog(
     base: Dict = {"enabled": [{"operator": "=", "value": True}]}
     if category:
         base["categories"] = [{"operator": "IN", "value": [category]}]
+    if exclude_updated_days:
+        cutoff = (datetime.now() - timedelta(days=exclude_updated_days)).strftime("%Y-%m-%dT%H:%M:%S")
+        base["updated"] = [{"operator": "<", "value": cutoff}]
 
     filter_sets = [
         json.dumps({**base, "opisy_seo": [{"operator": "=", "value": False, "scope": channel}]}),
@@ -615,10 +620,13 @@ def akeneo_fetch_backlog(
                         if val.get("scope") in (None, channel) and val.get("locale") in (None, locale):
                             desc_len = len(str(val.get("data", "") or ""))
                             break
+                    updated_raw = item.get("updated", "")
+                    updated_short = updated_raw[:10] if updated_raw else ""
                     products_dict[ident] = {
                         "identifier": ident,
                         "title": _extract_product_title(item, locale),
                         "desc_len": desc_len,
+                        "updated": updated_short,
                     }
             except Exception:
                 break
@@ -969,14 +977,20 @@ else:  # 📦 Backlog
     )
     st.session_state.backlog_category = selected_cat_code
 
-    col_bl, col_lim = st.columns([3, 1])
+    col_lim, col_days = st.columns(2)
     backlog_limit = col_lim.number_input("Ile załadować:", min_value=10, max_value=500, value=100, step=10)
+    exclude_days = col_days.number_input(
+        "Pomiń aktualizowane w ciągu ostatnich N dni:",
+        min_value=0, max_value=365, value=30, step=1,
+        help="0 = nie pomijaj. Filtr działa na pole 'updated' produktu w Akeneo (poziom produktu, nie per-atrybut).",
+    )
 
-    if col_bl.button("🔄 Załaduj backlog", type="primary"):
+    if st.button("🔄 Załaduj backlog", type="primary"):
         with st.spinner("Pobieram backlog z Akeneo..."):
             st.session_state.backlog_items = akeneo_fetch_backlog(
                 tok_bl, channel, locale, backlog_limit,
                 category=selected_cat_code or None,
+                exclude_updated_days=int(exclude_days) if exclude_days > 0 else None,
             )
         st.rerun()
 
@@ -989,18 +1003,21 @@ else:  # 📦 Backlog
         if col_sel_btn.button(f"✅ Zaznacz pierwsze {n_select}"):
             for p in backlog[:n_select]:
                 st.session_state.bulk_selected_products[p['identifier']] = {'title': p['title']}
+                st.session_state[f"bl_{p['identifier']}"] = True
             st.rerun()
         if col_clr.button("🗑️ Wyczyść zaznaczenie"):
             for p in backlog:
                 st.session_state.bulk_selected_products.pop(p['identifier'], None)
+                st.session_state.pop(f"bl_{p['identifier']}", None)
             st.rerun()
 
         st.markdown('<div class="scrollable-results">', unsafe_allow_html=True)
         for p in backlog:
             sku_bl = p['identifier']
             is_sel = sku_bl in st.session_state.bulk_selected_products
-            desc_info = f"({p['desc_len']} zn.)" if p['desc_len'] > 0 else "(brak opisu)"
-            label = f"{sku_bl} — {p['title']} {desc_info}"
+            desc_info = f"{p['desc_len']} zn." if p['desc_len'] > 0 else "brak opisu"
+            upd_info = f" | akt: {p['updated']}" if p.get('updated') else ""
+            label = f"{sku_bl} — {p['title']} ({desc_info}{upd_info})"
             if st.checkbox(label, value=is_sel, key=f"bl_{sku_bl}"):
                 st.session_state.bulk_selected_products[sku_bl] = {'title': p['title']}
             elif is_sel:
