@@ -17,7 +17,7 @@ from google.genai import types
 # STAŁE I KONFIGURACJA
 # ═══════════════════════════════════════════════════════════════════
 
-APP_VERSION = "3.4.0"
+APP_VERSION = "3.5.0"
 APP_NAME = "Generator Opisów Produktów"
 GEMINI_MODEL = "gemini-3.1-flash-lite-preview"
 PERPLEXITY_MODEL = "sonar"
@@ -522,11 +522,32 @@ def akeneo_get_product_details(sku: str, token: str, channel: str = DEFAULT_CHAN
                     return safe_string_value(val.get("data", ""))
             return safe_string_value(attr_values[0].get("data", ""))
 
+        def get_value_joined(attr_name: str, sep: str = ", ") -> str:
+            """Jak get_value, ale łączy listy (np. wielu autorów) separatorem."""
+            attr_values = values.get(attr_name)
+            if not attr_values:
+                return ""
+            for val in attr_values:
+                scope_ok = val.get("scope") in (None, channel)
+                locale_ok = val.get("locale") in (None, locale)
+                if scope_ok and locale_ok:
+                    data = val.get("data", "")
+                    if isinstance(data, list):
+                        return sep.join(str(v).strip() for v in data if v)
+                    return str(data).strip() if data else ""
+            data = attr_values[0].get("data", "")
+            if isinstance(data, list):
+                return sep.join(str(v).strip() for v in data if v)
+            return str(data).strip() if data else ""
+
+        def get_author() -> str:
+            return get_value_joined("author") or get_value_joined("autor")
+
         return {
             "identifier": product.get("identifier", ""),
             "title": get_value("name") or product.get("identifier", ""),
             "description": get_value("description"),
-            "author": get_value("author") or get_value("autor"),
+            "author": get_author(),
             "publisher": get_value("publisher") or get_value("wydawnictwo"),
             "year": get_value("year") or get_value("rok_wydania"),
             "pages": get_value("pages") or get_value("liczba_stron"),
@@ -616,9 +637,16 @@ def _get_internal_link() -> Optional[Dict]:
     return None
 
 def _render_result_preview(r: Dict, token: str, channel: str, locale: str):
-    """Renderuje podgląd jednego wyniku (HTML + preview + research + przycisk regeneracji)."""
+    """Renderuje podgląd jednego wyniku (HTML + preview + edytor + research + przycisk regeneracji)."""
+    sku = r['sku']
+    edit_key = f"edit_{sku}"
+
+    # Inicjalizuj edytor wartością wygenerowaną (jeśli jeszcze nie edytowano)
+    if edit_key not in st.session_state:
+        st.session_state[edit_key] = r['description_html']
+
     research = r.get('research')
-    tab_labels = ["HTML", "Podgląd"]
+    tab_labels = ["HTML", "Podgląd", "✏️ Edytuj"]
     if research:
         tab_labels.append("🔎 Research")
 
@@ -626,23 +654,36 @@ def _render_result_preview(r: Dict, token: str, channel: str, locale: str):
     with tabs[0]:
         st.code(r['description_html'], language='html')
     with tabs[1]:
-        st.markdown(r['description_html'], unsafe_allow_html=True)
-    if research and len(tabs) > 2:
-        with tabs[2]:
+        preview_html = st.session_state.get(edit_key, r['description_html'])
+        st.markdown(preview_html, unsafe_allow_html=True)
+    with tabs[2]:
+        st.caption("Edytuj HTML przed wysyłką. Zmiany zostaną użyte zamiast oryginału.")
+        st.text_area(
+            "Opis HTML:",
+            key=edit_key,
+            height=350,
+            label_visibility="collapsed",
+        )
+        if st.session_state.get(edit_key) != r['description_html']:
+            st.info("✏️ Opis zmodyfikowany - zostanie wysłana edytowana wersja.")
+    if research and len(tabs) > 3:
+        with tabs[3]:
             st.caption(f"Perplexity `{PERPLEXITY_MODEL}` - dane użyte do wygenerowania opisu:")
             st.markdown(research)
 
-    if st.button("♻️ Regeneruj", key=f"reg_{r['sku']}"):
+    if st.button("♻️ Regeneruj", key=f"reg_{sku}"):
         internal_link = _get_internal_link()
         link_only = st.session_state.get("link_only", False)
         use_research = st.session_state.get("use_research", True)
         new_res = process_product_from_akeneo(
-            r['sku'], token, channel, locale, internal_link, link_only, use_research
+            sku, token, channel, locale, internal_link, link_only, use_research
         )
         for i, existing in enumerate(st.session_state.bulk_results):
-            if existing['sku'] == r['sku']:
+            if existing['sku'] == sku:
                 st.session_state.bulk_results[i] = new_res
                 break
+        # Resetuj edytor do nowego opisu
+        st.session_state.pop(edit_key, None)
         st.rerun()
 
 # ═══════════════════════════════════════════════════════════════════
@@ -842,7 +883,8 @@ if st.session_state.bulk_results:
             successes, errors = 0, []
             for i, item in enumerate(to_send_list):
                 try:
-                    akeneo_update_description(item['sku'], item['description_html'], channel, locale)
+                    final_html = st.session_state.get(f"edit_{item['sku']}", item['description_html'])
+                    akeneo_update_description(item['sku'], final_html, channel, locale)
                     add_optimized_product(item['sku'], item['title'], item['url'])
                     successes += 1
                 except Exception as e:
