@@ -349,16 +349,19 @@ def generate_description(
         return f"BŁĄD GEMINI: {str(e)}"
 
 
-def generate_meta_fields(product_data: Dict, description_html: str) -> Dict:
+def generate_meta_fields(product_data: Dict, description_html: str, research: Optional[str] = None) -> Dict:
     """Generuje meta_title i meta_description dla importu do Magento."""
     if "GOOGLE_API_KEY" not in st.secrets:
         return {'meta_title': '', 'meta_description': ''}
+
+    research_section = f"\nDODATKOWE INFO (research): {research[:300]}\n" if research else ""
 
     prompt = (
         f"Na podstawie danych książki wygeneruj meta_title i meta_description dla sklepu e-commerce Bookland.\n\n"
         f"TYTUŁ: {product_data.get('title', '')}\n"
         f"AUTOR: {product_data.get('author', '')}\n"
-        f"OPIS (fragment): {description_html[:400]}\n\n"
+        f"OPIS (fragment): {description_html[:400]}\n"
+        f"{research_section}\n"
         f"ZASADY:\n"
         f"- meta_title: max 60 znaków, zawiera tytuł i autora, nie dodawaj nazwy sklepu\n"
         f"- meta_description: 140-160 znaków, zachęcający tekst po polsku, bez cudzysłowów\n\n"
@@ -397,6 +400,52 @@ def _prepare_product_data(product_details: Dict) -> Dict:
         'details': ', '.join(details_parts),
         'description': safe_string_value(product_details.get('description', '')),
     }
+
+
+def process_product_meta_only(
+    sku: str,
+    token: str,
+    channel: str,
+    locale: str,
+) -> Dict:
+    """Pobiera dane z Akeneo i generuje tylko metatagi — bez nowego opisu, bez Perplexity."""
+    try:
+        product_details = akeneo_get_product_details(sku, token, channel, locale)
+
+        if not product_details:
+            return {
+                'sku': sku, 'title': '', 'description_html': '', 'url': '',
+                'error': 'Produkt nie znaleziony',
+                'description_quality': ('error', 'Produkt nie znaleziony'),
+                'meta_only': True,
+            }
+
+        original_desc = safe_string_value(product_details.get('description', ''))
+        quality_status, quality_msg = validate_description_quality(original_desc)
+        product_data = _prepare_product_data(product_details)
+
+        meta = generate_meta_fields(product_data, original_desc)
+
+        return {
+            'sku': sku,
+            'title': product_data['title'],
+            'description_html': '',
+            'url': generate_product_url(product_data['title']),
+            'old_description': original_desc,
+            'research': None,
+            'meta_title': meta.get('meta_title', ''),
+            'meta_description': meta.get('meta_description', ''),
+            'error': None,
+            'description_quality': (quality_status, quality_msg),
+            'meta_only': True,
+        }
+
+    except Exception as e:
+        return {
+            'sku': sku, 'title': '', 'error': str(e),
+            'description_quality': ('error', str(e)),
+            'meta_only': True,
+        }
 
 
 def process_product_from_akeneo(
@@ -438,7 +487,7 @@ def process_product_from_akeneo(
             research=research,
         )
 
-        meta = generate_meta_fields(product_data, description_html) if "BŁĄD" not in description_html else {}
+        meta = generate_meta_fields(product_data, description_html, research=research) if "BŁĄD" not in description_html else {}
 
         return {
             'sku': sku,
@@ -741,6 +790,7 @@ def _init_session_state():
         'link_category': '',
         'search_res': [],
         'use_research': True,
+        'meta_only': False,
         'magento_store_view': 'store_view_bookland',
         'backlog_items': [],
         'backlog_category': '',
@@ -777,41 +827,43 @@ def _render_result_preview(r: Dict, token: str, channel: str, locale: str):
     """Renderuje podgląd jednego wyniku (HTML + preview + edytor + research + przycisk regeneracji)."""
     sku = r['sku']
     edit_key = f"edit_{sku}"
+    is_meta_only = r.get('meta_only', False)
 
-    # Inicjalizuj edytor wartością wygenerowaną (jeśli jeszcze nie edytowano)
-    if edit_key not in st.session_state:
-        st.session_state[edit_key] = r['description_html']
+    if not is_meta_only:
+        # Inicjalizuj edytor wartością wygenerowaną (jeśli jeszcze nie edytowano)
+        if edit_key not in st.session_state:
+            st.session_state[edit_key] = r['description_html']
 
-    research = r.get('research')
-    tab_labels = ["HTML", "Podgląd", "✏️ Edytuj"]
-    if research:
-        tab_labels.append("🔎 Research")
+        research = r.get('research')
+        tab_labels = ["HTML", "Podgląd", "✏️ Edytuj"]
+        if research:
+            tab_labels.append("🔎 Research")
 
-    tabs = st.tabs(tab_labels)
-    with tabs[0]:
-        st.code(r['description_html'], language='html')
-    with tabs[1]:
-        preview_html = st.session_state.get(edit_key, r['description_html'])
-        st.markdown(preview_html, unsafe_allow_html=True)
-    with tabs[2]:
-        st.caption("Edytuj HTML przed wysyłką. Zmiany zostaną użyte zamiast oryginału.")
-        st.text_area(
-            "Opis HTML:",
-            key=edit_key,
-            height=350,
-            label_visibility="collapsed",
-        )
-        if st.session_state.get(edit_key) != r['description_html']:
-            st.info("✏️ Opis zmodyfikowany - zostanie wysłana edytowana wersja.")
-    if research and len(tabs) > 3:
-        with tabs[3]:
-            st.caption(f"Perplexity `{PERPLEXITY_MODEL}` - dane użyte do wygenerowania opisu:")
-            st.markdown(research)
+        tabs = st.tabs(tab_labels)
+        with tabs[0]:
+            st.code(r['description_html'], language='html')
+        with tabs[1]:
+            preview_html = st.session_state.get(edit_key, r['description_html'])
+            st.markdown(preview_html, unsafe_allow_html=True)
+        with tabs[2]:
+            st.caption("Edytuj HTML przed wysyłką. Zmiany zostaną użyte zamiast oryginału.")
+            st.text_area(
+                "Opis HTML:",
+                key=edit_key,
+                height=350,
+                label_visibility="collapsed",
+            )
+            if st.session_state.get(edit_key) != r['description_html']:
+                st.info("✏️ Opis zmodyfikowany - zostanie wysłana edytowana wersja.")
+        if research and len(tabs) > 3:
+            with tabs[3]:
+                st.caption(f"Perplexity `{PERPLEXITY_MODEL}` - dane użyte do wygenerowania opisu:")
+                st.markdown(research)
 
     meta_title = r.get('meta_title', '')
     meta_description = r.get('meta_description', '')
     if meta_title or meta_description:
-        with st.expander("🔍 Metatagi Magento"):
+        with st.expander("🔍 Metatagi Magento", expanded=is_meta_only):
             st.text_input("meta_title", value=meta_title, disabled=True, key=f"mt_{sku}")
             st.text_area("meta_description", value=meta_description, disabled=True, height=80, key=f"md_{sku}")
             chars_mt = len(meta_title)
@@ -820,7 +872,7 @@ def _render_result_preview(r: Dict, token: str, channel: str, locale: str):
             col_mt.caption(f"{'✅' if chars_mt <= 60 else '⚠️'} {chars_mt}/60 zn.")
             col_md.caption(f"{'✅' if 140 <= chars_md <= 160 else '⚠️'} {chars_md}/160 zn.")
 
-    if st.button("♻️ Regeneruj", key=f"reg_{sku}"):
+    if not is_meta_only and st.button("♻️ Regeneruj", key=f"reg_{sku}"):
         internal_link = _get_internal_link()
         link_only = st.session_state.get("link_only", False)
         use_research = st.session_state.get("use_research", True)
@@ -1036,6 +1088,12 @@ if st.session_state.bulk_selected_products:
     st.markdown("---")
     st.subheader("🚀 Generowanie")
 
+    st.session_state.meta_only = st.checkbox(
+        "Tryb: Tylko metatagi (bez generowania opisu)",
+        value=st.session_state.get("meta_only", False),
+        help="Generuje tylko meta_title i meta_description na podstawie istniejących danych z Akeneo. Nie wywołuje Perplexity.",
+    )
+
     if st.button("▶️ Start Generowania (Gemini)", type="primary"):
         st.session_state.bulk_results = []
         st.session_state.products_to_send = {}
@@ -1044,16 +1102,26 @@ if st.session_state.bulk_selected_products:
         internal_link = _get_internal_link()
         link_only = st.session_state.get("link_only", False)
         use_research = st.session_state.get("use_research", True)
+        meta_only = st.session_state.get("meta_only", False)
 
         bar = st.progress(0, "Start...")
         with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-            futures = {
-                executor.submit(
-                    process_product_from_akeneo,
-                    s, token, channel, locale, internal_link, link_only, use_research
-                ): s
-                for s in skus
-            }
+            if meta_only:
+                futures = {
+                    executor.submit(
+                        process_product_meta_only,
+                        s, token, channel, locale
+                    ): s
+                    for s in skus
+                }
+            else:
+                futures = {
+                    executor.submit(
+                        process_product_from_akeneo,
+                        s, token, channel, locale, internal_link, link_only, use_research
+                    ): s
+                    for s in skus
+                }
             for i, future in enumerate(as_completed(futures)):
                 res = future.result()
                 st.session_state.bulk_results.append(res)
@@ -1103,8 +1171,9 @@ if st.session_state.bulk_results:
             'text/csv',
         )
 
-    # Wysyłka do Akeneo
-    if ok:
+    # Wysyłka do Akeneo (tylko gdy nie ma trybu meta_only)
+    any_meta_only = any(r.get('meta_only') for r in ok)
+    if ok and not any_meta_only:
         st.subheader("📤 Wysyłka do Akeneo")
 
         c_all, c_none = st.columns(2)
