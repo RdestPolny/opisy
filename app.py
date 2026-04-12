@@ -364,7 +364,17 @@ def generate_meta_fields(product_data: Dict, description_html: str, research: Op
         f"{research_section}\n"
         f"ZASADY:\n"
         f"- meta_title: max 60 znaków, zawiera tytuł i autora, nie dodawaj nazwy sklepu\n"
-        f"- meta_description: 140-160 znaków, zachęcający tekst po polsku, bez cudzysłowów\n\n"
+        f"- meta_description: 140-160 znaków, zachęcający tekst po polsku, bez cudzysłowów\n"
+        f"- ZAKAZ zaczynania meta_description od słów: Odkryj, Poznaj, Sięgnij, Zanurz, Sprawdź\n"
+        f"- ZAKAZ używania szablonowych fraz otwierających — każdy opis musi zaczynać się inaczej\n"
+        f"- Zamiast tego używaj różnorodnych struktur: zacznij od bohatera, miejsca, konfliktu, pytania, "
+        f"nazwy serii/tomu, emocji, czasu/epoki, lub bezpośredniego opisu fabuły\n"
+        f"- Przykłady dobrych otwarć (NIE kopiuj dosłownie, inspiruj się strukturą):\n"
+        f"  * 'Mroczny thriller z komisarzem X – czy zdoła...'\n"
+        f"  * 'Kiedy spokojny urlop zamienia się w koszmar, Nina Warwiłow...'\n"
+        f"  * 'Moskwa 1900. Erast Fandorin staje wobec...'\n"
+        f"  * 'Trzynasty tom serii Oblicza Śmierci. Eve Dallas kontra...'\n"
+        f"  * 'Czy zemsta odmieni ich los? Historia Channi,...'\n\n"
         f'Odpowiedz TYLKO w formacie JSON: {{"meta_title": "...", "meta_description": "..."}}'
     )
 
