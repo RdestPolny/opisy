@@ -630,6 +630,8 @@ def akeneo_fetch_backlog(
     token: str, channel: str, locale: str, limit: int = 100,
     category: Optional[str] = None,
     exclude_updated_days: Optional[int] = None,
+    only_without_desc: bool = False,
+    max_desc_len: Optional[int] = None,
 ) -> List[Dict]:
     """
     Pobiera aktywne (enabled=true) produkty bez zoptymalizowanego opisu.
@@ -693,6 +695,10 @@ def akeneo_fetch_backlog(
 
     results = list(products_dict.values())
     results.sort(key=lambda x: x["desc_len"])
+    if only_without_desc:
+        results = [r for r in results if r["desc_len"] == 0]
+    elif max_desc_len is not None:
+        results = [r for r in results if r["desc_len"] < max_desc_len]
     return results[:limit]
 
 
@@ -1048,12 +1054,26 @@ else:  # 📦 Backlog
         help="0 = nie pomijaj. Filtr działa na pole 'updated' produktu w Akeneo (poziom produktu, nie per-atrybut).",
     )
 
+    col_nodesc, col_maxlen = st.columns(2)
+    only_no_desc = col_nodesc.checkbox(
+        "Tylko produkty bez opisu",
+        help="Załaduje wyłącznie produkty z zerową długością opisu.",
+    )
+    max_len_val = col_maxlen.number_input(
+        "Maks. długość opisu (0 = bez limitu):",
+        min_value=0, max_value=10000, value=0, step=50,
+        disabled=only_no_desc,
+        help="Załaduje produkty z opisem krótszym niż podana liczba znaków. 0 = brak limitu. Ignorowane gdy zaznaczono 'Tylko produkty bez opisu'.",
+    )
+
     if st.button("🔄 Załaduj backlog", type="primary"):
         with st.spinner("Pobieram backlog z Akeneo..."):
             st.session_state.backlog_items = akeneo_fetch_backlog(
                 tok_bl, channel, locale, backlog_limit,
                 category=selected_cat_code or None,
                 exclude_updated_days=int(exclude_days) if exclude_days > 0 else None,
+                only_without_desc=only_no_desc,
+                max_desc_len=int(max_len_val) if not only_no_desc and max_len_val > 0 else None,
             )
         st.rerun()
 
