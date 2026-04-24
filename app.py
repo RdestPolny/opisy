@@ -8,6 +8,7 @@ from typing import Dict, List, Optional, Tuple
 import time
 from datetime import datetime
 from pathlib import Path
+from streamlit_quill import st_quill
 
 # Obsługa Google Gemini
 from google import genai
@@ -138,6 +139,13 @@ def clean_ai_fingerprints(text: str) -> str:
     text = text.replace('—', '-').replace('–', '-')
     text = re.sub(r'\*\*(.*?)\*\*', r'<b>\1</b>', text)
     return text
+
+def normalize_quill_html(text: str) -> str:
+    """Normalizuje output Quill: <strong>→<b>, usuwa atrybuty style/class."""
+    text = re.sub(r'<strong>(.*?)</strong>', r'<b>\1</b>', text, flags=re.DOTALL)
+    text = re.sub(r'<em>(.*?)</em>', r'<i>\1</i>', text, flags=re.DOTALL)
+    text = re.sub(r' (class|style|data-[^=]*)="[^"]*"', '', text)
+    return text.strip()
 
 def safe_string_value(value) -> str:
     if value is None:
@@ -862,13 +870,20 @@ def _render_result_preview(r: Dict, token: str, channel: str, locale: str):
             preview_html = st.session_state.get(edit_key, r['description_html'])
             st.markdown(preview_html, unsafe_allow_html=True)
         with tabs[2]:
-            st.caption("Edytuj HTML przed wysyłką. Zmiany zostaną użyte zamiast oryginału.")
-            st.text_area(
-                "Opis HTML:",
-                key=edit_key,
-                height=350,
-                label_visibility="collapsed",
+            st.caption("Edytuj tekst wizualnie. Zmiany zostaną użyte zamiast oryginału.")
+            quill_value = st_quill(
+                value=st.session_state.get(edit_key, r['description_html']),
+                html=True,
+                key=f"quill_{sku}",
+                toolbar=[
+                    [{"header": [2, 3, False]}],
+                    ["bold", "link"],
+                    ["clean"],
+                ],
             )
+            if quill_value is not None:
+                normalized = normalize_quill_html(quill_value)
+                st.session_state[edit_key] = normalized
             if st.session_state.get(edit_key) != r['description_html']:
                 st.info("✏️ Opis zmodyfikowany - zostanie wysłana edytowana wersja.")
         if research and len(tabs) > 3:
