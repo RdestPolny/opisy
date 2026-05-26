@@ -20,7 +20,7 @@ from google.genai import types
 
 APP_VERSION = "3.9.1"
 APP_NAME = "Generator Opisów Produktów"
-GEMINI_MODEL = "gemini-3.1-flash-lite-preview"
+GEMINI_MODEL = "gemini-3.1-flash-lite"
 PERPLEXITY_MODEL = "sonar"
 PERPLEXITY_API_URL = "https://api.perplexity.ai/chat/completions"
 DEFAULT_CHANNEL = "Bookland"
