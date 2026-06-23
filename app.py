@@ -10,6 +10,8 @@ from datetime import datetime
 from pathlib import Path
 from streamlit_quill import st_quill
 
+from product_input import ProductInputResolutionError, resolve_product_inputs
+
 # Obsługa Google Gemini
 from google import genai
 from google.genai import types
@@ -18,7 +20,7 @@ from google.genai import types
 # STAŁE I KONFIGURACJA
 # ═══════════════════════════════════════════════════════════════════
 
-APP_VERSION = "3.9.1"
+APP_VERSION = "3.10.0"
 APP_NAME = "Generator Opisów Produktów"
 GEMINI_MODEL = "gemini-3.1-flash-lite"
 PERPLEXITY_MODEL = "sonar"
@@ -986,7 +988,7 @@ with st.sidebar:
 # ═══════════════════════════════════════════════════════════════════
 
 st.subheader("📦 Przetwarzanie produktów")
-method = st.radio("Metoda:", ["🔍 Wyszukaj i zaznacz", "📋 Wklej listę SKU", "📦 Backlog"], horizontal=True)
+method = st.radio("Metoda:", ["🔍 Wyszukaj i zaznacz", "📋 Wklej SKU lub URL", "📦 Backlog"], horizontal=True)
 
 if method == "🔍 Wyszukaj i zaznacz":
     # Koszyk
@@ -1025,14 +1027,62 @@ if method == "🔍 Wyszukaj i zaznacz":
                 del st.session_state.bulk_selected_products[sku]
         st.markdown('</div>', unsafe_allow_html=True)
 
-elif method == "📋 Wklej listę SKU":
-    txt = st.text_area("SKU (jeden na linię):", height=150)
-    if st.button("Załaduj SKU", type="primary"):
-        skus = [s.strip() for s in txt.splitlines() if s.strip()]
-        for s in skus:
-            st.session_state.bulk_selected_products[s] = {'title': s}
-        st.success(f"Dodano {len(skus)} SKU")
-        st.rerun()
+elif method == "📋 Wklej SKU lub URL":
+    txt = st.text_area(
+        "SKU lub URL produktu Bookland (jeden na linię):",
+        height=150,
+        help="Możesz wkleić jednocześnie numery SKU i pełne adresy produktów z bookland.com.pl.",
+    )
+    if st.button("Załaduj produkty", type="primary"):
+        raw_inputs = [line.strip() for line in txt.splitlines() if line.strip()]
+        try:
+            resolved_inputs, input_errors = resolve_product_inputs(raw_inputs)
+
+            # SKU uzyskane z URL-i muszą istnieć w Akeneo, zanim trafią do kolejki.
+            url_items = [item for item in resolved_inputs if item["source"] == "url"]
+            akeneo_status: Dict[str, Optional[bool]] = {}
+            if url_items:
+                validation_token = akeneo_get_token()
+                unique_url_skus = list(dict.fromkeys(item["sku"] for item in url_items))
+                with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+                    futures = {
+                        executor.submit(akeneo_product_exists, sku, validation_token): sku
+                        for sku in unique_url_skus
+                    }
+                    for future in as_completed(futures):
+                        sku = futures[future]
+                        try:
+                            akeneo_status[sku] = future.result()
+                        except Exception:
+                            akeneo_status[sku] = None
+
+            accepted_skus = set()
+            for item in resolved_inputs:
+                sku = item["sku"]
+                if item["source"] == "url":
+                    status = akeneo_status.get(sku)
+                    if status is False:
+                        input_errors.append(
+                            f"Produkt {sku} z URL nie istnieje w Akeneo: {item['input']}"
+                        )
+                        continue
+                    if status is None:
+                        input_errors.append(
+                            f"Nie udało się zweryfikować produktu {sku} w Akeneo: {item['input']}"
+                        )
+                        continue
+
+                st.session_state.bulk_selected_products[sku] = {'title': item['title']}
+                accepted_skus.add(sku)
+
+            if accepted_skus:
+                st.success(f"Załadowano {len(accepted_skus)} produktów do koszyka.")
+            if input_errors:
+                st.warning("Nie dodano części pozycji:\n- " + "\n- ".join(input_errors))
+            if not accepted_skus and not input_errors:
+                st.info("Nie podano żadnych produktów.")
+        except ProductInputResolutionError as exc:
+            st.error(str(exc))
 
     if st.session_state.bulk_selected_products:
         st.info(f"W koszyku: {len(st.session_state.bulk_selected_products)}")
