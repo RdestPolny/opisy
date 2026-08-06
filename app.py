@@ -56,7 +56,7 @@ except ImportError:
 # STAŁE I KONFIGURACJA
 # ═══════════════════════════════════════════════════════════════════
 
-APP_VERSION = "4.0.0"
+APP_VERSION = "4.1.1"
 APP_NAME = "Generator opisów i metatagów produktów"
 PROMPT_VERSION = "meta-v4-seeded-diversity-2026-08"
 DEFAULT_GEMINI_MODEL = "gemini-3.5-flash-lite"
@@ -71,11 +71,13 @@ AKENEO_MAX_WORKERS = 4
 GEMINI_INTERACTIVE_WORKERS = 3
 INTERACTIVE_CHUNK_SIZE = 100
 BATCH_PRODUCTS_PER_FILE = 5000
+AKENEO_SKU_FILTER_CHUNK_SIZE = 50
 MAX_META_RETRIES = 2
 RESULT_PREVIEW_LIMIT = 200
 
 DB_PATH = Path(".streamlit/product_workflow.sqlite3")
 BATCH_DIR = Path(".streamlit/gemini_batches")
+IMPORT_REPORT_DIR = Path(".streamlit/import_reports")
 
 REQUIRED_SECRETS = [
     "AKENEO_BASE_URL",
@@ -91,6 +93,11 @@ _POLISH_CHARS = str.maketrans(
     "acelnoszzACELNOSZZ",
 )
 
+# Celowo używamy prostego podzbioru JSON Schema zgodnego także ze starszymi
+# wersjami endpointu generateContent i pakietu google-genai. Pole
+# additionalProperties bywa serializowane jako additional_properties i powoduje
+# błąd 400 INVALID_ARGUMENT. Nie jest tu potrzebne: aplikacja odczytuje wyłącznie
+# wymagane pole meta_description i ignoruje ewentualne dodatkowe klucze.
 META_RESPONSE_SCHEMA = {
     "type": "object",
     "properties": {
@@ -100,7 +107,6 @@ META_RESPONSE_SCHEMA = {
         }
     },
     "required": ["meta_description"],
-    "additionalProperties": False,
 }
 
 BANNED_STARTERS = (
@@ -274,6 +280,8 @@ def init_db() -> None:
 
             CREATE TABLE IF NOT EXISTS meta_jobs (
                 job_key TEXT PRIMARY KEY,
+                run_id TEXT NOT NULL DEFAULT '',
+                source_type TEXT NOT NULL DEFAULT 'catalog',
                 sku TEXT NOT NULL,
                 channel TEXT NOT NULL,
                 locale TEXT NOT NULL,
@@ -314,6 +322,7 @@ def init_db() -> None:
 
             CREATE TABLE IF NOT EXISTS batch_jobs (
                 job_name TEXT PRIMARY KEY,
+                run_id TEXT NOT NULL DEFAULT '',
                 display_name TEXT NOT NULL,
                 model TEXT NOT NULL,
                 input_path TEXT NOT NULL,
@@ -328,6 +337,17 @@ def init_db() -> None:
             );
             """
         )
+
+        # Migracje dla baz utworzonych przez v4.0.0.
+        def ensure_column(table: str, column: str, definition: str) -> None:
+            columns = {row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+            if column not in columns:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
+        ensure_column("meta_jobs", "run_id", "TEXT NOT NULL DEFAULT ''")
+        ensure_column("meta_jobs", "source_type", "TEXT NOT NULL DEFAULT 'catalog'")
+        ensure_column("batch_jobs", "run_id", "TEXT NOT NULL DEFAULT ''")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_meta_jobs_run ON meta_jobs(run_id)")
 
 
 init_db()
@@ -372,6 +392,8 @@ def upsert_meta_job(
     product_data: Dict,
     source_updated: str = "",
     force_regenerate: bool = False,
+    run_id: str = "",
+    source_type: str = "catalog",
 ) -> Tuple[str, bool]:
     title = safe_string_value(product_data.get("title"))
     author = safe_string_value(product_data.get("author"))
@@ -396,18 +418,26 @@ def upsert_meta_job(
             and not force_regenerate
         )
         if unchanged_completed:
+            conn.execute(
+                """
+                UPDATE meta_jobs SET run_id=?, source_type=?, store_view_code=?, updated_at=?
+                WHERE job_key=?
+                """,
+                (run_id, source_type, store_view_code, now, job_key),
+            )
             return job_key, False
 
-        status = "queued"
         conn.execute(
             """
             INSERT INTO meta_jobs(
-                job_key, sku, channel, locale, store_view_code, title, author, description, details,
-                source_updated, input_hash, prompt_version, model, style_seed, opening_mode,
-                rhythm_mode, focus_mode, semantic_cues, source_lead, status, attempts,
+                job_key, run_id, source_type, sku, channel, locale, store_view_code, title, author,
+                description, details, source_updated, input_hash, prompt_version, model, style_seed,
+                opening_mode, rhythm_mode, focus_mode, semantic_cues, source_lead, status, attempts,
                 created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', 0, ?, ?)
             ON CONFLICT(job_key) DO UPDATE SET
+                run_id=excluded.run_id,
+                source_type=excluded.source_type,
                 store_view_code=excluded.store_view_code,
                 title=excluded.title,
                 author=excluded.author,
@@ -423,7 +453,7 @@ def upsert_meta_job(
                 focus_mode=excluded.focus_mode,
                 semantic_cues=excluded.semantic_cues,
                 source_lead=excluded.source_lead,
-                status=excluded.status,
+                status='queued',
                 attempts=0,
                 meta_title='',
                 meta_description='',
@@ -437,6 +467,8 @@ def upsert_meta_job(
             """,
             (
                 job_key,
+                run_id,
+                source_type,
                 sku,
                 channel,
                 locale,
@@ -455,7 +487,6 @@ def upsert_meta_job(
                 style["focus_mode"],
                 ", ".join(style["semantic_cues"]),
                 style["source_lead"],
-                status,
                 now,
                 now,
             ),
@@ -519,6 +550,7 @@ def list_meta_jobs(
     statuses: Optional[Sequence[str]] = None,
     limit: Optional[int] = None,
     order_by: str = "updated_at DESC",
+    run_id: Optional[str] = None,
 ) -> List[Dict]:
     allowed_order = {
         "updated_at DESC",
@@ -531,10 +563,16 @@ def list_meta_jobs(
 
     sql = "SELECT * FROM meta_jobs"
     params: List[object] = []
+    conditions: List[str] = []
     if statuses:
         placeholders = ",".join("?" for _ in statuses)
-        sql += f" WHERE status IN ({placeholders})"
+        conditions.append(f"status IN ({placeholders})")
         params.extend(statuses)
+    if run_id:
+        conditions.append("run_id=?")
+        params.append(run_id)
+    if conditions:
+        sql += " WHERE " + " AND ".join(conditions)
     sql += f" ORDER BY {order_by}"
     if limit is not None:
         sql += " LIMIT ?"
@@ -543,10 +581,39 @@ def list_meta_jobs(
         return [dict(row) for row in conn.execute(sql, params).fetchall()]
 
 
-def meta_status_counts() -> Dict[str, int]:
+def meta_status_counts(run_id: Optional[str] = None) -> Dict[str, int]:
+    sql = "SELECT status, COUNT(*) AS n FROM meta_jobs"
+    params: List[object] = []
+    if run_id:
+        sql += " WHERE run_id=?"
+        params.append(run_id)
+    sql += " GROUP BY status"
     with db_connect() as conn:
-        rows = conn.execute("SELECT status, COUNT(*) AS n FROM meta_jobs GROUP BY status").fetchall()
+        rows = conn.execute(sql, params).fetchall()
     return {row["status"]: int(row["n"]) for row in rows}
+
+
+def list_meta_runs(limit: int = 30) -> List[Dict]:
+    with db_connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT run_id, source_type, COUNT(*) AS product_count,
+                   MIN(created_at) AS created_at, MAX(updated_at) AS updated_at
+            FROM meta_jobs
+            WHERE run_id<>''
+            GROUP BY run_id, source_type
+            ORDER BY updated_at DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def new_run_id(prefix: str) -> str:
+    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    suffix = hashlib.sha1(f"{time.time_ns()}|{prefix}".encode("utf-8")).hexdigest()[:6]
+    return f"{prefix}-{timestamp}-{suffix}"
 
 
 def existing_opening_signatures(exclude_job_key: str = "") -> Tuple[Set[str], Counter]:
@@ -580,17 +647,21 @@ def recent_opening_examples(limit: int = 20) -> List[str]:
     return [first_words(row["meta_description"], 8) for row in rows]
 
 
-def requeue_jobs(statuses: Sequence[str], reason: str = "") -> int:
+def requeue_jobs(statuses: Sequence[str], reason: str = "", run_id: Optional[str] = None) -> int:
     if not statuses:
         return 0
     placeholders = ",".join("?" for _ in statuses)
+    conditions = [f"status IN ({placeholders})"]
     params: List[object] = [utcnow_iso(), reason, *statuses]
+    if run_id:
+        conditions.append("run_id=?")
+        params.append(run_id)
     with db_connect() as conn:
         cur = conn.execute(
             f"""
             UPDATE meta_jobs
             SET status='queued', batch_job_name='', updated_at=?, error_message=?
-            WHERE status IN ({placeholders})
+            WHERE {' AND '.join(conditions)}
             """,
             params,
         )
@@ -834,9 +905,13 @@ def meta_validation_errors(
     return list(dict.fromkeys(errors))
 
 
-def audit_meta_jobs_for_repetition() -> Dict[str, int]:
+def audit_meta_jobs_for_repetition(run_id: Optional[str] = None) -> Dict[str, int]:
     """Oznacza powtarzalne otwarcia i identyczne meta descriptions do ponownej generacji."""
-    jobs = list_meta_jobs(statuses=["completed"], order_by="created_at ASC")
+    jobs = list_meta_jobs(
+        statuses=["completed"],
+        order_by="created_at ASC",
+        run_id=run_id,
+    )
     seen_long: Dict[str, str] = {}
     seen_short: Dict[str, int] = Counter()
     seen_hash: Dict[str, str] = {}
@@ -1190,6 +1265,52 @@ def generate_meta_description_interactive(job: Dict) -> Dict:
     }
 
 
+def normalize_sku_list(values: Iterable[str]) -> Tuple[List[str], int]:
+    unique: List[str] = []
+    seen: Set[str] = set()
+    duplicates = 0
+    for raw in values:
+        value = str(raw or "").replace("\ufeff", "").strip().strip('"').strip("'")
+        if not value or value.lower() in {"sku", "identifier", "product_sku", "kod", "kod produktu"}:
+            continue
+        if value in seen:
+            duplicates += 1
+            continue
+        seen.add(value)
+        unique.append(value)
+    return unique, duplicates
+
+
+def parse_bulk_sku_payload(payload: str) -> Tuple[List[str], int]:
+    text = (payload or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+    if not text:
+        return [], 0
+
+    lines = [line for line in text.split("\n") if line.strip()]
+    sample = "\n".join(lines[:20])
+    rows: List[List[str]] = []
+    try:
+        dialect = csv.Sniffer().sniff(sample, delimiters="\t;,|")
+        rows = list(csv.reader(lines, dialect))
+    except csv.Error:
+        rows = [[line] for line in lines]
+
+    if not rows:
+        return [], 0
+
+    header = [normalize_for_compare(cell) for cell in rows[0]]
+    sku_headers = {"sku", "identifier", "product sku", "kod", "kod produktu"}
+    sku_index = next((i for i, cell in enumerate(header) if cell in sku_headers), 0)
+    start_index = 1 if any(cell in sku_headers for cell in header) else 0
+    values = [row[sku_index] for row in rows[start_index:] if len(row) > sku_index]
+    return normalize_sku_list(values)
+
+
+def chunks(values: Sequence[str], size: int) -> Iterator[List[str]]:
+    for start in range(0, len(values), size):
+        yield list(values[start : start + size])
+
+
 # ═══════════════════════════════════════════════════════════════════
 # AKENEO API
 # ═══════════════════════════════════════════════════════════════════
@@ -1343,6 +1464,58 @@ def akeneo_get_product_details(
         return None
     response.raise_for_status()
     return parse_akeneo_product(response.json(), channel, locale)
+
+
+def akeneo_fetch_products_by_identifiers(
+    token: str,
+    channel: str,
+    locale: str,
+    identifiers: Sequence[str],
+) -> Dict[str, Dict]:
+    """Pobiera jedną małą paczkę SKU jednym zapytaniem do endpointu kolekcji."""
+    if not identifiers:
+        return {}
+    search = {"identifier": [{"operator": "IN", "value": list(identifiers)}]}
+    params: Dict[str, object] = {
+        "limit": 100,
+        "scope": channel,
+        "locales": locale,
+        "with_count": "false",
+        "search": json.dumps(search, ensure_ascii=False),
+    }
+    existing_attributes = akeneo_existing_attribute_codes(token)
+    if existing_attributes:
+        params["attributes"] = ",".join(existing_attributes)
+    response = request_with_retry(
+        "GET",
+        _akeneo_root() + "/api/rest/v1/products",
+        headers=akeneo_headers(token),
+        params=params,
+    )
+
+    # Część starszych lub niestandardowo skonfigurowanych instalacji Akeneo
+    # może nie obsługiwać operatora IN dla identyfikatora produktu. Wtedy
+    # zachowujemy poprawność i przechodzimy na kontrolowany fallback 4-wątkowy.
+    if response.status_code in {400, 414, 422}:
+        products: Dict[str, Dict] = {}
+        with ThreadPoolExecutor(max_workers=AKENEO_MAX_WORKERS) as executor:
+            futures = {
+                executor.submit(akeneo_get_product_details, sku, token, channel, locale): sku
+                for sku in identifiers
+            }
+            for future in as_completed(futures):
+                product = future.result()
+                if product and product.get("identifier"):
+                    products[product["identifier"]] = product
+        return products
+
+    response.raise_for_status()
+    products = {}
+    for item in response.json().get("_embedded", {}).get("items", []):
+        parsed = parse_akeneo_product(item, channel, locale)
+        if parsed.get("identifier"):
+            products[parsed["identifier"]] = parsed
+    return products
 
 
 def akeneo_iter_products_search_after(
@@ -1761,6 +1934,7 @@ def write_batch_jsonl(jobs: Sequence[Dict], path: Path) -> None:
 def register_batch_job(
     *,
     job_name: str,
+    run_id: str,
     display_name: str,
     input_path: Path,
     input_file_name: str,
@@ -1772,9 +1946,9 @@ def register_batch_job(
         conn.execute(
             """
             INSERT INTO batch_jobs(
-                job_name, display_name, model, input_path, input_file_name, state,
+                job_name, run_id, display_name, model, input_path, input_file_name, state,
                 product_count, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(job_name) DO UPDATE SET
                 state=excluded.state,
                 input_file_name=excluded.input_file_name,
@@ -1782,6 +1956,7 @@ def register_batch_job(
             """,
             (
                 job_name,
+                run_id,
                 display_name,
                 GEMINI_MODEL,
                 str(input_path),
@@ -1794,13 +1969,22 @@ def register_batch_job(
         )
 
 
-def list_batch_jobs() -> List[Dict]:
+def list_batch_jobs(run_id: Optional[str] = None) -> List[Dict]:
+    sql = "SELECT * FROM batch_jobs"
+    params: List[object] = []
+    if run_id:
+        sql += " WHERE run_id=?"
+        params.append(run_id)
+    sql += " ORDER BY created_at DESC"
     with db_connect() as conn:
-        return [dict(row) for row in conn.execute("SELECT * FROM batch_jobs ORDER BY created_at DESC").fetchall()]
+        return [dict(row) for row in conn.execute(sql, params).fetchall()]
 
 
-def submit_queued_batches(products_per_file: int = BATCH_PRODUCTS_PER_FILE) -> List[Dict]:
-    queued = list_meta_jobs(statuses=["queued"], order_by="created_at ASC")
+def submit_queued_batches(
+    products_per_file: int = BATCH_PRODUCTS_PER_FILE,
+    run_id: Optional[str] = None,
+) -> List[Dict]:
+    queued = list_meta_jobs(statuses=["queued"], order_by="created_at ASC", run_id=run_id)
     if not queued:
         return []
 
@@ -1810,7 +1994,7 @@ def submit_queued_batches(products_per_file: int = BATCH_PRODUCTS_PER_FILE) -> L
     for index in range(0, len(queued), products_per_file):
         chunk = queued[index : index + products_per_file]
         part = index // products_per_file + 1
-        display_name = f"bookland-meta-{timestamp}-{part:03d}"
+        display_name = f"bookland-meta-{(run_id or 'all')[-18:]}-{timestamp}-{part:03d}"
         input_path = BATCH_DIR / f"{display_name}.jsonl"
         write_batch_jsonl(chunk, input_path)
 
@@ -1828,6 +2012,7 @@ def submit_queued_batches(products_per_file: int = BATCH_PRODUCTS_PER_FILE) -> L
         )
         register_batch_job(
             job_name=batch_job.name,
+            run_id=run_id or "",
             display_name=display_name,
             input_path=input_path,
             input_file_name=uploaded_file.name,
@@ -1939,10 +2124,10 @@ def ingest_batch_result_bytes(job_name: str, content: bytes) -> Dict[str, int]:
     return stats
 
 
-def refresh_and_ingest_batch_jobs() -> List[Dict]:
+def refresh_and_ingest_batch_jobs(run_id: Optional[str] = None) -> List[Dict]:
     client = get_gemini_client()
     updates: List[Dict] = []
-    for stored in list_batch_jobs():
+    for stored in list_batch_jobs(run_id=run_id):
         if stored["ingested_at"]:
             continue
         try:
@@ -1987,6 +2172,88 @@ def refresh_and_ingest_batch_jobs() -> List[Dict]:
 # IMPORT DUŻEGO KATALOGU I EKSPORT
 # ═══════════════════════════════════════════════════════════════════
 
+def import_skus_to_meta_queue(
+    *,
+    skus: Sequence[str],
+    token: str,
+    channel: str,
+    locale: str,
+    store_view_code: str,
+    enabled_only: bool,
+    only_with_description: bool,
+    force_regenerate: bool,
+    run_id: str,
+    progress_callback=None,
+) -> Dict[str, object]:
+    unique_skus, duplicate_count = normalize_sku_list(skus)
+    stats: Dict[str, object] = {
+        "run_id": run_id,
+        "input": len(skus),
+        "unique": len(unique_skus),
+        "duplicates": duplicate_count,
+        "found": 0,
+        "queued": 0,
+        "skipped_unchanged": 0,
+        "inactive": 0,
+        "without_description": 0,
+        "missing": 0,
+        "processed": 0,
+    }
+    missing_skus: List[str] = []
+    inactive_skus: List[str] = []
+    without_description_skus: List[str] = []
+
+    for sku_chunk in chunks(unique_skus, AKENEO_SKU_FILTER_CHUNK_SIZE):
+        products = akeneo_fetch_products_by_identifiers(token, channel, locale, sku_chunk)
+        for sku in sku_chunk:
+            stats["processed"] = int(stats["processed"]) + 1
+            product = products.get(sku)
+            if not product:
+                stats["missing"] = int(stats["missing"]) + 1
+                missing_skus.append(sku)
+                continue
+            stats["found"] = int(stats["found"]) + 1
+            if enabled_only and not product.get("enabled", False):
+                stats["inactive"] = int(stats["inactive"]) + 1
+                inactive_skus.append(sku)
+                continue
+            if only_with_description and not strip_html(product.get("description", "")):
+                stats["without_description"] = int(stats["without_description"]) + 1
+                without_description_skus.append(sku)
+                continue
+
+            product_data = _prepare_product_data(product)
+            _, queued = upsert_meta_job(
+                sku=sku,
+                channel=channel,
+                locale=locale,
+                store_view_code=store_view_code,
+                product_data=product_data,
+                source_updated=product.get("updated", ""),
+                force_regenerate=force_regenerate,
+                run_id=run_id,
+                source_type="sku_list",
+            )
+            if queued:
+                stats["queued"] = int(stats["queued"]) + 1
+            else:
+                stats["skipped_unchanged"] = int(stats["skipped_unchanged"]) + 1
+
+        if progress_callback:
+            progress_callback(stats)
+
+    IMPORT_REPORT_DIR.mkdir(parents=True, exist_ok=True)
+    report_path = IMPORT_REPORT_DIR / f"{run_id}-odrzucone.tsv"
+    with report_path.open("w", encoding="utf-8-sig", newline="") as handle:
+        writer = csv.writer(handle, delimiter="\t", lineterminator="\n")
+        writer.writerow(["sku", "powod"])
+        writer.writerows((sku, "nie znaleziono w Akeneo") for sku in missing_skus)
+        writer.writerows((sku, "produkt nieaktywny") for sku in inactive_skus)
+        writer.writerows((sku, "brak opisu źródłowego") for sku in without_description_skus)
+    stats["report_path"] = str(report_path)
+    return stats
+
+
 def import_catalog_to_meta_queue(
     *,
     token: str,
@@ -1998,6 +2265,7 @@ def import_catalog_to_meta_queue(
     only_with_description: bool,
     max_products: Optional[int],
     force_regenerate: bool,
+    run_id: str = "",
     progress_callback=None,
 ) -> Dict[str, int]:
     stats = {"seen": 0, "queued": 0, "skipped_unchanged": 0, "without_description": 0}
@@ -2024,6 +2292,8 @@ def import_catalog_to_meta_queue(
             product_data=product_data,
             source_updated=product.get("updated", ""),
             force_regenerate=force_regenerate,
+            run_id=run_id,
+            source_type="catalog",
         )
         if queued:
             stats["queued"] += 1
@@ -2036,8 +2306,11 @@ def import_catalog_to_meta_queue(
     return stats
 
 
-def export_meta_csv(statuses: Sequence[str] = ("completed",)) -> bytes:
-    jobs = list_meta_jobs(statuses=statuses, order_by="sku ASC")
+def export_meta_csv(
+    statuses: Sequence[str] = ("completed",),
+    run_id: Optional[str] = None,
+) -> bytes:
+    jobs = list_meta_jobs(statuses=statuses, order_by="sku ASC", run_id=run_id)
     output = io.StringIO()
     writer = csv.DictWriter(
         output,
@@ -2058,8 +2331,8 @@ def export_meta_csv(statuses: Sequence[str] = ("completed",)) -> bytes:
     return output.getvalue().encode("utf-8-sig")
 
 
-def export_quality_report_csv() -> bytes:
-    jobs = list_meta_jobs(order_by="status ASC, sku ASC")
+def export_quality_report_csv(run_id: Optional[str] = None) -> bytes:
+    jobs = list_meta_jobs(order_by="status ASC, sku ASC", run_id=run_id)
     rows = []
     for job in jobs:
         rows.append(
@@ -2097,6 +2370,8 @@ def init_session_state() -> None:
         "magento_store_view": "store_view_bookland",
         "backlog_items": [],
         "backlog_category": "",
+        "active_meta_run_id": "",
+        "last_import_report_path": "",
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -2469,134 +2744,269 @@ with interactive_tab:
             st.caption(f"Wyświetlono pierwsze {RESULT_PREVIEW_LIMIT} wyników, aby nie przeciążać Streamlita.")
 
 with scale_tab:
-    st.subheader("Duży katalog: trwała kolejka + Gemini Batch API")
+    st.subheader("Metatagi dla dużej listy SKU: trwała kolejka + Gemini Batch API")
     st.write(
-        "Produkty są pobierane z Akeneo przez search-after, zapisywane w SQLite i wysyłane do Gemini w plikach JSONL. "
-        "Zamknięcie przeglądarki nie usuwa kolejki ani gotowych wyników."
+        "Tutaj możesz wkleić lub wgrać nawet dziesiątki tysięcy SKU. Produkty są pobierane z Akeneo "
+        "paczkami, zapisywane w SQLite i dopiero potem wysyłane do Gemini Batch API. Lista nie trafia "
+        "do interaktywnego session_state jako 50 tys. osobnych elementów."
     )
 
     try:
         token = akeneo_get_token()
-        categories = akeneo_fetch_categories(token, locale)
-        category_options = {"": "Wszystkie kategorie"}
-        category_options.update({item["code"]: f"{item['label']} ({item['code']})" for item in categories})
-        selected_category = st.selectbox(
-            "Kategoria katalogu",
-            options=list(category_options),
-            format_func=lambda code: category_options[code],
-            key="scale_category",
+        source_mode = st.radio(
+            "Źródło produktów",
+            ["Lista SKU", "Cały katalog lub kategoria"],
+            horizontal=True,
+            key="scale_source_mode",
         )
+
         col_a, col_b = st.columns(2)
-        enabled_only = col_a.checkbox("Tylko aktywne produkty", value=True)
-        only_with_description = col_b.checkbox("Tylko produkty z opisem źródłowym", value=True)
-        max_products_input = st.number_input(
-            "Limit importu, 0 = cały katalog",
-            min_value=0,
-            max_value=500000,
-            value=0,
-            step=1000,
+        enabled_only = col_a.checkbox("Tylko aktywne produkty", value=True, key="scale_enabled_only")
+        only_with_description = col_b.checkbox(
+            "Tylko produkty z opisem źródłowym",
+            value=True,
+            key="scale_only_with_description",
         )
         force_regenerate = st.checkbox(
             "Wygeneruj ponownie także niezmienione, ukończone produkty",
             value=False,
+            key="scale_force_regenerate",
         )
 
-        if st.button("1. Pobierz produkty i przygotuj kolejkę", type="primary"):
-            progress_text = st.empty()
+        if source_mode == "Lista SKU":
+            st.caption(
+                "Obsługiwany format: jeden SKU na linię albo CSV/TSV z kolumną sku, identifier, product_sku lub kod produktu."
+            )
+            uploaded_skus = st.file_uploader(
+                "Plik SKU",
+                type=["txt", "csv", "tsv"],
+                key="scale_sku_file",
+            )
+            pasted_skus = st.text_area(
+                "Albo wklej SKU - jeden na linię",
+                height=180,
+                key="scale_sku_text",
+            )
 
-            def callback(stats: Dict[str, int]) -> None:
-                progress_text.info(
-                    f"Odczytano {stats['seen']} · w kolejce {stats['queued']} · "
-                    f"pominięto niezmienione {stats['skipped_unchanged']}"
+            payload_parts: List[str] = []
+            if uploaded_skus is not None:
+                raw_bytes = uploaded_skus.getvalue()
+                try:
+                    payload_parts.append(raw_bytes.decode("utf-8-sig"))
+                except UnicodeDecodeError:
+                    payload_parts.append(raw_bytes.decode("cp1250", errors="replace"))
+            if pasted_skus.strip():
+                payload_parts.append(pasted_skus)
+            parsed_skus, duplicate_count = parse_bulk_sku_payload("\n".join(payload_parts))
+            if parsed_skus:
+                st.info(
+                    f"Rozpoznano {len(parsed_skus):,} unikalnych SKU".replace(",", " ")
+                    + (f"; usunięto {duplicate_count:,} duplikatów".replace(",", " ") if duplicate_count else "")
                 )
 
-            stats = import_catalog_to_meta_queue(
-                token=token,
-                channel=channel,
-                locale=locale,
-                store_view_code=st.session_state.magento_store_view,
-                category=selected_category or None,
-                enabled_only=enabled_only,
-                only_with_description=only_with_description,
-                max_products=int(max_products_input) or None,
-                force_regenerate=force_regenerate,
-                progress_callback=callback,
+            if st.button("1. Pobierz wskazane SKU i przygotuj kolejkę", type="primary"):
+                if not parsed_skus:
+                    st.error("Nie znaleziono żadnych poprawnych SKU w polu ani w pliku.")
+                else:
+                    run_id = new_run_id("sku")
+                    progress_text = st.empty()
+
+                    def sku_callback(stats: Dict[str, object]) -> None:
+                        progress_text.info(
+                            f"Sprawdzono {int(stats['processed']):,}/{int(stats['unique']):,} · "
+                            f"znaleziono {int(stats['found']):,} · w kolejce {int(stats['queued']):,} · "
+                            f"brak {int(stats['missing']):,}".replace(",", " ")
+                        )
+
+                    stats = import_skus_to_meta_queue(
+                        skus=parsed_skus,
+                        token=token,
+                        channel=channel,
+                        locale=locale,
+                        store_view_code=st.session_state.magento_store_view,
+                        enabled_only=enabled_only,
+                        only_with_description=only_with_description,
+                        force_regenerate=force_regenerate,
+                        run_id=run_id,
+                        progress_callback=sku_callback,
+                    )
+                    st.session_state.active_meta_run_id = run_id
+                    st.session_state.last_import_report_path = str(stats.get("report_path", ""))
+                    st.success(
+                        f"Import {run_id}: {int(stats['queued']):,} produktów w kolejce, "
+                        f"{int(stats['skipped_unchanged']):,} już gotowych i niezmienionych, "
+                        f"{int(stats['missing']):,} nie znaleziono, "
+                        f"{int(stats['inactive']):,} nieaktywnych, "
+                        f"{int(stats['without_description']):,} bez opisu.".replace(",", " ")
+                    )
+
+        else:
+            categories = akeneo_fetch_categories(token, locale)
+            category_options = {"": "Wszystkie kategorie"}
+            category_options.update({item["code"]: f"{item['label']} ({item['code']})" for item in categories})
+            selected_category = st.selectbox(
+                "Kategoria katalogu",
+                options=list(category_options),
+                format_func=lambda code: category_options[code],
+                key="scale_category",
             )
-            st.success(
-                f"Gotowe. Odczytano {stats['seen']}, dodano do kolejki {stats['queued']}, "
-                f"pominięto niezmienione {stats['skipped_unchanged']}."
+            max_products_input = st.number_input(
+                "Limit importu, 0 = cały katalog",
+                min_value=0,
+                max_value=500000,
+                value=0,
+                step=1000,
+            )
+            if st.button("1. Pobierz katalog i przygotuj kolejkę", type="primary"):
+                run_id = new_run_id("catalog")
+                progress_text = st.empty()
+
+                def catalog_callback(stats: Dict[str, int]) -> None:
+                    progress_text.info(
+                        f"Odczytano {stats['seen']} · w kolejce {stats['queued']} · "
+                        f"pominięto niezmienione {stats['skipped_unchanged']}"
+                    )
+
+                stats = import_catalog_to_meta_queue(
+                    token=token,
+                    channel=channel,
+                    locale=locale,
+                    store_view_code=st.session_state.magento_store_view,
+                    category=selected_category or None,
+                    enabled_only=enabled_only,
+                    only_with_description=only_with_description,
+                    max_products=int(max_products_input) or None,
+                    force_regenerate=force_regenerate,
+                    run_id=run_id,
+                    progress_callback=catalog_callback,
+                )
+                st.session_state.active_meta_run_id = run_id
+                st.success(
+                    f"Import {run_id}: odczytano {stats['seen']}, dodano do kolejki {stats['queued']}, "
+                    f"pominięto niezmienione {stats['skipped_unchanged']}."
+                )
+
+        runs = list_meta_runs()
+        run_ids = [row["run_id"] for row in runs]
+        active_run = st.session_state.get("active_meta_run_id", "")
+        if run_ids:
+            default_index = run_ids.index(active_run) if active_run in run_ids else 0
+            selected_run = st.selectbox(
+                "Aktywna partia",
+                options=run_ids,
+                index=default_index,
+                format_func=lambda run_id: next(
+                    (
+                        f"{run_id} · {row['product_count']} produktów · {row['source_type']}"
+                        for row in runs if row["run_id"] == run_id
+                    ),
+                    run_id,
+                ),
+                key="scale_active_run_select",
+            )
+            st.session_state.active_meta_run_id = selected_run
+        else:
+            selected_run = ""
+
+        report_path_value = st.session_state.get("last_import_report_path", "")
+        if report_path_value and Path(report_path_value).exists():
+            st.download_button(
+                "Pobierz raport SKU odrzuconych przy imporcie",
+                Path(report_path_value).read_bytes(),
+                Path(report_path_value).name,
+                "text/tab-separated-values",
             )
 
-        counts = meta_status_counts()
-        metrics = st.columns(5)
-        metrics[0].metric("W kolejce", counts.get("queued", 0))
-        metrics[1].metric("W batchach", counts.get("batch_submitted", 0))
-        metrics[2].metric("Gotowe", counts.get("completed", 0))
-        metrics[3].metric("Do poprawy", counts.get("validation_failed", 0))
-        metrics[4].metric("Błędy", counts.get("failed", 0))
+        if selected_run:
+            counts = meta_status_counts(selected_run)
+            metrics = st.columns(5)
+            metrics[0].metric("W kolejce", counts.get("queued", 0))
+            metrics[1].metric("W batchach", counts.get("batch_submitted", 0))
+            metrics[2].metric("Gotowe", counts.get("completed", 0))
+            metrics[3].metric("Do poprawy", counts.get("validation_failed", 0))
+            metrics[4].metric("Błędy", counts.get("failed", 0))
 
-        products_per_batch = st.number_input(
-            "Produktów w jednym pliku batch",
-            min_value=100,
-            max_value=20000,
-            value=BATCH_PRODUCTS_PER_FILE,
-            step=100,
-        )
-        if st.button("2. Wyślij oczekujące paczki do Gemini"):
-            with st.spinner("Tworzę pliki JSONL i wysyłam zadania..."):
-                submitted = submit_queued_batches(int(products_per_batch))
-            if submitted:
-                st.success(f"Utworzono {len(submitted)} zadań batch dla {sum(x['products'] for x in submitted)} produktów.")
-                st.dataframe(pd.DataFrame(submitted), use_container_width=True)
-            else:
-                st.info("Brak produktów ze statusem queued.")
-
-        if st.button("3. Odśwież statusy i odbierz zakończone wyniki"):
-            with st.spinner("Sprawdzam Batch API i zapisuję wyniki..."):
-                updates = refresh_and_ingest_batch_jobs()
-            if updates:
-                st.dataframe(pd.DataFrame(updates), use_container_width=True)
-            else:
-                st.info("Brak nieodebranych zadań batch.")
-
-        batch_rows = list_batch_jobs()
-        if batch_rows:
-            st.subheader("Zadania Batch API")
-            st.dataframe(
-                pd.DataFrame(batch_rows)[
-                    ["display_name", "state", "product_count", "created_at", "ingested_at", "error_message"]
-                ],
-                use_container_width=True,
-                hide_index=True,
+            products_per_batch = st.number_input(
+                "Produktów w jednym pliku batch",
+                min_value=100,
+                max_value=20000,
+                value=BATCH_PRODUCTS_PER_FILE,
+                step=100,
             )
+            if st.button("2. Wyślij oczekujące paczki tej partii do Gemini"):
+                with st.spinner("Tworzę pliki JSONL i wysyłam zadania..."):
+                    submitted = submit_queued_batches(int(products_per_batch), run_id=selected_run)
+                if submitted:
+                    st.success(
+                        f"Utworzono {len(submitted)} zadań batch dla "
+                        f"{sum(item['products'] for item in submitted)} produktów."
+                    )
+                    st.dataframe(pd.DataFrame(submitted), use_container_width=True)
+                else:
+                    st.info("Ta partia nie ma produktów ze statusem queued.")
+
+            if st.button("3. Odśwież statusy i odbierz wyniki tej partii"):
+                with st.spinner("Sprawdzam Batch API i zapisuję wyniki..."):
+                    updates = refresh_and_ingest_batch_jobs(run_id=selected_run)
+                if updates:
+                    st.dataframe(pd.DataFrame(updates), use_container_width=True)
+                else:
+                    st.info("Brak nieodebranych zadań batch w tej partii.")
+
+            batch_rows = list_batch_jobs(run_id=selected_run)
+            if batch_rows:
+                st.subheader("Zadania Batch API aktywnej partii")
+                st.dataframe(
+                    pd.DataFrame(batch_rows)[
+                        ["display_name", "state", "product_count", "created_at", "ingested_at", "error_message"]
+                    ],
+                    use_container_width=True,
+                    hide_index=True,
+                )
+        else:
+            st.info("Najpierw utwórz partię z listy SKU albo z katalogu.")
     except Exception as exc:
         st.error(str(exc))
 
 with results_tab:
     st.subheader("Kontrola jakości i eksport")
-    counts = meta_status_counts()
+    result_runs = list_meta_runs()
+    result_run_ids = [row["run_id"] for row in result_runs]
+    result_run = st.selectbox(
+        "Partia do kontroli",
+        options=[""] + result_run_ids,
+        format_func=lambda value: "Wszystkie partie" if not value else value,
+        index=(result_run_ids.index(st.session_state.active_meta_run_id) + 1)
+        if st.session_state.get("active_meta_run_id") in result_run_ids else 0,
+        key="results_run_filter",
+    )
+    counts = meta_status_counts(result_run or None)
     st.json(counts)
 
     col_audit, col_requeue = st.columns(2)
     if col_audit.button("Audytuj powtarzalne otwarcia"):
-        audit = audit_meta_jobs_for_repetition()
+        audit = audit_meta_jobs_for_repetition(run_id=result_run or None)
         st.success(f"Sprawdzono {audit['checked']} produktów, oznaczono {audit['flagged']} do poprawy.")
 
     if col_requeue.button("Przenieś błędne i powtarzalne do kolejki"):
-        count = requeue_jobs(["validation_failed", "failed"], "Ponowienie po kontroli jakości")
+        count = requeue_jobs(
+            ["validation_failed", "failed"],
+            "Ponowienie po kontroli jakości",
+            run_id=result_run or None,
+        )
         st.success(f"Do kolejki wróciło {count} produktów.")
 
     completed_count = counts.get("completed", 0)
     if completed_count:
         st.download_button(
             f"Pobierz CSV Magento - {completed_count} poprawnych produktów",
-            export_meta_csv(["completed"]),
+            export_meta_csv(["completed"], run_id=result_run or None),
             "magento_metatagi.tsv",
             "text/tab-separated-values",
         )
     st.download_button(
         "Pobierz raport jakości CSV",
-        export_quality_report_csv(),
+        export_quality_report_csv(run_id=result_run or None),
         "raport_jakosci_metatagow.csv",
         "text/csv",
     )
@@ -2606,7 +3016,11 @@ with results_tab:
         ["completed", "validation_failed", "failed", "queued", "batch_submitted"],
         default=["validation_failed", "failed"],
     )
-    preview_jobs = list_meta_jobs(statuses=status_filter or None, limit=500)
+    preview_jobs = list_meta_jobs(
+        statuses=status_filter or None,
+        limit=500,
+        run_id=result_run or None,
+    )
     if preview_jobs:
         preview_df = pd.DataFrame(preview_jobs)
         visible_columns = [
