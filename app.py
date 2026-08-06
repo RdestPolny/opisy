@@ -56,9 +56,9 @@ except ImportError:
 # STAŁE I KONFIGURACJA
 # ═══════════════════════════════════════════════════════════════════
 
-APP_VERSION = "4.1.1"
+APP_VERSION = "4.1.2"
 APP_NAME = "Generator opisów i metatagów produktów"
-PROMPT_VERSION = "meta-v4-seeded-diversity-2026-08"
+PROMPT_VERSION = "meta-v4-seeded-diversity-2026-08-penalty-free"
 DEFAULT_GEMINI_MODEL = "gemini-3.5-flash-lite"
 PERPLEXITY_MODEL = "sonar"
 PERPLEXITY_API_URL = "https://api.perplexity.ai/chat/completions"
@@ -1220,6 +1220,9 @@ def generate_meta_description_interactive(job: Dict) -> Dict:
             attempt,
         )
         try:
+            # Nie używamy frequency_penalty ani presence_penalty. Część modeli Gemini,
+            # w tym używany Flash-Lite, odrzuca te parametry błędem 400. Różnorodność
+            # zapewniają seed, plan otwarcia, walidacja sygnatur i kontrolowane retry.
             response = get_gemini_client().models.generate_content(
                 model=GEMINI_MODEL,
                 contents=build_meta_prompt(job, attempt, avoid),
@@ -1231,8 +1234,6 @@ def generate_meta_description_interactive(job: Dict) -> Dict:
                     temperature=0.9,
                     top_p=0.95,
                     max_output_tokens=250,
-                    frequency_penalty=0.25,
-                    presence_penalty=0.15,
                 ),
             )
             raw = strip_code_fences(response.text or "")
@@ -1909,13 +1910,12 @@ def batch_request_for_job(job: Dict, attempt: int = 0) -> Dict:
                 }
             ],
             "system_instruction": {"parts": [{"text": META_SYSTEM_PROMPT}]},
+            # Parametry penalty są celowo pominięte: nie są obsługiwane przez każdy model Gemini.
             "generation_config": {
                 "temperature": 0.9,
                 "top_p": 0.95,
                 "seed": style["seed"],
                 "max_output_tokens": 250,
-                "frequency_penalty": 0.25,
-                "presence_penalty": 0.15,
                 "response_mime_type": "application/json",
                 "response_schema": META_RESPONSE_SCHEMA,
             },
