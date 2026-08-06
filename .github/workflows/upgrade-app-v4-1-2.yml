@@ -1,0 +1,84 @@
+name: Upgrade app to v4.1.2
+
+on:
+  push:
+    paths:
+      - .github/workflows/upgrade-app-v4-1-2.yml
+
+permissions:
+  contents: write
+
+jobs:
+  upgrade:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Apply v4.1.2 compatibility fix
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path("app.py")
+          text = path.read_text(encoding="utf-8")
+
+          replacements = {
+              'APP_VERSION = "4.1.1"': 'APP_VERSION = "4.1.2"',
+              'PROMPT_VERSION = "meta-v4-seeded-diversity-2026-08"': 'PROMPT_VERSION = "meta-v4-seeded-diversity-2026-08-penalty-free"',
+              '''        try:
+            response = get_gemini_client().models.generate_content(''': '''        try:
+            # Nie używamy frequency_penalty ani presence_penalty. Część modeli Gemini,
+            # w tym używany Flash-Lite, odrzuca te parametry błędem 400. Różnorodność
+            # zapewniają seed, plan otwarcia, walidacja sygnatur i kontrolowane retry.
+            response = get_gemini_client().models.generate_content(''',
+              '''            "system_instruction": {"parts": [{"text": META_SYSTEM_PROMPT}]},
+            "generation_config": {''': '''            "system_instruction": {"parts": [{"text": META_SYSTEM_PROMPT}]},
+            # Parametry penalty są celowo pominięte: nie są obsługiwane przez każdy model Gemini.
+            "generation_config": {''',
+          }
+
+          for old, new in replacements.items():
+              if old not in text:
+                  raise SystemExit(f"Nie znaleziono oczekiwanego fragmentu: {old[:80]!r}")
+              text = text.replace(old, new, 1)
+
+          text = text.replace(
+              '''                    frequency_penalty=0.25,
+                    presence_penalty=0.15,
+''',
+              "",
+              1,
+          )
+          text = text.replace(
+              '''                "frequency_penalty": 0.25,
+                "presence_penalty": 0.15,
+''',
+              "",
+              1,
+          )
+
+          if "frequency_penalty=" in text or "presence_penalty=" in text:
+              raise SystemExit("Pozostały parametry penalty w konfiguracji interaktywnej")
+          if '"frequency_penalty"' in text or '"presence_penalty"' in text:
+              raise SystemExit("Pozostały parametry penalty w konfiguracji Batch API")
+
+          path.write_text(text, encoding="utf-8")
+          PY
+
+      - name: Validate Python syntax
+        run: python -m py_compile app.py
+
+      - name: Commit app.py
+        shell: bash
+        run: |
+          if git diff --quiet -- app.py; then
+            echo "No app.py changes required"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add app.py
+          git commit -m "Fix Gemini compatibility in app v4.1.2"
+          git push
