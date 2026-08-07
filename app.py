@@ -56,7 +56,7 @@ except ImportError:
 # STAŁE I KONFIGURACJA
 # ═══════════════════════════════════════════════════════════════════
 
-APP_VERSION = "4.5.1"
+APP_VERSION = "4.6.0"
 APP_NAME = "Generator opisów i metatagów produktów"
 PROMPT_VERSION = "meta-v4.4.4-validator-driven-title-autorepair-2026-08"
 DEFAULT_GEMINI_MODEL = "gemini-3.5-flash-lite"
@@ -633,6 +633,69 @@ def list_meta_jobs(
         params.append(int(limit))
     with db_connect() as conn:
         return [dict(row) for row in conn.execute(sql, params).fetchall()]
+
+
+def iter_meta_job_chunks(
+    *,
+    statuses: Sequence[str],
+    run_id: Optional[str],
+    chunk_size: int,
+) -> Iterator[List[Dict]]:
+    """Strumieniuje rekordy z SQLite bez ładowania 50k opisów naraz do RAM."""
+    if not statuses:
+        return
+    placeholders = ",".join("?" for _ in statuses)
+    sql = f"SELECT * FROM meta_jobs WHERE status IN ({placeholders})"
+    params: List[object] = list(statuses)
+    if run_id:
+        sql += " AND run_id=?"
+        params.append(run_id)
+    sql += " ORDER BY created_at ASC"
+    with db_connect() as conn:
+        cursor = conn.execute(sql, params)
+        while True:
+            rows = cursor.fetchmany(max(1, int(chunk_size)))
+            if not rows:
+                break
+            yield [dict(row) for row in rows]
+
+
+def recommended_batch_shard_size(product_count: int) -> int:
+    """Dobiera shard pod szybkie duże runy, zostawiając zapas do limitu 100 jobs."""
+    n = max(0, int(product_count))
+    if n <= 1200:
+        return max(100, n or BATCH_PRODUCTS_PER_FILE)
+    if n <= 5000:
+        return 750
+    return 1000
+
+
+def active_batch_job_count(run_id: Optional[str] = None) -> int:
+    terminal = {"JOB_STATE_SUCCEEDED", "JOB_STATE_FAILED", "JOB_STATE_CANCELLED", "JOB_STATE_EXPIRED"}
+    count = 0
+    for row in list_batch_jobs(run_id=run_id):
+        if row.get("ingested_at"):
+            continue
+        if str(row.get("state", "")) not in terminal:
+            count += 1
+    return count
+
+
+def estimate_batch_input_tokens(run_id: Optional[str], queued_count: int, sample_size: int = 24) -> Dict[str, float]:
+    """Lekki estymator planu. Nie wywołuje Gemini ani countTokens."""
+    sample = list_meta_jobs(
+        statuses=["queued"], limit=max(1, int(sample_size)), order_by="created_at ASC", run_id=run_id
+    )
+    if not sample or queued_count <= 0:
+        return {"avg_input_tokens": 0.0, "estimated_input_tokens": 0.0}
+    token_estimates = []
+    for job in sample:
+        chars = len(META_SYSTEM_PROMPT) + len(build_meta_prompt(job, int(job.get("attempts", 0)), ()))
+        # Dla PL/EN w tym zastosowaniu 3.6 znaku/token jest bezpieczniejszym
+        # przybliżeniem niż klasyczne 4 znaki/token.
+        token_estimates.append(chars / 3.6)
+    avg = sum(token_estimates) / len(token_estimates)
+    return {"avg_input_tokens": avg, "estimated_input_tokens": avg * int(queued_count)}
 
 
 def meta_status_counts(run_id: Optional[str] = None) -> Dict[str, int]:
@@ -2890,13 +2953,19 @@ def locked_fields_from_job(job: Dict) -> Tuple[str, str]:
 # - listy SKU są pobierane z Akeneo czterema równoległymi strumieniami, ale jeden
 #   globalny semafor pilnuje maksymalnie 4 równoczesnych requestów;
 # - zapisy importu i odbioru batchy korzystają z jednej transakcji / executemany;
-# - duży run jest automatycznie shardowany do maks. 2500 produktów na zadanie,
-#   a do 4 zadań Batch API jest wysyłanych równolegle.
+# - duży run jest automatycznie shardowany do ok. 1000 produktów na zadanie;
+# - do 12 plików jest uploadowanych równolegle, a run 50k może rozłożyć się na
+#   ok. 50 niezależnych zadań Batch API (z bezpiecznym soft capem 80 aktywnych);
+# - statusy są odpytywane równolegle, a gotowe pliki pobierane osobną pulą,
+#   dzięki czemu szybki shard nie czeka na najwolniejszy.
 
 PROMPT_VERSION = "meta-v4.4.4-validator-driven-title-autorepair-2026-08"
-BATCH_PRODUCTS_PER_FILE = 2500
-TURBO_BATCH_SHARD_SIZE = 2500
-BATCH_SUBMIT_WORKERS = 4
+BATCH_PRODUCTS_PER_FILE = 1000
+TURBO_BATCH_SHARD_SIZE = 1000
+BATCH_SUBMIT_WORKERS = 12
+BATCH_ACTIVE_JOB_SOFT_CAP = 80
+BATCH_MAX_SHARDS_PER_SUBMIT = 80
+BATCH_DOWNLOAD_WORKERS = 8
 META_DESCRIPTION_HARD_MIN = 120
 META_DESCRIPTION_HARD_MAX = 170
 META_DESCRIPTION_TARGET_MIN = 135
@@ -3354,6 +3423,38 @@ def import_skus_to_meta_queue(
     return stats
 
 
+def _remote_batches_by_display_name(display_names: Set[str], api_key: str) -> Dict[str, Dict]:
+    """Odzyskuje istniejące jobs po deterministycznej nazwie sharda.
+
+    Batch create nie jest idempotentne. Ten lookup chroni przed ponownym
+    naliczeniem kosztu, jeśli Streamlit padł po utworzeniu joba, ale przed
+    zapisaniem jego `job_name` do SQLite.
+    """
+    if not display_names:
+        return {}
+    wanted = set(display_names)
+    found: Dict[str, Dict] = {}
+    try:
+        client = genai.Client(api_key=api_key)
+        for batch_job in client.batches.list(config={"page_size": 100}):
+            display = str(getattr(batch_job, "display_name", "") or "")
+            if display not in wanted:
+                continue
+            found[display] = {
+                "job_name": batch_job.name,
+                "display_name": display,
+                "input_file_name": "",
+                "state": batch_state_name(batch_job),
+            }
+            if len(found) == len(wanted):
+                break
+    except Exception:
+        # Recovery jest dodatkowym bezpiecznikiem; awaria listowania nie blokuje
+        # normalnego submitu.
+        return {}
+    return found
+
+
 def _submit_single_batch_file(spec: Dict, api_key: str) -> Dict:
     client = genai.Client(api_key=api_key)
     uploaded_file = client.files.upload(
@@ -3380,34 +3481,97 @@ def submit_queued_batches(
     products_per_file: int = BATCH_PRODUCTS_PER_FILE,
     run_id: Optional[str] = None,
 ) -> List[Dict]:
-    queued = list_meta_jobs(statuses=["queued"], order_by="created_at ASC", run_id=run_id)
-    if not queued:
+    """Tworzy i wysyła wiele małych shardów bez trzymania całego runu w RAM.
+
+    Google dopuszcza do 100 równoczesnych batch jobs. Aplikacja celowo zostawia
+    zapas i utrzymuje soft cap 80 aktywnych zadań.
+    """
+    queued_count = int(meta_status_counts(run_id).get("queued", 0))
+    if queued_count <= 0:
         return []
 
-    # Dla dużych runów 10k+ nie tworzymy jednego monolitu. Mniejsze shardy kończą
-    # się niezależnie i mogą być odbierane bez czekania na najwolniejszy ogon.
     requested = max(100, int(products_per_file))
-    effective_size = min(requested, TURBO_BATCH_SHARD_SIZE) if len(queued) >= 5000 else requested
-    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    specs: List[Dict] = []
+    effective_size = min(requested, TURBO_BATCH_SHARD_SIZE) if queued_count >= 5000 else requested
 
-    for index in range(0, len(queued), effective_size):
-        chunk = queued[index:index + effective_size]
-        part = index // effective_size + 1
-        display_name = f"bookland-meta-{(run_id or 'all')[-18:]}-{timestamp}-{part:03d}"
+    active_jobs = active_batch_job_count(run_id)
+    available_slots = max(0, BATCH_ACTIVE_JOB_SOFT_CAP - active_jobs)
+    max_new_shards = min(BATCH_MAX_SHARDS_PER_SUBMIT, available_slots)
+    if max_new_shards <= 0:
+        return [{
+            "job_name": "",
+            "display_name": "soft-cap",
+            "products": 0,
+            "state": "WAIT_FOR_ACTIVE_BATCHES",
+            "error": f"Aktywnych zadań: {active_jobs}. Najpierw odbierz zakończone shardy.",
+        }]
+
+    specs: List[Dict] = []
+    for part, chunk in enumerate(
+        iter_meta_job_chunks(statuses=["queued"], run_id=run_id, chunk_size=effective_size),
+        start=1,
+    ):
+        if len(specs) >= max_new_shards:
+            break
+        job_keys = [job["job_key"] for job in chunk]
+        shard_fingerprint = hashlib.sha1(
+            (PROMPT_VERSION + "|" + "|".join(job_keys)).encode("utf-8")
+        ).hexdigest()[:12]
+        display_name = f"bookland-meta-{(run_id or 'all')[-14:]}-{part:03d}-{shard_fingerprint}"
         input_path = BATCH_DIR / f"{display_name}.jsonl"
         write_batch_jsonl(chunk, input_path)
         specs.append({
             "display_name": display_name,
             "input_path": input_path,
-            "chunk": chunk,
+            "job_keys": job_keys,
             "products": len(chunk),
+            "input_mb": round(input_path.stat().st_size / (1024 * 1024), 2),
         })
+        # `chunk` znika po iteracji; nie kumulujemy opisów 50k produktów w pamięci.
+
+    if not specs:
+        return []
 
     submitted: List[Dict] = []
     api_key = str(st.secrets["GOOGLE_API_KEY"])
-    with ThreadPoolExecutor(max_workers=min(BATCH_SUBMIT_WORKERS, len(specs))) as executor:
-        futures = {executor.submit(_submit_single_batch_file, spec, api_key): spec for spec in specs}
+
+    # Najpierw odzyskaj ewentualne zdalne jobs utworzone przed crashem UI.
+    recovered = _remote_batches_by_display_name(
+        {spec["display_name"] for spec in specs}, api_key
+    )
+    specs_to_submit: List[Dict] = []
+    for spec in specs:
+        remote = recovered.get(spec["display_name"])
+        if not remote:
+            specs_to_submit.append(spec)
+            continue
+        register_batch_job(
+            job_name=remote["job_name"],
+            run_id=run_id or "",
+            display_name=spec["display_name"],
+            input_path=spec["input_path"],
+            input_file_name=remote.get("input_file_name", ""),
+            product_count=spec["products"],
+            state=remote["state"],
+        )
+        now = utcnow_iso()
+        with db_connect() as conn:
+            conn.executemany(
+                "UPDATE meta_jobs SET status='batch_submitted', batch_job_name=?, updated_at=? WHERE job_key=?",
+                [(remote["job_name"], now, key) for key in spec["job_keys"]],
+            )
+        submitted.append({
+            "job_name": remote["job_name"],
+            "display_name": spec["display_name"],
+            "products": spec["products"],
+            "input_mb": spec.get("input_mb", 0),
+            "state": f"RECOVERED:{remote['state']}",
+        })
+
+    if not specs_to_submit:
+        return sorted(submitted, key=lambda item: item["display_name"])
+
+    with ThreadPoolExecutor(max_workers=min(BATCH_SUBMIT_WORKERS, len(specs_to_submit))) as executor:
+        futures = {executor.submit(_submit_single_batch_file, spec, api_key): spec for spec in specs_to_submit}
         for future in as_completed(futures):
             spec = futures[future]
             try:
@@ -3425,19 +3589,23 @@ def submit_queued_batches(
                 with db_connect() as conn:
                     conn.executemany(
                         "UPDATE meta_jobs SET status='batch_submitted', batch_job_name=?, updated_at=? WHERE job_key=?",
-                        [(result["job_name"], now, job["job_key"]) for job in result["chunk"]],
+                        [(result["job_name"], now, key) for key in result["job_keys"]],
                     )
                 submitted.append({
                     "job_name": result["job_name"],
                     "display_name": result["display_name"],
                     "products": result["products"],
+                    "input_mb": result.get("input_mb", 0),
                     "state": result["state"],
                 })
             except Exception as exc:
+                # Rekordy pozostają queued, więc ponowne kliknięcie wyśle wyłącznie
+                # shard, którego faktycznie nie udało się zarejestrować.
                 submitted.append({
                     "job_name": "",
                     "display_name": spec["display_name"],
                     "products": spec["products"],
+                    "input_mb": spec.get("input_mb", 0),
                     "state": "SUBMIT_FAILED",
                     "error": str(exc),
                 })
@@ -3623,7 +3791,7 @@ def revalidate_meta_jobs_v44(run_id: Optional[str] = None) -> Dict[str, int]:
 PROMPT_VERSION = "meta-v4.4.4-validator-driven-title-autorepair-2026-08"
 META_RECENT_OPENINGS_HINT = 0
 GEMINI_META_MAX_OUTPUT_TOKENS = 320
-BATCH_REFRESH_WORKERS = 4
+BATCH_REFRESH_WORKERS = 20
 
 
 def description_context_limit(job: Dict) -> int:
@@ -4048,8 +4216,10 @@ def batch_request_for_job(job: Dict, attempt: int = 0) -> Dict:
             "contents": [{"role": "user", "parts": [{"text": build_meta_prompt(job, attempt, ())}]}],
             "system_instruction": {"parts": [{"text": META_SYSTEM_PROMPT}]},
             "generation_config": {
-                "temperature": 0.68,
-                "top_p": 0.90,
+                # Gemini 3.5 Flash-Lite ma `minimal` jako domyślny thinking.
+                # Nie dodajemy opcjonalnych pól konfiguracyjnych do JSONL, aby
+                # zachować maksymalną zgodność Batch API. Sampling params są w
+                # Gemini 3.5 deprecated, więc nie wysyłamy temperature/top_p.
                 "seed": style["seed"],
                 "max_output_tokens": GEMINI_META_MAX_OUTPUT_TOKENS,
                 "response_mime_type": "application/json",
@@ -4060,7 +4230,7 @@ def batch_request_for_job(job: Dict, attempt: int = 0) -> Dict:
 
 
 def _refresh_single_batch_remote(stored: Dict, api_key: str) -> Dict:
-    """Tylko operacje sieciowe; bez zapisu SQLite w wątku."""
+    """Szybki status check bez pobierania dużego outputu w tym samym workerze."""
     client = genai.Client(api_key=api_key)
     batch_job = client.batches.get(name=stored["job_name"])
     state = batch_state_name(batch_job)
@@ -4071,69 +4241,91 @@ def _refresh_single_batch_remote(stored: Dict, api_key: str) -> Dict:
         output_file_name = dest.file_name
     if getattr(batch_job, "error", None):
         error_message = str(batch_job.error)
-    content = None
-    if state == "JOB_STATE_SUCCEEDED" and output_file_name:
-        content = client.files.download(file=output_file_name)
     return {
         "stored": stored,
         "state": state,
         "output_file_name": output_file_name,
         "error_message": error_message,
-        "content": content,
     }
 
 
+def _download_batch_output(output_file_name: str, api_key: str) -> bytes:
+    client = genai.Client(api_key=api_key)
+    return client.files.download(file=output_file_name)
+
+
 def refresh_and_ingest_batch_jobs(run_id: Optional[str] = None) -> List[Dict]:
-    """Równolegle sprawdza do 4 shardów, następnie bezpiecznie zapisuje wyniki."""
+    """Szybko odpytuje wszystkie shardy, potem równolegle pobiera tylko gotowe.
+
+    Dzięki rozdzieleniu status-check od downloadu jeden duży plik wynikowy nie
+    blokuje odpytywania pozostałych 40–50 zadań.
+    """
     pending = [stored for stored in list_batch_jobs(run_id=run_id) if not stored["ingested_at"]]
     if not pending:
         return []
 
-    updates: List[Dict] = []
     api_key = str(st.secrets["GOOGLE_API_KEY"])
-    remote_results: List[Dict] = []
+    updates_by_job: Dict[str, Dict] = {}
+    succeeded_for_download: List[Dict] = []
+
+    # Etap 1: statusy — lekka operacja, więc większa pula workerów.
     with ThreadPoolExecutor(max_workers=min(BATCH_REFRESH_WORKERS, len(pending))) as executor:
-        futures = {
-            executor.submit(_refresh_single_batch_remote, stored, api_key): stored
-            for stored in pending
-        }
+        futures = {executor.submit(_refresh_single_batch_remote, stored, api_key): stored for stored in pending}
         for future in as_completed(futures):
             stored = futures[future]
             try:
-                remote_results.append(future.result())
+                result = future.result()
+                state = result["state"]
+                output_file_name = result["output_file_name"]
+                error_message = result["error_message"]
+                with db_connect() as conn:
+                    conn.execute(
+                        """
+                        UPDATE batch_jobs SET state=?, output_file_name=?, error_message=?, updated_at=?
+                        WHERE job_name=?
+                        """,
+                        (state, output_file_name, error_message[:2000], utcnow_iso(), stored["job_name"]),
+                    )
+                updates_by_job[stored["job_name"]] = {
+                    "job_name": stored["job_name"], "state": state, "ingested": False
+                }
+                if state == "JOB_STATE_SUCCEEDED" and output_file_name:
+                    succeeded_for_download.append({**stored, "output_file_name": output_file_name})
+                elif state in {"JOB_STATE_FAILED", "JOB_STATE_CANCELLED", "JOB_STATE_EXPIRED"}:
+                    with db_connect() as conn:
+                        conn.execute(
+                            """
+                            UPDATE meta_jobs SET status='failed', error_message=?, updated_at=?
+                            WHERE batch_job_name=? AND status='batch_submitted'
+                            """,
+                            (error_message or state, utcnow_iso(), stored["job_name"]),
+                        )
             except Exception as exc:
-                updates.append({
-                    "job_name": stored["job_name"], "state": "ERROR", "error": str(exc)
-                })
+                updates_by_job[stored["job_name"]] = {
+                    "job_name": stored["job_name"], "state": "STATUS_ERROR", "error": str(exc), "ingested": False
+                }
 
-    for result in remote_results:
-        stored = result["stored"]
-        state = result["state"]
-        output_file_name = result["output_file_name"]
-        error_message = result["error_message"]
-        with db_connect() as conn:
-            conn.execute(
-                """
-                UPDATE batch_jobs SET state=?, output_file_name=?, error_message=?, updated_at=?
-                WHERE job_name=?
-                """,
-                (state, output_file_name, error_message[:2000], utcnow_iso(), stored["job_name"]),
-            )
-        update = {"job_name": stored["job_name"], "state": state, "ingested": False}
-        if state == "JOB_STATE_SUCCEEDED" and result["content"] is not None:
-            update["stats"] = ingest_batch_result_bytes(stored["job_name"], result["content"])
-            update["ingested"] = True
-        elif state in {"JOB_STATE_FAILED", "JOB_STATE_CANCELLED", "JOB_STATE_EXPIRED"}:
-            with db_connect() as conn:
-                conn.execute(
-                    """
-                    UPDATE meta_jobs SET status='failed', error_message=?, updated_at=?
-                    WHERE batch_job_name=? AND status='batch_submitted'
-                    """,
-                    (error_message or state, utcnow_iso(), stored["job_name"]),
-                )
-        updates.append(update)
-    return sorted(updates, key=lambda item: item.get("job_name", ""))
+    # Etap 2: tylko gotowe outputy. Downloady lecą równolegle, a ingest następuje
+    # od razu po ukończeniu konkretnego pliku.
+    if succeeded_for_download:
+        with ThreadPoolExecutor(max_workers=min(BATCH_DOWNLOAD_WORKERS, len(succeeded_for_download))) as executor:
+            futures = {
+                executor.submit(_download_batch_output, row["output_file_name"], api_key): row
+                for row in succeeded_for_download
+            }
+            for future in as_completed(futures):
+                row = futures[future]
+                update = updates_by_job[row["job_name"]]
+                try:
+                    content = future.result()
+                    update["stats"] = ingest_batch_result_bytes(row["job_name"], content)
+                    update["ingested"] = True
+                except Exception as exc:
+                    update["download_error"] = str(exc)
+                    # ingested_at pozostaje pusty — kolejne odświeżenie spróbuje
+                    # pobrać ten sam output bez ponownego generowania przez Gemini.
+
+    return sorted(updates_by_job.values(), key=lambda item: item.get("job_name", ""))
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -4677,7 +4869,7 @@ with interactive_tab:
             f"(plik wgrany {seed_count}, serwer CSV {server_checkpoint_count}, SQLite {sqlite_count})."
         )
         st.caption(
-            f"Tryb stabilny v4.5.1: paczki po {INTERACTIVE_CHUNK_SIZE}, {GEMINI_INTERACTIVE_WORKERS} równoległe workery, "
+            f"Tryb stabilny v4.6.0: paczki po {INTERACTIVE_CHUNK_SIZE}, {GEMINI_INTERACTIVE_WORKERS} równoległe workery, "
             f"timeout Gemini {GEMINI_HTTP_TIMEOUT_MS // 1000}s. Wynik jest zapisywany po każdym SKU."
         )
 
@@ -4972,41 +5164,79 @@ with scale_tab:
             metrics[3].metric("Do poprawy", counts.get("validation_failed", 0))
             metrics[4].metric("Błędy", counts.get("failed", 0))
 
-            products_per_batch = st.number_input(
-                "Docelowy rozmiar zadania Batch API",
-                min_value=100,
-                max_value=10000,
-                value=BATCH_PRODUCTS_PER_FILE,
-                step=100,
+            queued_count = int(counts.get("queued", 0))
+            recommended_size = recommended_batch_shard_size(queued_count)
+            auto_shard = st.checkbox(
+                "Automatyczny Turbo Sharding (zalecane)",
+                value=True,
+                help="Dla dużych runów celuje w ok. 1000 SKU/shard. 50k ≈ 50 niezależnych jobs zamiast jednego wielkiego zadania.",
             )
-            st.caption("Tryb Turbo: runy od 5000 produktów są automatycznie dzielone na shardy maks. 2500 SKU i do 4 zadań jest wysyłanych równolegle.")
-            if st.button("2. Wyślij oczekujące paczki tej partii do Gemini"):
-                with st.spinner("Tworzę pliki JSONL i wysyłam zadania..."):
+            if auto_shard:
+                products_per_batch = recommended_size
+                st.text_input("Rozmiar sharda", value=str(products_per_batch), disabled=True)
+            else:
+                products_per_batch = st.number_input(
+                    "Rozmiar sharda Batch API",
+                    min_value=250,
+                    max_value=5000,
+                    value=BATCH_PRODUCTS_PER_FILE,
+                    step=250,
+                )
+
+            shard_count = (queued_count + int(products_per_batch) - 1) // int(products_per_batch) if queued_count else 0
+            active_jobs = active_batch_job_count(selected_run)
+            estimate = estimate_batch_input_tokens(selected_run, queued_count)
+            plan_cols = st.columns(4)
+            plan_cols[0].metric("SKU do wysłania", queued_count)
+            plan_cols[1].metric("Planowane shardy", shard_count)
+            plan_cols[2].metric("Aktywne jobs", active_jobs)
+            plan_cols[3].metric(
+                "Szac. input",
+                f"{estimate['estimated_input_tokens'] / 1_000_000:.1f}M tok." if estimate['estimated_input_tokens'] else "0",
+            )
+            st.caption(
+                "Batch Turbo v4.6: ok. 1000 SKU/shard, do 12 równoległych uploadów, soft cap 80 aktywnych jobs, "
+                "20 równoległych status-checków i 8 downloadów. Gotowe shardy są odbierane niezależnie. "
+                "Gemini 3.5 Flash-Lite ma domyślny minimal thinking; nie dokładamy zbędnych parametrów JSONL."
+            )
+
+            col_submit, col_refresh, col_repair = st.columns(3)
+            if col_submit.button("2. Wyślij wszystkie możliwe shardy", type="primary"):
+                with st.spinner("Buduję JSONL i równolegle wysyłam shardy..."):
                     submitted = submit_queued_batches(int(products_per_batch), run_id=selected_run)
                 if submitted:
-                    st.success(
-                        f"Utworzono {len(submitted)} zadań batch dla "
-                        f"{sum(item['products'] for item in submitted)} produktów."
-                    )
+                    sent_products = sum(item.get("products", 0) for item in submitted if item.get("job_name"))
+                    sent_jobs = sum(1 for item in submitted if item.get("job_name"))
+                    st.success(f"Wysłano {sent_jobs} jobs dla {sent_products:,} produktów.".replace(",", " "))
                     st.dataframe(pd.DataFrame(submitted), use_container_width=True)
                 else:
                     st.info("Ta partia nie ma produktów ze statusem queued.")
 
-            if st.button("3. Odśwież statusy i odbierz wyniki tej partii"):
-                with st.spinner("Sprawdzam Batch API i zapisuję wyniki..."):
+            if col_refresh.button("3. Odbierz wszystkie gotowe shardy"):
+                with st.spinner("Równolegle sprawdzam statusy i pobieram tylko gotowe outputy..."):
                     updates = refresh_and_ingest_batch_jobs(run_id=selected_run)
                 if updates:
+                    ingested_now = sum(1 for row in updates if row.get("ingested"))
+                    st.success(f"Odebrano teraz {ingested_now} gotowych shardów.")
                     st.dataframe(pd.DataFrame(updates), use_container_width=True)
                 else:
                     st.info("Brak nieodebranych zadań batch w tej partii.")
 
+            repair_count = int(counts.get("validation_failed", 0))
+            if col_repair.button(f"4. Przygotuj repair batch ({repair_count})", disabled=repair_count == 0):
+                moved = requeue_jobs(
+                    ["validation_failed"],
+                    "Repair batch po walidacji",
+                    run_id=selected_run,
+                )
+                st.success(f"Do repair queue przeniesiono {moved} produktów. Kliknij ponownie wysyłkę shardów.")
+
             batch_rows = list_batch_jobs(run_id=selected_run)
             if batch_rows:
                 st.subheader("Zadania Batch API aktywnej partii")
+                batch_df = pd.DataFrame(batch_rows)
                 st.dataframe(
-                    pd.DataFrame(batch_rows)[
-                        ["display_name", "state", "product_count", "created_at", "ingested_at", "error_message"]
-                    ],
+                    batch_df[["display_name", "state", "product_count", "created_at", "ingested_at", "error_message"]],
                     use_container_width=True,
                     hide_index=True,
                 )
@@ -5030,9 +5260,9 @@ with results_tab:
     counts = meta_status_counts(result_run or None)
     st.json(counts)
 
-    st.caption("v4.4.1: podobne początki i duplikaty meta description nie blokują eksportu. Poziomy meta title są sprawdzane przede wszystkim względem nazwy produktu, nie linków i opisów innych wariantów.")
+    st.caption("v4.6: podobne początki i duplikaty meta description nie blokują eksportu. Poziomy meta title są sprawdzane przede wszystkim względem nazwy produktu, nie linków i opisów innych wariantów.")
     col_revalidate, col_audit, col_requeue = st.columns(3)
-    if col_revalidate.button("Przelicz walidację v4.4.1 bez AI"):
+    if col_revalidate.button("Przelicz walidację v4.6 bez AI"):
         audit = revalidate_meta_jobs_v44(run_id=result_run or None)
         st.success(
             f"Sprawdzono {audit['checked']} produktów. Bez regenerowania zaakceptowano {audit['promoted']}; "
