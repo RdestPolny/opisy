@@ -56,9 +56,9 @@ except ImportError:
 # STAŁE I KONFIGURACJA
 # ═══════════════════════════════════════════════════════════════════
 
-APP_VERSION = "4.3.0"
+APP_VERSION = "4.4.1"
 APP_NAME = "Generator opisów i metatagów produktów"
-PROMPT_VERSION = "meta-v4.3-candidates-ranker-grounded-2026-08"
+PROMPT_VERSION = "meta-v4.4.1-turbo-soft-validation-title-level-fix-2026-08"
 DEFAULT_GEMINI_MODEL = "gemini-3.5-flash-lite"
 PERPLEXITY_MODEL = "sonar"
 PERPLEXITY_API_URL = "https://api.perplexity.ai/chat/completions"
@@ -70,7 +70,7 @@ PERPLEXITY_TIMEOUT = 45
 AKENEO_MAX_WORKERS = 4
 GEMINI_INTERACTIVE_WORKERS = 3
 INTERACTIVE_CHUNK_SIZE = 100
-BATCH_PRODUCTS_PER_FILE = 5000
+BATCH_PRODUCTS_PER_FILE = 2500
 AKENEO_SKU_FILTER_CHUNK_SIZE = 50
 MAX_META_RETRIES = 2
 RESULT_PREVIEW_LIMIT = 200
@@ -910,63 +910,6 @@ def clean_author_for_prompt(value: str, description: str = "") -> Tuple[str, str
     return author, "Autor może być użyty wyłącznie wtedy, gdy zwiększa trafność i mieści się bez skracania istoty produktu."
 
 
-def extract_title_signals(raw_title: str, description: str = "") -> Dict[str, List[str]]:
-    """Wyciąga sygnały, których AI nie powinno zgubić podczas skracania nazwy."""
-    source = normalize_spaces(f"{strip_html(raw_title)} {strip_html(description)[:1200]}")
-    title_only = normalize_spaces(strip_html(raw_title))
-
-    levels: List[str] = []
-    for match in re.findall(r"(?<![A-Za-z0-9])(?:C2 Proficiency|C1 Advanced|B2 First|C1-C2|Pre-?A1|A1\+?|A2\+?|B1\+?|B2\+?|C1\+?|C2)(?![A-Za-z0-9])", source, flags=re.IGNORECASE):
-        canonical = normalize_spaces(match)
-        if canonical.lower() not in {item.lower() for item in levels}:
-            levels.append(canonical)
-
-    platforms = [
-        name for name in ("MyEnglishLab", "Pearson English Portal", "Pearson Practice English App", "App", "Online Practice")
-        if re.search(re.escape(name), source, flags=re.IGNORECASE)
-    ]
-    formats = [
-        name for name in ("eBook", "eText", "PDF", "audio", "video", "CD", "DVD", "online")
-        if re.search(rf"\b{re.escape(name)}\b", source, flags=re.IGNORECASE)
-    ]
-
-    audience: List[str] = []
-    if re.search(r"teacher|nauczyciel", source, flags=re.IGNORECASE):
-        audience.append("nauczyciel")
-    if re.search(r"student|uczni|learner", source, flags=re.IGNORECASE):
-        audience.append("uczeń")
-
-    access: List[str] = []
-    if re.search(r"access|kod\s+(?:uczniowski|nauczyciel)|code|licenc", source, flags=re.IGNORECASE):
-        access.append("kod lub dostęp cyfrowy")
-    if re.search(r"without\s+key|no\s+key|bez\s+klucza|bez\s+kodu", source, flags=re.IGNORECASE):
-        access.append("bez kodu / klucza")
-
-    components: List[str] = []
-    for english, polish in TITLE_COMPONENT_TRANSLATIONS:
-        if re.search(re.escape(english), source, flags=re.IGNORECASE):
-            components.append(f"{english} → {polish}")
-
-    # Najważniejsze tokeny identyfikujące serię lub tytuł. Zachowujemy kolejność.
-    identity_tokens: List[str] = []
-    for token in re.findall(r"[A-Za-zÀ-ž0-9][A-Za-zÀ-ž0-9'+.-]*", clean_source_title_for_prompt(title_only)):
-        normalized = normalize_for_compare(token)
-        if len(normalized) < 2 or normalized in TITLE_GENERIC_TOKENS:
-            continue
-        if normalized not in {normalize_for_compare(item) for item in identity_tokens}:
-            identity_tokens.append(token)
-        if len(identity_tokens) >= 6:
-            break
-
-    return {
-        "levels": levels,
-        "platforms": platforms,
-        "formats": formats,
-        "audience": audience,
-        "access": access,
-        "components": components,
-        "identity_tokens": identity_tokens,
-    }
 
 
 def title_signal_summary(signals: Dict[str, List[str]]) -> str:
@@ -998,186 +941,14 @@ def existing_meta_title_owners(exclude_job_key: Optional[str] = None) -> Dict[st
     return owners
 
 
-def meta_title_validation_errors(
-    meta_title: str,
-    job: Dict,
-    *,
-    existing_title_owners: Optional[Dict[str, str]] = None,
-) -> List[str]:
-    errors: List[str] = []
-    title = normalize_spaces(strip_html(meta_title)).strip('"„”')
-    normalized = normalize_for_compare(title)
-    source_title = clean_source_title_for_prompt(job.get("title", ""))
-    signals = extract_title_signals(job.get("title", ""), job.get("description", ""))
-
-    if not title:
-        return ["Brak meta title"]
-    if len(title) > 60:
-        errors.append(f"Za długi meta title: {len(title)} zn. (maks. 60)")
-    if len(title) < 18 and len(source_title) >= 35:
-        errors.append(f"Meta title jest zbyt ogólny lub zbyt krótki: {len(title)} zn.")
-    if "..." in title or title.endswith("…"):
-        errors.append("Meta title zawiera wielokropek lub wygląda na ucięty")
-    if re.search(r"https?://|www\.", title, flags=re.IGNORECASE):
-        errors.append("Meta title zawiera URL")
-    if re.search(r"\b(praca\s*zbiorowa|pracazbiorowa)\b", normalized):
-        errors.append("Meta title zawiera techniczną wartość autora: praca zbiorowa")
-    if any(re.search(pattern, title, flags=re.IGNORECASE) for pattern in TITLE_INTERNAL_NOISE_PATTERNS):
-        errors.append("Meta title zawiera oznaczenie wewnętrzne lub status produktu")
-    if title.endswith(("-", "–", "—", "|", ":", ",", ";", "/", "+")):
-        errors.append("Meta title kończy się separatorem i wygląda na urwany")
-
-    final_word_match = re.search(r"([A-Za-zÀ-ž]+(?:'[A-Za-zÀ-ž]+)?)\s*$", title)
-    if final_word_match and normalize_for_compare(final_word_match.group(1)) in TITLE_DANGLING_WORDS:
-        errors.append(f"Meta title kończy się urwanym lub zbyt ogólnym słowem: {final_word_match.group(1)}")
-
-    # Tytuł musi zachować identyfikację produktu, a nie tylko rodzaj materiału.
-    source_identity = [normalize_for_compare(item) for item in signals.get("identity_tokens", [])]
-    title_tokens = set(re.findall(r"[a-z0-9]+", normalized))
-    if source_identity and not any(token in title_tokens or token in normalized for token in source_identity[:4]):
-        errors.append("Meta title zgubił nazwę serii lub główną tożsamość produktu")
-
-    for level in signals.get("levels", []):
-        if normalize_for_compare(level) not in normalized:
-            errors.append(f"Meta title zgubił poziom lub oznaczenie egzaminu: {level}")
-
-    source = normalize_for_compare(job.get("title", ""))
-    if re.search(r"teacher|nauczyciel", source) and not re.search(r"teacher|nauczyciel", normalized):
-        errors.append("Meta title nie odróżnia wariantu nauczycielskiego")
-    if re.search(r"student|uczni", source) and not re.search(r"student|uczen|uczni", normalized):
-        errors.append("Meta title nie odróżnia wariantu uczniowskiego")
-    if "ebook" in source and "ebook" not in normalized:
-        errors.append("Meta title zgubił format eBook")
-    if "etext" in source and "etext" not in normalized:
-        errors.append("Meta title zgubił format eText")
-    if "myenglishlab" in source and "myenglishlab" not in normalized:
-        errors.append("Meta title zgubił platformę MyEnglishLab")
-    if re.search(r"access|code|kod uczni|kod nauczyciel", source) and not re.search(r"kod|dostep|access", normalized):
-        errors.append("Meta title zgubił informację o kodzie lub dostępie")
-    if re.search(r"without key|no key|bez klucza|bez kodu", source) and not re.search(r"bez (?:kodu|klucza)", normalized):
-        errors.append("Meta title zgubił informację, że produkt jest bez kodu lub klucza")
-
-    if any(normalized.startswith(normalize_for_compare(prefix)) for prefix in ("kup", "sprawdz", "odkryj", "poznaj")):
-        errors.append("Meta title zaczyna się od CTA")
-
-    if existing_title_owners:
-        owner = existing_title_owners.get(normalized)
-        if owner and str(owner) != str(job.get("sku", "")):
-            errors.append(f"Identyczny meta title istnieje już dla innego SKU: {owner}")
-
-    return list(dict.fromkeys(errors))
 
 
 # ═══════════════════════════════════════════════════════════════════
 # WALIDACJA METATAGÓW I OCHRONA PRZED POWTARZALNYM SCHEMATEM
 # ═══════════════════════════════════════════════════════════════════
 
-def meta_validation_errors(
-    meta_description: str,
-    *,
-    existing_long_signatures: Optional[Set[str]] = None,
-    existing_short_signatures: Optional[Counter] = None,
-    recent_descriptions: Optional[Sequence[str]] = None,
-) -> List[str]:
-    errors: List[str] = []
-    text = normalize_spaces(strip_html(meta_description)).strip('"„”')
-    normalized = normalize_for_compare(text)
-
-    if not text:
-        return ["Brak meta description"]
-    if len(text) < 140:
-        errors.append(f"Za krótki meta description: {len(text)} zn.")
-    if len(text) > 160:
-        errors.append(f"Za długi meta description: {len(text)} zn.")
-
-    if any(normalized.startswith(normalize_for_compare(prefix)) for prefix in BANNED_STARTERS):
-        errors.append("Zakazane lub szablonowe otwarcie")
-    if any(normalize_for_compare(phrase) in normalized for phrase in BANNED_CTA_PHRASES):
-        errors.append("Meta description zawiera CTA lub język sklepu")
-    if re.search(r"https?://|www\.", text, flags=re.IGNORECASE):
-        errors.append("Meta description zawiera URL")
-    if "..." in text or text.endswith("…"):
-        errors.append("Meta description kończy się wielokropkiem")
-    if re.search(r"\b(xyz|lorem|ipsum|placeholder)\b", normalized):
-        errors.append("Meta description zawiera placeholder")
-
-    long_sig = opening_signature(text, 6)
-    short_sig = opening_signature(text, 3)
-    if existing_long_signatures and long_sig in existing_long_signatures:
-        errors.append("Powtórzone pierwsze 6 słów")
-    if existing_short_signatures and existing_short_signatures.get(short_sig, 0) >= 3:
-        errors.append("Trzywyrazowy schemat otwarcia został już wykorzystany co najmniej 3 razy")
-
-    if recent_descriptions:
-        prefix = normalize_for_compare(text)[:90]
-        for other in recent_descriptions:
-            other_prefix = normalize_for_compare(other)[:90]
-            if prefix and other_prefix and SequenceMatcher(None, prefix, other_prefix).ratio() >= 0.86:
-                errors.append("Początek zbyt podobny do innego meta description")
-                break
-
-    return list(dict.fromkeys(errors))
 
 
-def audit_meta_jobs_for_repetition(run_id: Optional[str] = None) -> Dict[str, int]:
-    """Oznacza powtarzalne otwarcia i identyczne meta descriptions do ponownej generacji."""
-    jobs = list_meta_jobs(
-        statuses=["completed"],
-        order_by="created_at ASC",
-        run_id=run_id,
-    )
-    seen_long: Dict[str, str] = {}
-    seen_short: Dict[str, int] = Counter()
-    seen_hash: Dict[str, str] = {}
-    seen_titles: Dict[str, str] = {}
-    flagged: Dict[str, List[str]] = {}
-
-    for job in jobs:
-        long_sig = job.get("opening_signature", "")
-        short_sig = job.get("short_opening_signature", "")
-        norm_hash = job.get("normalized_hash", "")
-        title_key = normalize_for_compare(job.get("meta_title", ""))
-        reasons: List[str] = []
-
-        title_errors = meta_title_validation_errors(job.get("meta_title", ""), job)
-        reasons.extend(title_errors)
-        if title_key and title_key in seen_titles and seen_titles[title_key] != job["sku"]:
-            reasons.append(f"Identyczny meta title jak SKU {seen_titles[title_key]}")
-        elif title_key:
-            seen_titles[title_key] = job["sku"]
-
-        if norm_hash and norm_hash in seen_hash:
-            reasons.append(f"Identyczny meta description jak {seen_hash[norm_hash]}")
-        elif norm_hash:
-            seen_hash[norm_hash] = job["sku"]
-
-        if long_sig and long_sig in seen_long:
-            reasons.append(f"Powtórzone pierwsze 6 słów jak {seen_long[long_sig]}")
-        elif long_sig:
-            seen_long[long_sig] = job["sku"]
-
-        if short_sig:
-            seen_short[short_sig] += 1
-            if seen_short[short_sig] > 3:
-                reasons.append("Trzywyrazowy schemat otwarcia występuje ponad 3 razy")
-
-        if reasons:
-            flagged[job["job_key"]] = reasons
-
-    with db_connect() as conn:
-        for job_key, reasons in flagged.items():
-            conn.execute(
-                """
-                UPDATE meta_jobs SET status='validation_failed', validation_errors=?, updated_at=?
-                WHERE job_key=?
-                """,
-                (json.dumps(reasons, ensure_ascii=False), utcnow_iso(), job_key),
-            )
-
-    return {
-        "checked": len(jobs),
-        "flagged": len(flagged),
-    }
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -1249,90 +1020,6 @@ WSPÓLNE ZASADY
 """
 
 
-def build_meta_prompt(
-    job: Dict,
-    attempt: int = 0,
-    avoid_openings: Sequence[str] = (),
-    previous_meta_title: str = "",
-    previous_meta_description: str = "",
-    previous_errors: Sequence[str] = (),
-) -> str:
-    style = build_style_plan(
-        job["sku"],
-        job.get("title", ""),
-        job.get("author", ""),
-        job.get("description", ""),
-        attempt,
-    )
-    raw_title = normalize_spaces(strip_html(job.get("title", "")))
-    cleaned_title = clean_source_title_for_prompt(raw_title)
-    description = smart_truncate(strip_html(job.get("description", "")), 3200)
-    author, author_note = clean_author_for_prompt(job.get("author", ""), description)
-    signals = extract_title_signals(raw_title, description)
-    avoid_block = "\n".join(f"- {item}" for item in avoid_openings[:20]) or "- brak"
-    cues = ", ".join(style["semantic_cues"]) or "brak wyraźnych słów kluczowych"
-
-    retry_block = ""
-    prior_title = previous_meta_title or (job.get("meta_title", "") if attempt > 0 else "")
-    prior_description = previous_meta_description or (job.get("meta_description", "") if attempt > 0 else "")
-    prior_errors = list(previous_errors)
-    if not prior_errors and attempt > 0:
-        raw_errors = job.get("validation_errors", "")
-        if isinstance(raw_errors, str) and raw_errors:
-            try:
-                prior_errors = list(json.loads(raw_errors))
-            except Exception:
-                prior_errors = [raw_errors]
-    if attempt > 0 or prior_errors:
-        retry_block = f"""
-POPRZEDNIA PRÓBA - NIE POWTARZAJ JEJ BŁĘDÓW
-Poprzedni meta title: {prior_title or 'brak'}
-Poprzedni meta description: {prior_description or 'brak'}
-Błędy walidatora:
-{chr(10).join(f'- {error}' for error in prior_errors) or '- brak zapisanych błędów'}
-Utwórz nową wersję, która naprawia wszystkie błędy, zamiast kosmetycznie zmieniać poprzedni wynik.
-"""
-
-    return f"""Przygotuj kompletną parę metatagów dla jednego, konkretnego produktu.
-
-DANE PRODUKTU
-SKU: {job['sku']}
-Surowa nazwa z Akeneo: {raw_title}
-Nazwa po usunięciu oczywistych oznaczeń technicznych: {cleaned_title}
-Autor / marka: {author or 'brak wiarygodnych danych'}
-Uwaga o autorze: {author_note}
-Dane dodatkowe: {job.get('details', '') or 'brak'}
-Opis źródłowy: {description or 'brak opisu'}
-
-SYGNAŁY, KTÓRYCH NIE WOLNO ZGUBIĆ W META TITLE
-{title_signal_summary(signals)}
-
-INSTRUKCJA DECYZYJNA DLA META TITLE
-- Najpierw ustal, czy to zwykła książka, materiał edukacyjny, komponent kursu, kod cyfrowy, eBook/eText, słownik czy inny produkt.
-- Następnie wybierz najkrótszy naturalny zapis, który jednoznacznie odróżnia ten SKU od innych wariantów.
-- Zachowaj serię/tytuł, poziom oraz najważniejszy wyróżnik wariantu.
-- Nie kopiuj całej surowej nazwy, jeśli można ją zredagować czytelniej.
-- Nie skracaj mechanicznie od prawej strony. Jeśli brakuje miejsca, usuń element o najniższym priorytecie.
-- Autor jest opcjonalny; poziom, format, platforma i odbiorca wariantu mają pierwszeństwo.
-
-INDYWIDUALNY PLAN META DESCRIPTION
-Seed stylu: {style['seed']}
-Sposób otwarcia: {style['opening_mode']}
-Rytm: {style['rhythm_mode']}
-Główny fokus: {style['focus_mode']}
-Sygnały semantyczne ze źródła: {cues}
-Pierwszy konkretny fragment źródła: {style['source_lead'] or 'brak'}
-
-POCZĄTKI META DESCRIPTION, KTÓRYCH NIE WOLNO POWTARZAĆ
-{avoid_block}
-{retry_block}
-KONTROLA PRZED ZWROTEM JSON
-- Policz znaki meta_title. Maksymalnie 60, bez urwanej końcówki.
-- Sprawdź, czy meta_title nadal rozróżnia poziom, format, odbiorcę i rodzaj dostępu obecne w danych.
-- Policz znaki meta_description. Musi mieć 140-160 znaków.
-- Sprawdź, czy żadne pole nie zawiera CTA, nazwy sklepu, danych zmyślonych ani oznaczeń magazynowych.
-- Zwróć dokładnie jeden obiekt JSON z oboma polami.
-"""
 
 
 def build_system_prompt_full(internal_link: Optional[Dict] = None) -> str:
@@ -1521,80 +1208,6 @@ def generate_description(
         return f"BŁĄD GEMINI: {exc}"
 
 
-def generate_metatags_interactive(job: Dict) -> Dict:
-    long_signatures, short_signatures = existing_opening_signatures(job["job_key"])
-    recent_full = [row["meta_description"] for row in list_meta_jobs(statuses=["completed"], limit=40)]
-    title_owners = existing_meta_title_owners(job["job_key"])
-    avoid = recent_opening_examples(20)
-    last_title = ""
-    last_description = ""
-    last_errors: List[str] = []
-
-    for attempt in range(MAX_META_RETRIES + 1):
-        style = build_style_plan(
-            job["sku"],
-            job.get("title", ""),
-            job.get("author", ""),
-            job.get("description", ""),
-            attempt,
-        )
-        try:
-            response = get_gemini_client().models.generate_content(
-                model=GEMINI_MODEL,
-                contents=build_meta_prompt(
-                    job,
-                    attempt,
-                    avoid,
-                    previous_meta_title=last_title,
-                    previous_meta_description=last_description,
-                    previous_errors=last_errors,
-                ),
-                config=types.GenerateContentConfig(
-                    system_instruction=META_SYSTEM_PROMPT,
-                    response_mime_type="application/json",
-                    response_schema=META_RESPONSE_SCHEMA,
-                    seed=style["seed"],
-                    temperature=0.82,
-                    top_p=0.95,
-                    max_output_tokens=360,
-                ),
-            )
-            raw = strip_code_fences(response.text or "")
-            data = json.loads(raw)
-            last_title = normalize_spaces(strip_html(str(data.get("meta_title", "")))).strip('"„”')
-            last_description = normalize_spaces(strip_html(str(data.get("meta_description", "")))).strip('"„”')
-
-            title_errors = meta_title_validation_errors(
-                last_title,
-                job,
-                existing_title_owners=title_owners,
-            )
-            description_errors = meta_validation_errors(
-                last_description,
-                existing_long_signatures=long_signatures,
-                existing_short_signatures=short_signatures,
-                recent_descriptions=recent_full,
-            )
-            last_errors = [*title_errors, *description_errors]
-            if not last_errors:
-                return {
-                    "meta_title": last_title,
-                    "meta_description": last_description,
-                    "attempts": attempt + 1,
-                    "validation_errors": [],
-                    "error": "",
-                }
-            avoid = [*avoid, first_words(last_description, 8)]
-        except Exception as exc:
-            last_errors = [f"Błąd Gemini lub JSON: {exc}"]
-
-    return {
-        "meta_title": last_title or build_meta_title(job.get("title", ""), job.get("author", "")),
-        "meta_description": last_description,
-        "attempts": MAX_META_RETRIES + 1,
-        "validation_errors": last_errors,
-        "error": "; ".join(last_errors),
-    }
 
 
 def normalize_sku_list(values: Iterable[str]) -> Tuple[List[str], int]:
@@ -1781,73 +1394,8 @@ def parse_akeneo_product(item: Dict, channel: str, locale: str) -> Dict:
     }
 
 
-def akeneo_get_product_details(
-    sku: str,
-    token: str,
-    channel: str = DEFAULT_CHANNEL,
-    locale: str = DEFAULT_LOCALE,
-) -> Optional[Dict]:
-    response = request_with_retry(
-        "GET",
-        _akeneo_root() + f"/api/rest/v1/products/{sku}",
-        headers=akeneo_headers(token),
-    )
-    if response.status_code == 404:
-        return None
-    response.raise_for_status()
-    return parse_akeneo_product(response.json(), channel, locale)
 
 
-def akeneo_fetch_products_by_identifiers(
-    token: str,
-    channel: str,
-    locale: str,
-    identifiers: Sequence[str],
-) -> Dict[str, Dict]:
-    """Pobiera jedną małą paczkę SKU jednym zapytaniem do endpointu kolekcji."""
-    if not identifiers:
-        return {}
-    search = {"identifier": [{"operator": "IN", "value": list(identifiers)}]}
-    params: Dict[str, object] = {
-        "limit": 100,
-        "scope": channel,
-        "locales": locale,
-        "with_count": "false",
-        "search": json.dumps(search, ensure_ascii=False),
-    }
-    existing_attributes = akeneo_existing_attribute_codes(token)
-    if existing_attributes:
-        params["attributes"] = ",".join(existing_attributes)
-    response = request_with_retry(
-        "GET",
-        _akeneo_root() + "/api/rest/v1/products",
-        headers=akeneo_headers(token),
-        params=params,
-    )
-
-    # Część starszych lub niestandardowo skonfigurowanych instalacji Akeneo
-    # może nie obsługiwać operatora IN dla identyfikatora produktu. Wtedy
-    # zachowujemy poprawność i przechodzimy na kontrolowany fallback 4-wątkowy.
-    if response.status_code in {400, 414, 422}:
-        products: Dict[str, Dict] = {}
-        with ThreadPoolExecutor(max_workers=AKENEO_MAX_WORKERS) as executor:
-            futures = {
-                executor.submit(akeneo_get_product_details, sku, token, channel, locale): sku
-                for sku in identifiers
-            }
-            for future in as_completed(futures):
-                product = future.result()
-                if product and product.get("identifier"):
-                    products[product["identifier"]] = product
-        return products
-
-    response.raise_for_status()
-    products = {}
-    for item in response.json().get("_embedded", {}).get("items", []):
-        parsed = parse_akeneo_product(item, channel, locale)
-        if parsed.get("identifier"):
-            products[parsed["identifier"]] = parsed
-    return products
 
 
 def akeneo_iter_products_search_after(
@@ -2223,35 +1771,6 @@ def process_product_from_akeneo(
 # GEMINI BATCH API DLA DUŻEJ SKALI
 # ═══════════════════════════════════════════════════════════════════
 
-def batch_request_for_job(job: Dict, attempt: int = 0) -> Dict:
-    style = build_style_plan(
-        job["sku"],
-        job.get("title", ""),
-        job.get("author", ""),
-        job.get("description", ""),
-        attempt,
-    )
-    return {
-        "key": job["job_key"],
-        "request": {
-            "contents": [
-                {
-                    "role": "user",
-                    "parts": [{"text": build_meta_prompt(job, attempt, ())}],
-                }
-            ],
-            "system_instruction": {"parts": [{"text": META_SYSTEM_PROMPT}]},
-            # Parametry penalty są celowo pominięte: nie są obsługiwane przez każdy model Gemini.
-            "generation_config": {
-                "temperature": 0.82,
-                "top_p": 0.95,
-                "seed": style["seed"],
-                "max_output_tokens": 360,
-                "response_mime_type": "application/json",
-                "response_schema": META_RESPONSE_SCHEMA,
-            },
-        },
-    }
 
 
 def write_batch_jsonl(jobs: Sequence[Dict], path: Path) -> None:
@@ -2311,62 +1830,6 @@ def list_batch_jobs(run_id: Optional[str] = None) -> List[Dict]:
         return [dict(row) for row in conn.execute(sql, params).fetchall()]
 
 
-def submit_queued_batches(
-    products_per_file: int = BATCH_PRODUCTS_PER_FILE,
-    run_id: Optional[str] = None,
-) -> List[Dict]:
-    queued = list_meta_jobs(statuses=["queued"], order_by="created_at ASC", run_id=run_id)
-    if not queued:
-        return []
-
-    submitted: List[Dict] = []
-    client = get_gemini_client()
-    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    for index in range(0, len(queued), products_per_file):
-        chunk = queued[index : index + products_per_file]
-        part = index // products_per_file + 1
-        display_name = f"bookland-meta-{(run_id or 'all')[-18:]}-{timestamp}-{part:03d}"
-        input_path = BATCH_DIR / f"{display_name}.jsonl"
-        write_batch_jsonl(chunk, input_path)
-
-        uploaded_file = client.files.upload(
-            file=str(input_path),
-            config=types.UploadFileConfig(display_name=display_name, mime_type="jsonl"),
-        )
-        batch_job = client.batches.create(
-            model=GEMINI_MODEL,
-            src=uploaded_file.name,
-            config={"display_name": display_name},
-        )
-        state = getattr(getattr(batch_job, "state", None), "name", None) or str(
-            getattr(batch_job, "state", "JOB_STATE_PENDING")
-        )
-        register_batch_job(
-            job_name=batch_job.name,
-            run_id=run_id or "",
-            display_name=display_name,
-            input_path=input_path,
-            input_file_name=uploaded_file.name,
-            product_count=len(chunk),
-            state=state,
-        )
-        with db_connect() as conn:
-            conn.executemany(
-                """
-                UPDATE meta_jobs SET status='batch_submitted', batch_job_name=?, updated_at=?
-                WHERE job_key=?
-                """,
-                [(batch_job.name, utcnow_iso(), job["job_key"]) for job in chunk],
-            )
-        submitted.append(
-            {
-                "job_name": batch_job.name,
-                "display_name": display_name,
-                "products": len(chunk),
-                "state": state,
-            }
-        )
-    return submitted
 
 
 def batch_state_name(batch_job) -> str:
@@ -2396,201 +1859,14 @@ def extract_batch_response_text(payload: Dict) -> Tuple[str, str]:
     raise RuntimeError("Brak tekstu w odpowiedzi batch")
 
 
-def ingest_batch_result_bytes(job_name: str, content: bytes) -> Dict[str, int]:
-    decoded = content.decode("utf-8")
-    lines = [line for line in decoded.splitlines() if line.strip()]
-    long_signatures, short_signatures = existing_opening_signatures()
-    recent_descriptions = [row["meta_description"] for row in list_meta_jobs(statuses=["completed"], limit=80)]
-    title_owners = existing_meta_title_owners()
-    stats = {"completed": 0, "validation_failed": 0, "failed": 0}
-
-    for line in lines:
-        try:
-            payload = json.loads(line)
-            key, text = extract_batch_response_text(payload)
-            if not key:
-                raise RuntimeError("Brak klucza zadania w odpowiedzi")
-            job = get_meta_job(key)
-            if not job:
-                raise RuntimeError(f"Nieznany klucz zadania: {key}")
-            data = json.loads(strip_code_fences(text))
-            meta_title = normalize_spaces(strip_html(str(data.get("meta_title", "")))).strip('"„”')
-            meta_description = normalize_spaces(strip_html(str(data.get("meta_description", "")))).strip('"„”')
-            title_errors = meta_title_validation_errors(
-                meta_title,
-                job,
-                existing_title_owners=title_owners,
-            )
-            description_errors = meta_validation_errors(
-                meta_description,
-                existing_long_signatures=long_signatures,
-                existing_short_signatures=short_signatures,
-                recent_descriptions=recent_descriptions,
-            )
-            errors = [*title_errors, *description_errors]
-            status = "completed" if not errors else "validation_failed"
-            save_meta_result(
-                key,
-                meta_title=meta_title,
-                meta_description=meta_description,
-                status=status,
-                attempts=int(job.get("attempts", 0)) + 1,
-                validation_errors=errors,
-                error_message="; ".join(errors),
-            )
-            if status == "completed":
-                long_signatures.add(opening_signature(meta_description, 6))
-                short_signatures[opening_signature(meta_description, 3)] += 1
-                recent_descriptions.append(meta_description)
-                recent_descriptions = recent_descriptions[-80:]
-                title_owners[normalize_for_compare(meta_title)] = str(job["sku"])
-            stats[status] += 1
-        except Exception as exc:
-            stats["failed"] += 1
-            try:
-                payload = json.loads(line)
-                key = str(payload.get("key") or payload.get("metadata", {}).get("key") or "")
-                if key:
-                    set_meta_job_error(key, str(exc))
-            except Exception:
-                pass
-
-    with db_connect() as conn:
-        conn.execute(
-            "UPDATE batch_jobs SET ingested_at=?, updated_at=? WHERE job_name=?",
-            (utcnow_iso(), utcnow_iso(), job_name),
-        )
-    return stats
 
 
-def refresh_and_ingest_batch_jobs(run_id: Optional[str] = None) -> List[Dict]:
-    client = get_gemini_client()
-    updates: List[Dict] = []
-    for stored in list_batch_jobs(run_id=run_id):
-        if stored["ingested_at"]:
-            continue
-        try:
-            batch_job = client.batches.get(name=stored["job_name"])
-            state = batch_state_name(batch_job)
-            output_file_name = ""
-            error_message = ""
-            dest = getattr(batch_job, "dest", None)
-            if dest and getattr(dest, "file_name", None):
-                output_file_name = dest.file_name
-            if getattr(batch_job, "error", None):
-                error_message = str(batch_job.error)
-            with db_connect() as conn:
-                conn.execute(
-                    """
-                    UPDATE batch_jobs SET state=?, output_file_name=?, error_message=?, updated_at=?
-                    WHERE job_name=?
-                    """,
-                    (state, output_file_name, error_message[:2000], utcnow_iso(), stored["job_name"]),
-                )
-            update = {"job_name": stored["job_name"], "state": state, "ingested": False}
-            if state == "JOB_STATE_SUCCEEDED" and output_file_name:
-                content = client.files.download(file=output_file_name)
-                update["stats"] = ingest_batch_result_bytes(stored["job_name"], content)
-                update["ingested"] = True
-            elif state in {"JOB_STATE_FAILED", "JOB_STATE_CANCELLED", "JOB_STATE_EXPIRED"}:
-                with db_connect() as conn:
-                    conn.execute(
-                        """
-                        UPDATE meta_jobs SET status='failed', error_message=?, updated_at=?
-                        WHERE batch_job_name=? AND status='batch_submitted'
-                        """,
-                        (error_message or state, utcnow_iso(), stored["job_name"]),
-                    )
-            updates.append(update)
-        except Exception as exc:
-            updates.append({"job_name": stored["job_name"], "state": "ERROR", "error": str(exc)})
-    return updates
 
 
 # ═══════════════════════════════════════════════════════════════════
 # IMPORT DUŻEGO KATALOGU I EKSPORT
 # ═══════════════════════════════════════════════════════════════════
 
-def import_skus_to_meta_queue(
-    *,
-    skus: Sequence[str],
-    token: str,
-    channel: str,
-    locale: str,
-    store_view_code: str,
-    enabled_only: bool,
-    only_with_description: bool,
-    force_regenerate: bool,
-    run_id: str,
-    progress_callback=None,
-) -> Dict[str, object]:
-    unique_skus, duplicate_count = normalize_sku_list(skus)
-    stats: Dict[str, object] = {
-        "run_id": run_id,
-        "input": len(skus),
-        "unique": len(unique_skus),
-        "duplicates": duplicate_count,
-        "found": 0,
-        "queued": 0,
-        "skipped_unchanged": 0,
-        "inactive": 0,
-        "without_description": 0,
-        "missing": 0,
-        "processed": 0,
-    }
-    missing_skus: List[str] = []
-    inactive_skus: List[str] = []
-    without_description_skus: List[str] = []
-
-    for sku_chunk in chunks(unique_skus, AKENEO_SKU_FILTER_CHUNK_SIZE):
-        products = akeneo_fetch_products_by_identifiers(token, channel, locale, sku_chunk)
-        for sku in sku_chunk:
-            stats["processed"] = int(stats["processed"]) + 1
-            product = products.get(sku)
-            if not product:
-                stats["missing"] = int(stats["missing"]) + 1
-                missing_skus.append(sku)
-                continue
-            stats["found"] = int(stats["found"]) + 1
-            if enabled_only and not product.get("enabled", False):
-                stats["inactive"] = int(stats["inactive"]) + 1
-                inactive_skus.append(sku)
-                continue
-            if only_with_description and not strip_html(product.get("description", "")):
-                stats["without_description"] = int(stats["without_description"]) + 1
-                without_description_skus.append(sku)
-                continue
-
-            product_data = _prepare_product_data(product)
-            _, queued = upsert_meta_job(
-                sku=sku,
-                channel=channel,
-                locale=locale,
-                store_view_code=store_view_code,
-                product_data=product_data,
-                source_updated=product.get("updated", ""),
-                force_regenerate=force_regenerate,
-                run_id=run_id,
-                source_type="sku_list",
-            )
-            if queued:
-                stats["queued"] = int(stats["queued"]) + 1
-            else:
-                stats["skipped_unchanged"] = int(stats["skipped_unchanged"]) + 1
-
-        if progress_callback:
-            progress_callback(stats)
-
-    IMPORT_REPORT_DIR.mkdir(parents=True, exist_ok=True)
-    report_path = IMPORT_REPORT_DIR / f"{run_id}-odrzucone.tsv"
-    with report_path.open("w", encoding="utf-8-sig", newline="") as handle:
-        writer = csv.writer(handle, delimiter="\t", lineterminator="\n")
-        writer.writerow(["sku", "powod"])
-        writer.writerows((sku, "nie znaleziono w Akeneo") for sku in missing_skus)
-        writer.writerows((sku, "produkt nieaktywny") for sku in inactive_skus)
-        writer.writerows((sku, "brak opisu źródłowego") for sku in without_description_skus)
-    stats["report_path"] = str(report_path)
-    return stats
 
 
 def import_catalog_to_meta_queue(
@@ -2811,50 +2087,8 @@ def normalize_generated_meta_title(value: str) -> str:
     return normalize_spaces(title)
 
 
-def source_product_type(job: Dict) -> str:
-    source = normalize_for_compare(f"{job.get('title', '')} {strip_html(job.get('description', ''))[:1200]}")
-    has_access = bool(re.search(r"\b(access|code|kod|licenc|portal)\b", source))
-    if has_access and re.search(r"teacher|nauczyciel", source):
-        return "teacher_access_code"
-    if has_access and re.search(r"student|uczen|uczni|learner", source):
-        return "student_access_code"
-    if "ebook" in source and re.search(r"online practice|myenglishlab|portal|access", source):
-        return "digital_course_bundle"
-    if "etext" in source:
-        return "etext"
-    if "ebook" in source:
-        return "ebook"
-    if re.search(r"online practice|cwiczenia online", source):
-        return "online_practice"
-    if re.search(r"workbook|activity book|zeszyt cwiczen", source):
-        return "workbook"
-    if re.search(r"student'?s book|coursebook|podrecznik", source):
-        return "textbook"
-    if re.search(r"slownik|dictionary", source):
-        return "dictionary"
-    if re.search(r"klasa\s+\d|liceum|technikum|szkola podstawowa|matura", source):
-        return "school_book"
-    if job.get("author") and not re.search(r"access|code|kod|ebook|etext|online practice", source):
-        return "general_book"
-    return "other"
 
 
-def title_required_features(job: Dict) -> Dict[str, object]:
-    signals = extract_title_signals(job.get("title", ""), job.get("description", ""))
-    source = normalize_for_compare(job.get("title", ""))
-    return {
-        "type": source_product_type(job),
-        "signals": signals,
-        "student": bool(re.search(r"student|uczen|uczni|learner", source)),
-        "teacher": bool(re.search(r"teacher|nauczyciel", source)),
-        "access": bool(re.search(r"access|code|kod\s+(?:uczni|nauczyciel)|licenc", source)),
-        "without_code": bool(re.search(r"without key|no key|bez klucza|bez kodu", source)),
-        "ebook": "ebook" in source,
-        "etext": "etext" in source,
-        "myenglishlab": "myenglishlab" in source,
-        "online_practice": "online practice" in source,
-        "teacher_portal": bool(re.search(r"teacher\s+s?\s+portal|teachers?\s+portal", source)),
-    }
 
 
 def meta_title_validation_errors(
@@ -3068,61 +2302,6 @@ def select_best_meta_title_candidate(
     return best_title, best_errors, diagnostics
 
 
-def meta_validation_errors(
-    meta_description: str,
-    *,
-    existing_long_signatures: Optional[Set[str]] = None,
-    existing_short_signatures: Optional[Counter] = None,
-    recent_descriptions: Optional[Sequence[str]] = None,
-    job: Optional[Dict] = None,
-) -> List[str]:
-    errors: List[str] = []
-    text = normalize_spaces(strip_html(meta_description)).strip('"„”')
-    normalized = normalize_for_compare(text)
-
-    if not text:
-        return ["Brak meta description"]
-    if len(text) < 140:
-        errors.append(f"Za krótki meta description: {len(text)} zn.")
-    if len(text) > 160:
-        errors.append(f"Za długi meta description: {len(text)} zn.")
-    if any(normalized.startswith(normalize_for_compare(prefix)) for prefix in BANNED_STARTERS):
-        errors.append("Zakazane, sprzedażowe lub sztuczne otwarcie")
-    if any(normalize_for_compare(phrase) in normalized for phrase in BANNED_CTA_PHRASES):
-        errors.append("Meta description zawiera CTA lub język sklepu")
-    if "?" in text:
-        errors.append("Meta description używa retorycznego pytania")
-    if re.search(r"https?://|www\.", text, flags=re.IGNORECASE):
-        errors.append("Meta description zawiera URL")
-    if "..." in text or text.endswith("…"):
-        errors.append("Meta description kończy się wielokropkiem")
-    if re.search(r"\b(xyz|lorem|ipsum|placeholder)\b", normalized):
-        errors.append("Meta description zawiera placeholder")
-
-    # Model nie może dodawać liczb, okresów licencji ani numerów, których nie ma
-    # w nazwie lub opisie źródłowym.
-    if job:
-        source = normalize_for_compare(f"{job.get('title', '')} {strip_html(job.get('description', ''))}")
-        generated_numbers = set(re.findall(r"\b\d+(?:[.,]\d+)?\b", normalized))
-        source_numbers = set(re.findall(r"\b\d+(?:[.,]\d+)?\b", source))
-        unsupported = sorted(generated_numbers - source_numbers)
-        if unsupported:
-            errors.append("Meta description dodaje liczby nieobecne w źródle: " + ", ".join(unsupported[:5]))
-
-    long_sig = opening_signature(text, 6)
-    short_sig = opening_signature(text, 3)
-    if existing_long_signatures and long_sig in existing_long_signatures:
-        errors.append("Powtórzone pierwsze 6 słów")
-    if existing_short_signatures and existing_short_signatures.get(short_sig, 0) >= 3:
-        errors.append("Trzywyrazowy schemat otwarcia został już wykorzystany co najmniej 3 razy")
-    if recent_descriptions:
-        prefix = normalize_for_compare(text)[:90]
-        for other in recent_descriptions:
-            other_prefix = normalize_for_compare(other)[:90]
-            if prefix and other_prefix and SequenceMatcher(None, prefix, other_prefix).ratio() >= 0.88:
-                errors.append("Początek zbyt podobny do innego meta description")
-                break
-    return list(dict.fromkeys(errors))
 
 
 META_SYSTEM_PROMPT = """Jesteś seniorem SEO e-commerce, redaktorem informacji produktowej i specjalistą od katalogów edukacyjnych Bookland.
@@ -3182,6 +2361,1001 @@ Korzystaj wyłącznie z przekazanych danych. Zwróć tylko obiekt JSON zgodny ze
 """
 
 
+
+
+
+
+
+
+def locked_fields_from_job(job: Dict) -> Tuple[str, str]:
+    errors = parse_validation_error_list(job.get("validation_errors", ""))
+    title_errors, description_errors = split_field_errors(errors)
+    locked_title = job.get("meta_title", "") if job.get("meta_title") and not title_errors and int(job.get("attempts", 0)) > 0 else ""
+    locked_description = job.get("meta_description", "") if job.get("meta_description") and not description_errors and int(job.get("attempts", 0)) > 0 else ""
+    return locked_title, locked_description
+
+
+
+
+
+# ═══════════════════════════════════════════════════════════════════
+# V4.4: TURBO BATCH + ŁAGODNIEJSZA WALIDACJA + POPRAWNE POZIOMY
+# ═══════════════════════════════════════════════════════════════════
+#
+# Najważniejsze zmiany względem v4.3:
+# - poziom/egzamin wymagany w meta title pochodzi przede wszystkim z NAZWY SKU;
+#   opis źródłowy nie może już narzucić np. B2 produktowi C1 tylko dlatego, że
+#   wspomina poziom sąsiedni, serię lub ścieżkę progresji;
+# - podobne początki meta description są sygnałem jakościowym, ale NIE blokują
+#   produktu. Przy dużych katalogach naturalne jest, że wiele opisów zaczyna się
+#   podobnie;
+# - twardy zakres meta description jest szerszy (120-170 znaków), natomiast
+#   prompt nadal celuje w ok. 135-160;
+# - 3 kandydatury meta title zamiast 4: mniej tokenów wyjściowych, ten sam lokalny
+#   ranker i praktycznie ten sam poziom bezpieczeństwa;
+# - opis wejściowy jest kompresowany semantycznie do ok. 1600 znaków;
+# - listy SKU są pobierane z Akeneo czterema równoległymi strumieniami, ale jeden
+#   globalny semafor pilnuje maksymalnie 4 równoczesnych requestów;
+# - zapisy importu i odbioru batchy korzystają z jednej transakcji / executemany;
+# - duży run jest automatycznie shardowany do maks. 2500 produktów na zadanie,
+#   a do 4 zadań Batch API jest wysyłanych równolegle.
+
+PROMPT_VERSION = "meta-v4.4.1-turbo-soft-validation-title-level-fix-2026-08"
+BATCH_PRODUCTS_PER_FILE = 2500
+TURBO_BATCH_SHARD_SIZE = 2500
+BATCH_SUBMIT_WORKERS = 4
+META_DESCRIPTION_HARD_MIN = 120
+META_DESCRIPTION_HARD_MAX = 170
+META_DESCRIPTION_TARGET_MIN = 135
+META_DESCRIPTION_TARGET_MAX = 160
+META_RECENT_OPENINGS_HINT = 0
+AKENEO_REQUEST_SEMAPHORE = threading.BoundedSemaphore(AKENEO_MAX_WORKERS)
+
+
+def extract_level_tokens(value: str) -> List[str]:
+    """Wyciąga poziomy CEFR/egzaminy bez mieszania poziomów z innych pól."""
+    text = normalize_spaces(strip_html(value))
+    pattern = (
+        r"(?<![A-Za-z0-9])(?:C2\s+Proficiency|C1\s+Advanced|B2\s+First|"
+        r"C1\s*[-–]\s*C2|Pre-?A1|A1\+?|A2\+?|B1\+?|B2\+?|C1\+?|C2)(?![A-Za-z0-9])"
+    )
+    result: List[str] = []
+    seen: Set[str] = set()
+    for match in re.findall(pattern, text, flags=re.IGNORECASE):
+        canonical = normalize_spaces(match).replace("–", "-")
+        key = normalize_for_compare(canonical)
+        if key not in seen:
+            seen.add(key)
+            result.append(canonical)
+    return result
+
+
+def extract_title_signals(raw_title: str, description: str = "") -> Dict[str, List[str]]:
+    """Sygnały produktu z rozdzieleniem twardych danych nazwy i miękkiego opisu.
+
+    Poziom z nazwy produktu jest wiążący. Dopiero gdy nazwa NIE zawiera poziomu,
+    wolno użyć poziomu z opisu, i tylko gdy opis wskazuje dokładnie jeden poziom.
+    Dzięki temu Business Partner C1 nie zostanie błędnie odrzucony z powodu B2
+    wspomnianego w opisie źródłowym.
+    """
+    title_only = normalize_spaces(strip_html(raw_title))
+    desc_only = normalize_spaces(strip_html(description))
+    source = normalize_spaces(f"{title_only} {desc_only[:1200]}")
+
+    title_levels = extract_level_tokens(title_only)
+    desc_levels = extract_level_tokens(desc_only[:1800])
+    if title_levels:
+        levels = title_levels
+    else:
+        unique_desc = []
+        seen_desc: Set[str] = set()
+        for level in desc_levels:
+            key = normalize_for_compare(level)
+            if key not in seen_desc:
+                seen_desc.add(key)
+                unique_desc.append(level)
+        levels = unique_desc if len(unique_desc) == 1 else []
+
+    platforms = [
+        name for name in (
+            "MyEnglishLab", "Pearson English Portal", "Pearson Practice English App",
+            "Teacher's Portal", "Online Practice"
+        )
+        if re.search(re.escape(name), source, flags=re.IGNORECASE)
+    ]
+    formats = [
+        name for name in ("eBook", "eText", "PDF", "audio", "video", "CD", "DVD", "online")
+        if re.search(rf"\b{re.escape(name)}\b", source, flags=re.IGNORECASE)
+    ]
+
+    audience: List[str] = []
+    if re.search(r"teacher|nauczyciel", source, flags=re.IGNORECASE):
+        audience.append("nauczyciel")
+    if re.search(r"student|uczni|learner", source, flags=re.IGNORECASE):
+        audience.append("uczeń")
+
+    access: List[str] = []
+    if re.search(r"access|kod\s+(?:uczniowski|nauczyciel)|code|licenc", source, flags=re.IGNORECASE):
+        access.append("kod lub dostęp cyfrowy")
+    if re.search(r"without\s+key|no\s+key|bez\s+klucza|bez\s+kodu", source, flags=re.IGNORECASE):
+        access.append("bez kodu / klucza")
+
+    components: List[str] = []
+    for english, polish in TITLE_COMPONENT_TRANSLATIONS:
+        if re.search(re.escape(english), source, flags=re.IGNORECASE):
+            components.append(f"{english} → {polish}")
+
+    identity_tokens: List[str] = []
+    for token in re.findall(r"[A-Za-zÀ-ž0-9][A-Za-zÀ-ž0-9'+.-]*", clean_source_title_for_prompt(title_only)):
+        normalized = normalize_for_compare(token)
+        if len(normalized) < 2 or normalized in TITLE_GENERIC_TOKENS:
+            continue
+        if normalized not in {normalize_for_compare(item) for item in identity_tokens}:
+            identity_tokens.append(token)
+        if len(identity_tokens) >= 6:
+            break
+
+    return {
+        "levels": levels,
+        "title_levels": title_levels,
+        "description_levels": desc_levels,
+        "platforms": platforms,
+        "formats": formats,
+        "audience": audience,
+        "access": access,
+        "components": components,
+        "identity_tokens": identity_tokens,
+    }
+
+
+def source_product_type(job: Dict) -> str:
+    """Najpierw klasyfikuj po nazwie; opis jest wyłącznie fallbackiem."""
+    title = normalize_for_compare(job.get("title", ""))
+    desc = normalize_for_compare(strip_html(job.get("description", ""))[:1200])
+
+    def classify(source: str) -> str:
+        has_access = bool(re.search(r"\b(access|code|kod|licenc|portal)\b", source))
+        if has_access and re.search(r"teacher|nauczyciel", source):
+            return "teacher_access_code"
+        if has_access and re.search(r"student|uczen|uczni|learner", source):
+            return "student_access_code"
+        if "ebook" in source and re.search(r"online practice|myenglishlab|portal|access", source):
+            return "digital_course_bundle"
+        if "etext" in source:
+            return "etext"
+        if "ebook" in source:
+            return "ebook"
+        if re.search(r"online practice|cwiczenia online", source):
+            return "online_practice"
+        if re.search(r"workbook|activity book|zeszyt cwiczen", source):
+            return "workbook"
+        if re.search(r"student'?s book|coursebook|podrecznik", source):
+            return "textbook"
+        if re.search(r"slownik|dictionary", source):
+            return "dictionary"
+        if re.search(r"klasa\s+\d|liceum|technikum|szkola podstawowa|matura", source):
+            return "school_book"
+        return "other"
+
+    title_type = classify(title)
+    if title_type != "other":
+        return title_type
+    desc_type = classify(desc)
+    if desc_type != "other":
+        return desc_type
+    if job.get("author") and not re.search(r"access|code|kod|ebook|etext|online practice", title):
+        return "general_book"
+    return "other"
+
+
+def title_required_features(job: Dict) -> Dict[str, object]:
+    """Twarde wymagania walidatora bierzemy z nazwy SKU, nie z narracji opisu."""
+    raw_title = job.get("title", "")
+    source = normalize_for_compare(raw_title)
+    title_signals = extract_title_signals(raw_title, "")
+    return {
+        "type": source_product_type(job),
+        "signals": title_signals,
+        "student": bool(re.search(r"student|uczen|uczni|learner", source)),
+        "teacher": bool(re.search(r"teacher|nauczyciel", source)),
+        "access": bool(re.search(r"access|code|kod\s+(?:uczni|nauczyciel)|licenc", source)),
+        "without_code": bool(re.search(r"without key|no key|bez klucza|bez kodu", source)),
+        "ebook": "ebook" in source,
+        "etext": "etext" in source,
+        "myenglishlab": "myenglishlab" in source,
+        "online_practice": "online practice" in source,
+        "teacher_portal": bool(re.search(r"teacher\s+s\s+portal|teachers?\s+portal", source)),
+    }
+
+
+
+
+
+
+def compact_description_context(description: str, title: str = "", max_chars: int = 1600) -> str:
+    """Wybiera najbardziej użyteczne fragmenty opisu zamiast wysyłać 3600 znaków."""
+    clean = normalize_spaces(strip_html(description))
+    if len(clean) <= max_chars:
+        return clean
+
+    # Zachowujemy początek oraz zdania zawierające cechy wariantu, poziomy,
+    # formaty, platformy i informacje produktowe. Dla zwykłej książki początek
+    # opisu nadal niesie fabułę / temat, więc zawsze jest pierwszy.
+    sentences = [normalize_spaces(s) for s in re.split(r"(?<=[.!?])\s+", clean) if normalize_spaces(s)]
+    selected: List[str] = []
+    selected_keys: Set[str] = set()
+
+    def add(sentence: str) -> None:
+        key = normalize_for_compare(sentence)
+        if sentence and key not in selected_keys:
+            selected.append(sentence)
+            selected_keys.add(key)
+
+    for sentence in sentences[:3]:
+        add(sentence)
+
+    signal_pattern = re.compile(
+        r"\b(?:A1|A2|B1|B2|C1|C2|First|Advanced|Proficiency|eBook|eText|"
+        r"MyEnglishLab|Online Practice|Teacher'?s Portal|Student|Teacher|uczni|nauczyciel|"
+        r"access|code|kod|licenc|Workbook|Student'?s Book|Teacher'?s Book|Coursebook|"
+        r"tom|część|czesc|klasa|matura|egzamin|słownik|slownik|dictionary)\b",
+        flags=re.IGNORECASE,
+    )
+    for sentence in sentences[3:]:
+        if signal_pattern.search(sentence):
+            add(sentence)
+
+    # Dodatkowo wybierz zdania zawierające rzadkie tokeny z nazwy produktu.
+    title_tokens = [
+        token for token in re.findall(r"[A-Za-zÀ-ž0-9'+.-]+", title)
+        if len(normalize_for_compare(token)) >= 4
+        and normalize_for_compare(token) not in TITLE_GENERIC_TOKENS
+    ][:5]
+    for sentence in sentences[3:]:
+        normalized_sentence = normalize_for_compare(sentence)
+        if any(normalize_for_compare(token) in normalized_sentence for token in title_tokens):
+            add(sentence)
+
+    result = " ".join(selected)
+    if len(result) < min(900, max_chars) and len(sentences) > len(selected):
+        for sentence in sentences:
+            add(sentence)
+            result = " ".join(selected)
+            if len(result) >= min(1100, max_chars):
+                break
+
+    return smart_truncate(" ".join(selected), max_chars)
+
+
+META_RESPONSE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "meta_title_candidates": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Trzy różne kompletne meta title, każdy maksymalnie 60 znaków.",
+        },
+        "meta_description": {
+            "type": "string",
+            "description": "Polski meta description produktu, zwykle 135-160 znaków, konkretny i zgodny ze źródłem.",
+        },
+    },
+    "required": ["meta_title_candidates", "meta_description"],
+}
+
+META_SYSTEM_PROMPT = """Jesteś seniorem SEO e-commerce i redaktorem informacji produktowej Bookland.
+Tworzysz metatagi dla jednego SKU na podstawie danych z Akeneo. Najpierw rozpoznaj tożsamość i wariant produktu, potem redaguj.
+
+META TITLE
+Zwróć 3 różne kandydatury, każda kompletna i <=60 znaków.
+Priorytet informacji:
+1) oficjalna seria/tytuł/model,
+2) poziom/egzamin/tom/część/klasa,
+3) komponent i format odróżniający SKU,
+4) odbiorca i typ kodu/dostępu,
+5) autor tylko dla zwykłych książek, jeśli nie wypiera ważniejszych danych.
+Nie ucinaj nazwy mechanicznie. Nie kończ słowem: Kod, Access, Online, Student, Teacher ani przyimkiem.
+Dla materiałów językowych zachowuj nazwy własne: MyEnglishLab, Online Practice, Teacher's Portal, eBook, eText, B2 First, C1 Advanced.
+Typ dostępu zapisuj naturalnie po polsku: kod uczniowski, kod nauczycielski, kod dostępu, bez kodu.
+Nie twórz zlepków typu: Online Kod, Portal Kod, eBook Kod, Kod Ucznia.
+Dla zwykłych książek preferuj „Tytuł – Autor”; przy długim tytule ważniejszy jest pełny sens tytułu niż autor. Nie używaj „praca zbiorowa”.
+
+META DESCRIPTION
+Pisz po polsku, konkretnie i informacyjnie. Celuj w 135-160 znaków, ale naturalność i zgodność z produktem są ważniejsze niż dobicie do konkretnej liczby.
+Nie dodawaj faktów, czasu licencji, funkcji, poziomu ani liczb, których nie ma w danych.
+Bez bezpośrednich CTA sklepu typu „Sprawdź ofertę”, „Kup teraz”, „Zamów teraz”.
+Dla materiałów edukacyjnych możesz zaczynać od serii, typu materiału, odbiorcy lub funkcji. Powtarzalne konstrukcje są akceptowalne, jeśli są naturalne i trafne.
+Dla książek możesz zaczynać od bohatera, konfliktu, tematu lub miejsca, jeśli wynikają ze źródła.
+
+Korzystaj wyłącznie z przekazanych danych. Zwróć tylko JSON zgodny ze schematem."""
+
+
+
+
+
+
+
+
+def akeneo_get_product_details(
+    sku: str,
+    token: str,
+    channel: str = DEFAULT_CHANNEL,
+    locale: str = DEFAULT_LOCALE,
+) -> Optional[Dict]:
+    with AKENEO_REQUEST_SEMAPHORE:
+        response = request_with_retry(
+            "GET",
+            _akeneo_root() + f"/api/rest/v1/products/{sku}",
+            headers=akeneo_headers(token),
+        )
+    if response.status_code == 404:
+        return None
+    response.raise_for_status()
+    return parse_akeneo_product(response.json(), channel, locale)
+
+
+def akeneo_fetch_products_by_identifiers(
+    token: str,
+    channel: str,
+    locale: str,
+    identifiers: Sequence[str],
+) -> Dict[str, Dict]:
+    if not identifiers:
+        return {}
+    search = {"identifier": [{"operator": "IN", "value": list(identifiers)}]}
+    params: Dict[str, object] = {
+        "limit": 100,
+        "scope": channel,
+        "locales": locale,
+        "with_count": "false",
+        "search": json.dumps(search, ensure_ascii=False),
+    }
+    existing_attributes = akeneo_existing_attribute_codes(token)
+    if existing_attributes:
+        params["attributes"] = ",".join(existing_attributes)
+    with AKENEO_REQUEST_SEMAPHORE:
+        response = request_with_retry(
+            "GET",
+            _akeneo_root() + "/api/rest/v1/products",
+            headers=akeneo_headers(token),
+            params=params,
+        )
+
+    if response.status_code in {400, 414, 422}:
+        products: Dict[str, Dict] = {}
+        # Globalny semafor nadal ogranicza faktyczne requesty do 4, nawet jeśli
+        # kilka chunków równolegle trafi w fallback.
+        with ThreadPoolExecutor(max_workers=AKENEO_MAX_WORKERS) as executor:
+            futures = {
+                executor.submit(akeneo_get_product_details, sku, token, channel, locale): sku
+                for sku in identifiers
+            }
+            for future in as_completed(futures):
+                product = future.result()
+                if product and product.get("identifier"):
+                    products[product["identifier"]] = product
+        return products
+
+    response.raise_for_status()
+    products: Dict[str, Dict] = {}
+    for item in response.json().get("_embedded", {}).get("items", []):
+        parsed = parse_akeneo_product(item, channel, locale)
+        if parsed.get("identifier"):
+            products[parsed["identifier"]] = parsed
+    return products
+
+
+
+
+def import_skus_to_meta_queue(
+    *,
+    skus: Sequence[str],
+    token: str,
+    channel: str,
+    locale: str,
+    store_view_code: str,
+    enabled_only: bool,
+    only_with_description: bool,
+    force_regenerate: bool,
+    run_id: str,
+    progress_callback=None,
+) -> Dict[str, object]:
+    unique_skus, duplicate_count = normalize_sku_list(skus)
+    stats: Dict[str, object] = {
+        "run_id": run_id, "input": len(skus), "unique": len(unique_skus),
+        "duplicates": duplicate_count, "found": 0, "queued": 0,
+        "skipped_unchanged": 0, "inactive": 0, "without_description": 0,
+        "missing": 0, "processed": 0,
+    }
+    missing_skus: List[str] = []
+    inactive_skus: List[str] = []
+    without_description_skus: List[str] = []
+    sku_chunks = list(chunks(unique_skus, AKENEO_SKU_FILTER_CHUNK_SIZE))
+
+    # Rozgrzej cache listy istniejących atrybutów przed uruchomieniem wątków.
+    # Bez tego pierwszy start mógłby równolegle wykonać tę samą serię requestów.
+    akeneo_existing_attribute_codes(token)
+
+    # Cztery paczki Akeneo równocześnie. Globalny semafor w funkcjach requestów
+    # gwarantuje, że nie przekroczymy AKENEO_MAX_WORKERS.
+    with ThreadPoolExecutor(max_workers=AKENEO_MAX_WORKERS) as executor:
+        futures = {
+            executor.submit(akeneo_fetch_products_by_identifiers, token, channel, locale, sku_chunk): sku_chunk
+            for sku_chunk in sku_chunks
+        }
+        for future in as_completed(futures):
+            sku_chunk = futures[future]
+            try:
+                products = future.result()
+            except Exception:
+                # Jedna paczka nie powinna zatrzymać 10k SKU. Fallback per SKU
+                # zachowuje poprawność i nadal podlega globalnemu limitowi 4.
+                products = {}
+                for sku in sku_chunk:
+                    try:
+                        product = akeneo_get_product_details(sku, token, channel, locale)
+                        if product:
+                            products[sku] = product
+                    except Exception:
+                        pass
+
+            queue_entries: List[Dict] = []
+            for sku in sku_chunk:
+                stats["processed"] = int(stats["processed"]) + 1
+                product = products.get(sku)
+                if not product:
+                    stats["missing"] = int(stats["missing"]) + 1
+                    missing_skus.append(sku)
+                    continue
+                stats["found"] = int(stats["found"]) + 1
+                if enabled_only and not product.get("enabled", False):
+                    stats["inactive"] = int(stats["inactive"]) + 1
+                    inactive_skus.append(sku)
+                    continue
+                if only_with_description and not strip_html(product.get("description", "")):
+                    stats["without_description"] = int(stats["without_description"]) + 1
+                    without_description_skus.append(sku)
+                    continue
+
+                queue_entries.append({
+                    "sku": sku,
+                    "channel": channel,
+                    "locale": locale,
+                    "store_view_code": store_view_code,
+                    "product_data": _prepare_product_data(product),
+                    "source_updated": product.get("updated", ""),
+                    "force_regenerate": force_regenerate,
+                    "run_id": run_id,
+                    "source_type": "sku_list",
+                })
+
+            queued_map = bulk_upsert_meta_jobs(queue_entries)
+            for queued in queued_map.values():
+                if queued:
+                    stats["queued"] = int(stats["queued"]) + 1
+                else:
+                    stats["skipped_unchanged"] = int(stats["skipped_unchanged"]) + 1
+
+            if progress_callback:
+                progress_callback(stats)
+
+    IMPORT_REPORT_DIR.mkdir(parents=True, exist_ok=True)
+    report_path = IMPORT_REPORT_DIR / f"{run_id}-odrzucone.tsv"
+    with report_path.open("w", encoding="utf-8-sig", newline="") as handle:
+        writer = csv.writer(handle, delimiter="\t", lineterminator="\n")
+        writer.writerow(["sku", "powod"])
+        writer.writerows((sku, "nie znaleziono w Akeneo") for sku in missing_skus)
+        writer.writerows((sku, "produkt nieaktywny") for sku in inactive_skus)
+        writer.writerows((sku, "brak opisu źródłowego") for sku in without_description_skus)
+    stats["report_path"] = str(report_path)
+    return stats
+
+
+def _submit_single_batch_file(spec: Dict, api_key: str) -> Dict:
+    client = genai.Client(api_key=api_key)
+    uploaded_file = client.files.upload(
+        file=str(spec["input_path"]),
+        config=types.UploadFileConfig(display_name=spec["display_name"], mime_type="jsonl"),
+    )
+    batch_job = client.batches.create(
+        model=GEMINI_MODEL,
+        src=uploaded_file.name,
+        config={"display_name": spec["display_name"]},
+    )
+    state = getattr(getattr(batch_job, "state", None), "name", None) or str(
+        getattr(batch_job, "state", "JOB_STATE_PENDING")
+    )
+    return {
+        **spec,
+        "job_name": batch_job.name,
+        "input_file_name": uploaded_file.name,
+        "state": state,
+    }
+
+
+def submit_queued_batches(
+    products_per_file: int = BATCH_PRODUCTS_PER_FILE,
+    run_id: Optional[str] = None,
+) -> List[Dict]:
+    queued = list_meta_jobs(statuses=["queued"], order_by="created_at ASC", run_id=run_id)
+    if not queued:
+        return []
+
+    # Dla dużych runów 10k+ nie tworzymy jednego monolitu. Mniejsze shardy kończą
+    # się niezależnie i mogą być odbierane bez czekania na najwolniejszy ogon.
+    requested = max(100, int(products_per_file))
+    effective_size = min(requested, TURBO_BATCH_SHARD_SIZE) if len(queued) >= 5000 else requested
+    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    specs: List[Dict] = []
+
+    for index in range(0, len(queued), effective_size):
+        chunk = queued[index:index + effective_size]
+        part = index // effective_size + 1
+        display_name = f"bookland-meta-{(run_id or 'all')[-18:]}-{timestamp}-{part:03d}"
+        input_path = BATCH_DIR / f"{display_name}.jsonl"
+        write_batch_jsonl(chunk, input_path)
+        specs.append({
+            "display_name": display_name,
+            "input_path": input_path,
+            "chunk": chunk,
+            "products": len(chunk),
+        })
+
+    submitted: List[Dict] = []
+    api_key = str(st.secrets["GOOGLE_API_KEY"])
+    with ThreadPoolExecutor(max_workers=min(BATCH_SUBMIT_WORKERS, len(specs))) as executor:
+        futures = {executor.submit(_submit_single_batch_file, spec, api_key): spec for spec in specs}
+        for future in as_completed(futures):
+            spec = futures[future]
+            try:
+                result = future.result()
+                register_batch_job(
+                    job_name=result["job_name"],
+                    run_id=run_id or "",
+                    display_name=result["display_name"],
+                    input_path=result["input_path"],
+                    input_file_name=result["input_file_name"],
+                    product_count=result["products"],
+                    state=result["state"],
+                )
+                now = utcnow_iso()
+                with db_connect() as conn:
+                    conn.executemany(
+                        "UPDATE meta_jobs SET status='batch_submitted', batch_job_name=?, updated_at=? WHERE job_key=?",
+                        [(result["job_name"], now, job["job_key"]) for job in result["chunk"]],
+                    )
+                submitted.append({
+                    "job_name": result["job_name"],
+                    "display_name": result["display_name"],
+                    "products": result["products"],
+                    "state": result["state"],
+                })
+            except Exception as exc:
+                submitted.append({
+                    "job_name": "",
+                    "display_name": spec["display_name"],
+                    "products": spec["products"],
+                    "state": "SUBMIT_FAILED",
+                    "error": str(exc),
+                })
+    return sorted(submitted, key=lambda item: item["display_name"])
+
+
+def get_meta_jobs_by_keys(keys: Sequence[str]) -> Dict[str, Dict]:
+    unique = list(dict.fromkeys(key for key in keys if key))
+    result: Dict[str, Dict] = {}
+    if not unique:
+        return result
+    with db_connect() as conn:
+        for key_chunk in chunks(unique, 500):
+            placeholders = ",".join("?" for _ in key_chunk)
+            rows = conn.execute(f"SELECT * FROM meta_jobs WHERE job_key IN ({placeholders})", list(key_chunk)).fetchall()
+            result.update({row["job_key"]: dict(row) for row in rows})
+    return result
+
+
+def save_meta_results_bulk(records: Sequence[Dict], failed_records: Sequence[Tuple[str, str]] = ()) -> None:
+    if not records and not failed_records:
+        return
+    now = utcnow_iso()
+    update_rows = []
+    for record in records:
+        meta_description = record.get("meta_description", "")
+        opening = opening_signature(meta_description, 6)
+        short_opening = opening_signature(meta_description, 3)
+        normalized_hash = hashlib.sha256(normalize_for_compare(meta_description).encode("utf-8")).hexdigest()
+        update_rows.append((
+            record.get("meta_title", ""), meta_description, record["status"], int(record.get("attempts", 1)),
+            opening, short_opening, normalized_hash,
+            json.dumps(list(record.get("validation_errors", ())), ensure_ascii=False),
+            record.get("error_message", ""), now, record["job_key"],
+        ))
+
+    with db_connect() as conn:
+        if update_rows:
+            conn.executemany(
+                """
+                UPDATE meta_jobs SET meta_title=?, meta_description=?, status=?, attempts=?,
+                    opening_signature=?, short_opening_signature=?, normalized_hash=?,
+                    validation_errors=?, error_message=?, updated_at=?
+                WHERE job_key=?
+                """,
+                update_rows,
+            )
+        if failed_records:
+            conn.executemany(
+                "UPDATE meta_jobs SET status='failed', error_message=?, updated_at=? WHERE job_key=?",
+                [(message[:2000], now, key) for key, message in failed_records if key],
+            )
+
+
+def ingest_batch_result_bytes(job_name: str, content: bytes) -> Dict[str, int]:
+    decoded = content.decode("utf-8")
+    raw_lines = [line for line in decoded.splitlines() if line.strip()]
+    parsed_payloads: List[Tuple[Dict, str]] = []
+    keys: List[str] = []
+    stats = {"completed": 0, "validation_failed": 0, "failed": 0}
+
+    for line in raw_lines:
+        try:
+            payload = json.loads(line)
+            key = str(payload.get("key") or payload.get("metadata", {}).get("key") or "")
+            parsed_payloads.append((payload, key))
+            if key:
+                keys.append(key)
+        except Exception:
+            stats["failed"] += 1
+
+    jobs = get_meta_jobs_by_keys(keys)
+    title_owners = existing_meta_title_owners()
+    result_records: List[Dict] = []
+    failed_records: List[Tuple[str, str]] = []
+
+    for payload, fallback_key in parsed_payloads:
+        key = fallback_key
+        try:
+            extracted_key, text = extract_batch_response_text(payload)
+            key = extracted_key or fallback_key
+            if not key:
+                raise RuntimeError("Brak klucza zadania w odpowiedzi")
+            job = jobs.get(key)
+            if not job:
+                raise RuntimeError(f"Nieznany klucz zadania: {key}")
+            data = json.loads(strip_code_fences(text))
+            locked_title, locked_description = locked_fields_from_job(job)
+
+            if locked_title:
+                meta_title = locked_title
+                title_errors: List[str] = []
+            else:
+                meta_title, title_errors, _ = select_best_meta_title_candidate(
+                    extract_meta_title_candidates(data), job, existing_title_owners=title_owners
+                )
+
+            generated_description = normalize_spaces(strip_html(str(data.get("meta_description", "")))).strip('"„”')
+            meta_description = locked_description or generated_description
+            description_errors = [] if locked_description else meta_validation_errors(meta_description, job=job)
+            errors = [*title_errors, *description_errors]
+            status = "completed" if not errors else "validation_failed"
+
+            result_records.append({
+                "job_key": key,
+                "meta_title": meta_title,
+                "meta_description": meta_description,
+                "status": status,
+                "attempts": int(job.get("attempts", 0)) + 1,
+                "validation_errors": errors,
+                "error_message": "; ".join(errors),
+            })
+            stats[status] += 1
+            if status == "completed":
+                title_owners[normalize_for_compare(meta_title)] = str(job["sku"])
+        except Exception as exc:
+            stats["failed"] += 1
+            if key:
+                failed_records.append((key, str(exc)))
+
+    save_meta_results_bulk(result_records, failed_records)
+    with db_connect() as conn:
+        conn.execute(
+            "UPDATE batch_jobs SET ingested_at=?, updated_at=? WHERE job_name=?",
+            (utcnow_iso(), utcnow_iso(), job_name),
+        )
+    return stats
+
+
+
+def revalidate_meta_jobs_v44(run_id: Optional[str] = None) -> Dict[str, int]:
+    """Przelicza stare validation_failed nowymi, łagodniejszymi regułami bez kosztu AI."""
+    jobs = list_meta_jobs(
+        statuses=["validation_failed"],
+        order_by="created_at ASC",
+        run_id=run_id,
+    )
+    title_owners = existing_meta_title_owners()
+    records: List[Dict] = []
+    stats = {"checked": 0, "promoted": 0, "still_failed": 0}
+
+    for job in jobs:
+        stats["checked"] += 1
+        title_errors = meta_title_validation_errors(
+            job.get("meta_title", ""), job, existing_title_owners=title_owners
+        )
+        description_errors = meta_validation_errors(job.get("meta_description", ""), job=job)
+        errors = [*title_errors, *description_errors]
+        status = "completed" if not errors else "validation_failed"
+        if status == "completed":
+            stats["promoted"] += 1
+            title_owners[normalize_for_compare(job.get("meta_title", ""))] = str(job.get("sku", ""))
+        else:
+            stats["still_failed"] += 1
+        records.append({
+            "job_key": job["job_key"],
+            "meta_title": job.get("meta_title", ""),
+            "meta_description": job.get("meta_description", ""),
+            "status": status,
+            "attempts": int(job.get("attempts", 0)),
+            "validation_errors": errors,
+            "error_message": "; ".join(errors),
+        })
+
+    save_meta_results_bulk(records)
+    return stats
+
+
+# ═══════════════════════════════════════════════════════════════════
+# V4.4.1 — mniej fałszywych odrzuceń + szybsze 10k SKU
+# ═══════════════════════════════════════════════════════════════════
+# - powtarzalne początki i nawet identyczne meta description są raportowane,
+#   ale NIE zmieniają statusu na validation_failed;
+# - poziom/egzamin w meta title jest walidowany WYŁĄCZNIE względem nazwy SKU;
+#   opis nie może narzucić B2 produktowi C1 przez linkowanie do innych poziomów;
+# - import SQLite prefetchuje istniejące rekordy i wykonuje prawdziwy executemany;
+# - statusy kilku shardów Batch API są odpytywane równolegle;
+# - kontekst opisu jest dynamicznie krótszy dla kodów/dostępów cyfrowych;
+# - maksymalny output Gemini zmniejszony, bo schema zawiera tylko 3 tytuły + opis.
+
+PROMPT_VERSION = "meta-v4.4.1-turbo-soft-validation-title-level-fix-2026-08"
+META_RECENT_OPENINGS_HINT = 0
+GEMINI_META_MAX_OUTPUT_TOKENS = 320
+BATCH_REFRESH_WORKERS = 4
+
+
+def description_context_limit(job: Dict) -> int:
+    """Mniej tokenów dla prostych wariantów cyfrowych, więcej dla książek."""
+    product_type = source_product_type(job)
+    if product_type in {
+        "student_access_code", "teacher_access_code", "digital_course_bundle",
+        "online_practice", "ebook", "etext",
+    }:
+        return 1050
+    if product_type in {"textbook", "workbook", "school_book"}:
+        return 1400
+    return 1850
+
+
+def meta_validation_errors(
+    meta_description: str,
+    *,
+    existing_long_signatures: Optional[Set[str]] = None,
+    existing_short_signatures: Optional[Counter] = None,
+    recent_descriptions: Optional[Sequence[str]] = None,
+    job: Optional[Dict] = None,
+) -> List[str]:
+    """Tylko błędy, które realnie uzasadniają retry.
+
+    Nie blokujemy za podobny początek, pierwsze 3/6 słów ani duplikat opisu.
+    Przy katalogu 10k-50k te sygnały są normalne i nie warte kolejnego requestu AI.
+    """
+    errors: List[str] = []
+    text = normalize_spaces(strip_html(meta_description)).strip('"„”')
+    normalized = normalize_for_compare(text)
+
+    if not text:
+        return ["Brak meta description"]
+    if len(text) < META_DESCRIPTION_HARD_MIN:
+        errors.append(
+            f"Za krótki meta description: {len(text)} zn. (minimum techniczne {META_DESCRIPTION_HARD_MIN})"
+        )
+    if len(text) > META_DESCRIPTION_HARD_MAX:
+        errors.append(
+            f"Za długi meta description: {len(text)} zn. (maksimum techniczne {META_DESCRIPTION_HARD_MAX})"
+        )
+
+    hard_cta = (
+        "sprawdź ofertę", "sprawdz oferte", "kup teraz", "zamów teraz", "zamow teraz",
+        "dodaj do koszyka", "zamów już dziś", "zamow juz dzis",
+    )
+    if any(normalize_for_compare(phrase) in normalized for phrase in hard_cta):
+        errors.append("Meta description zawiera bezpośrednie CTA sklepu")
+    if re.search(r"https?://|www\.", text, flags=re.IGNORECASE):
+        errors.append("Meta description zawiera URL")
+    if "..." in text or text.endswith("…"):
+        errors.append("Meta description wygląda na ucięty")
+    if re.search(r"\b(xyz|lorem|ipsum|placeholder)\b", normalized):
+        errors.append("Meta description zawiera placeholder")
+
+    # Liczby nadal chronimy, bo halucynowana długość licencji/czas dostępu jest
+    # merytorycznie groźniejsza niż podobieństwo stylistyczne.
+    if job:
+        source = normalize_for_compare(
+            f"{job.get('title', '')} {strip_html(job.get('description', ''))}"
+        )
+        generated_numbers = set(re.findall(r"\b\d+(?:[.,]\d+)?\b", normalized))
+        source_numbers = set(re.findall(r"\b\d+(?:[.,]\d+)?\b", source))
+        unsupported = sorted(generated_numbers - source_numbers)
+        if unsupported:
+            errors.append(
+                "Meta description dodaje liczby nieobecne w źródle: "
+                + ", ".join(unsupported[:5])
+            )
+
+    return list(dict.fromkeys(errors))
+
+
+def audit_meta_jobs_for_repetition(run_id: Optional[str] = None) -> Dict[str, int]:
+    """Audyt jakości bez karania meta description za powtarzalność.
+
+    Do poprawy kierowane są wyłącznie krytyczne błędy/duplikaty meta title.
+    Duplikaty meta description są tylko liczone diagnostycznie.
+    """
+    jobs = list_meta_jobs(statuses=["completed"], order_by="created_at ASC", run_id=run_id)
+    seen_hash: Dict[str, str] = {}
+    seen_titles: Dict[str, str] = {}
+    flagged: Dict[str, List[str]] = {}
+    duplicate_descriptions = 0
+
+    for job in jobs:
+        reasons: List[str] = []
+        title_key = normalize_for_compare(job.get("meta_title", ""))
+        title_errors = meta_title_validation_errors(job.get("meta_title", ""), job)
+        reasons.extend(title_errors)
+
+        if title_key and title_key in seen_titles and seen_titles[title_key] != job["sku"]:
+            reasons.append(f"Identyczny meta title jak SKU {seen_titles[title_key]}")
+        elif title_key:
+            seen_titles[title_key] = job["sku"]
+
+        # Meta description nie jest kluczowym elementem różnicującym URL-e w SEO.
+        # Identyczne opisy liczymy, ale nie marnujemy na nie retry i nie blokujemy eksportu.
+        norm_hash = job.get("normalized_hash", "")
+        if norm_hash and norm_hash in seen_hash and seen_hash[norm_hash] != job["sku"]:
+            duplicate_descriptions += 1
+        elif norm_hash:
+            seen_hash[norm_hash] = job["sku"]
+
+        if reasons:
+            flagged[job["job_key"]] = list(dict.fromkeys(reasons))
+
+    if flagged:
+        now = utcnow_iso()
+        with db_connect() as conn:
+            conn.executemany(
+                """
+                UPDATE meta_jobs SET status='validation_failed', validation_errors=?, updated_at=?
+                WHERE job_key=?
+                """,
+                [
+                    (json.dumps(reasons, ensure_ascii=False), now, job_key)
+                    for job_key, reasons in flagged.items()
+                ],
+            )
+    return {
+        "checked": len(jobs),
+        "flagged": len(flagged),
+        "duplicate_descriptions": duplicate_descriptions,
+    }
+
+
+def bulk_upsert_meta_jobs(entries: Sequence[Dict]) -> Dict[str, bool]:
+    """Prawdziwy bulk upsert: jeden SELECT zbiorczy + executemany + jeden commit."""
+    results: Dict[str, bool] = {}
+    if not entries:
+        return results
+
+    now = utcnow_iso()
+    prepared: List[Dict] = []
+    for entry in entries:
+        sku = str(entry["sku"])
+        channel = str(entry["channel"])
+        locale = str(entry["locale"])
+        product_data = entry["product_data"]
+        title = safe_string_value(product_data.get("title"))
+        author = safe_string_value(product_data.get("author"))
+        description = safe_string_value(product_data.get("description"))
+        details = safe_string_value(product_data.get("details"))
+        input_hash = product_input_hash(sku, title, author, description, channel, locale)
+        style = build_style_plan(sku, title, author, description)
+        job_key = make_job_key(sku, channel, locale)
+        prepared.append({
+            "entry": entry,
+            "sku": sku,
+            "channel": channel,
+            "locale": locale,
+            "title": title,
+            "author": author,
+            "description": description,
+            "details": details,
+            "input_hash": input_hash,
+            "style": style,
+            "job_key": job_key,
+        })
+
+    existing_map: Dict[str, sqlite3.Row] = {}
+    keys = [item["job_key"] for item in prepared]
+    with db_connect() as conn:
+        for key_chunk in chunks(keys, 500):
+            placeholders = ",".join("?" for _ in key_chunk)
+            rows = conn.execute(
+                f"SELECT job_key, input_hash, prompt_version, model, status FROM meta_jobs WHERE job_key IN ({placeholders})",
+                list(key_chunk),
+            ).fetchall()
+            existing_map.update({row["job_key"]: row for row in rows})
+
+        touch_rows: List[Tuple] = []
+        upsert_rows: List[Tuple] = []
+        for item in prepared:
+            entry = item["entry"]
+            existing = existing_map.get(item["job_key"])
+            unchanged_completed = bool(
+                existing
+                and existing["input_hash"] == item["input_hash"]
+                and existing["prompt_version"] == PROMPT_VERSION
+                and existing["model"] == GEMINI_MODEL
+                and existing["status"] == "completed"
+                and not bool(entry.get("force_regenerate", False))
+            )
+            if unchanged_completed:
+                touch_rows.append((
+                    entry.get("run_id", ""), entry.get("source_type", "catalog"),
+                    entry.get("store_view_code", ""), now, item["job_key"],
+                ))
+                results[item["sku"]] = False
+                continue
+
+            style = item["style"]
+            upsert_rows.append((
+                item["job_key"], entry.get("run_id", ""), entry.get("source_type", "catalog"),
+                item["sku"], item["channel"], item["locale"], entry.get("store_view_code", ""),
+                item["title"], item["author"], item["description"], item["details"],
+                entry.get("source_updated", ""), item["input_hash"], PROMPT_VERSION, GEMINI_MODEL,
+                style["seed"], style["opening_mode"], style["rhythm_mode"], style["focus_mode"],
+                ", ".join(style["semantic_cues"]), style["source_lead"], now, now,
+            ))
+            results[item["sku"]] = True
+
+        if touch_rows:
+            conn.executemany(
+                "UPDATE meta_jobs SET run_id=?, source_type=?, store_view_code=?, updated_at=? WHERE job_key=?",
+                touch_rows,
+            )
+        if upsert_rows:
+            conn.executemany(
+                """
+                INSERT INTO meta_jobs(
+                    job_key, run_id, source_type, sku, channel, locale, store_view_code, title, author,
+                    description, details, source_updated, input_hash, prompt_version, model, style_seed,
+                    opening_mode, rhythm_mode, focus_mode, semantic_cues, source_lead, status, attempts,
+                    created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', 0, ?, ?)
+                ON CONFLICT(job_key) DO UPDATE SET
+                    run_id=excluded.run_id, source_type=excluded.source_type,
+                    store_view_code=excluded.store_view_code, title=excluded.title,
+                    author=excluded.author, description=excluded.description, details=excluded.details,
+                    source_updated=excluded.source_updated, input_hash=excluded.input_hash,
+                    prompt_version=excluded.prompt_version, model=excluded.model,
+                    style_seed=excluded.style_seed, opening_mode=excluded.opening_mode,
+                    rhythm_mode=excluded.rhythm_mode, focus_mode=excluded.focus_mode,
+                    semantic_cues=excluded.semantic_cues, source_lead=excluded.source_lead,
+                    status='queued', attempts=0, meta_title='', meta_description='',
+                    opening_signature='', short_opening_signature='', normalized_hash='',
+                    validation_errors='', error_message='', batch_job_name='', updated_at=excluded.updated_at
+                """,
+                upsert_rows,
+            )
+    return results
+
+
 def build_meta_prompt(
     job: Dict,
     attempt: int = 0,
@@ -3190,20 +3364,17 @@ def build_meta_prompt(
     previous_meta_description: str = "",
     previous_errors: Sequence[str] = (),
 ) -> str:
+    """Krótszy prompt per SKU, zachowujący pełną logikę SEO v4.4.1."""
     style = build_style_plan(
-        job["sku"],
-        job.get("title", ""),
-        job.get("author", ""),
-        job.get("description", ""),
-        attempt,
+        job["sku"], job.get("title", ""), job.get("author", ""), job.get("description", ""), attempt
     )
     raw_title = normalize_spaces(strip_html(job.get("title", "")))
     cleaned_title = clean_source_title_for_prompt(raw_title)
-    description = smart_truncate(strip_html(job.get("description", "")), 3600)
+    context_limit = description_context_limit(job)
+    description = compact_description_context(job.get("description", ""), raw_title, context_limit)
     author, author_note = clean_author_for_prompt(job.get("author", ""), description)
     signals = extract_title_signals(raw_title, description)
-    avoid_block = "\n".join(f"- {item}" for item in avoid_openings[:20]) or "- brak"
-    cues = ", ".join(style["semantic_cues"]) or "brak wyraźnych słów kluczowych"
+    cues = ", ".join(style["semantic_cues"][:5]) or "brak"
 
     prior_errors = list(previous_errors) or parse_validation_error_list(job.get("validation_errors", ""))
     title_errors, description_errors = split_field_errors(prior_errors)
@@ -3214,67 +3385,52 @@ def build_meta_prompt(
 
     retry_block = ""
     if attempt > 0 or prior_errors:
-        retry_block = f"""
-POPRZEDNIA PRÓBA
-Meta title: {prior_title or 'brak'}
-Meta description: {prior_description or 'brak'}
-Błędy walidatora:
-{chr(10).join(f'- {error}' for error in prior_errors) or '- brak'}
+        retry_block = (
+            "\nPOPRZEDNIA PRÓBA\n"
+            f"Meta title: {prior_title or 'brak'}\n"
+            f"Meta description: {prior_description or 'brak'}\n"
+            "Napraw wyłącznie:\n"
+            + ("\n".join(f"- {error}" for error in prior_errors) or "- brak")
+        )
 
-ZASADA NAPRAWY
-- Napraw dokładnie wskazane błędy, nie wykonuj kosmetycznej parafrazy.
-- Jeśli pole było poprawne, nie pogarszaj go.
-"""
     lock_block = ""
     if locked_title:
-        lock_block += f"\nZABLOKOWANY META TITLE: {locked_title}\nW tablicy meta_title_candidates zwróć wyłącznie ten jeden, identyczny tytuł."
+        lock_block += f"\nPOPRAWNY META TITLE — NIE ZMIENIAJ: {locked_title}"
     if locked_description:
-        lock_block += f"\nZABLOKOWANY META DESCRIPTION: {locked_description}\nZwróć go identycznie, bez zmiany ani jednego znaku."
+        lock_block += f"\nPOPRAWNY META DESCRIPTION — NIE ZMIENIAJ: {locked_description}"
 
-    return f"""Przygotuj metatagi dla jednego konkretnego produktu.
+    return f"""Przygotuj metatagi dla SKU {job['sku']}.
 
-DANE PRODUKTU
-SKU: {job['sku']}
-Surowa nazwa z Akeneo: {raw_title}
+DANE
+Nazwa: {raw_title}
 Nazwa oczyszczona: {cleaned_title}
-Autor / marka: {author or 'brak wiarygodnych danych'}
+Autor/marka: {author or 'brak'}
 Uwaga o autorze: {author_note}
-Dane dodatkowe: {job.get('details', '') or 'brak'}
+Dodatkowe dane: {job.get('details', '') or 'brak'}
 Opis źródłowy: {description or 'brak opisu'}
 
-AUTOMATYCZNIE WYKRYTE SYGNAŁY
+SYGNAŁY
 {title_signal_summary(signals)}
-Przewidywany typ produktu: {source_product_type(job)}
+Typ: {source_product_type(job)}
+Kontekst semantyczny: {cues}
 
-ZADANIE META TITLE
-- Ustal canonical_identity.
-- Zwróć 4 kandydatury, chyba że niżej zablokowano już poprawny tytuł.
-- Każdy kandydat ma być osobną decyzją redakcyjną, nie zmianą jednego znaku.
-- Zachowaj tożsamość, poziom oraz cechy wariantu: format, platformę, odbiorcę i rodzaj dostępu zgodnie z priorytetami.
-- Przelicz długość każdej kandydatury przed zwróceniem. Maksimum: 60 znaków.
+META TITLE
+- 3 różne kandydatury <=60 znaków, chyba że pole jest zablokowane.
+- Zachowaj twarde cechy z NAZWY: serię, poziom/egzamin, format, komponent, odbiorcę i rodzaj dostępu, jeśli występują.
+- Poziom z nazwy jest wiążący; poziomy tylko z opisu nie są obowiązkowe.
 
-PLAN META DESCRIPTION
-Seed różnorodności: {style['seed']}
-Kierunek: oprzyj otwarcie na konkretnym fakcie o produkcie, nie na abstrakcyjnej emocji ani problemie.
-Rytm: {style['rhythm_mode']}
-Główny fokus: {style['focus_mode']}
-Sygnały semantyczne: {cues}
-Pierwszy konkretny fragment źródła: {style['source_lead'] or 'brak'}
-
-OTWARCIA UŻYTE OSTATNIO - NIE POWTARZAJ ICH
-{avoid_block}
+META DESCRIPTION
+- Celuj w {META_DESCRIPTION_TARGET_MIN}-{META_DESCRIPTION_TARGET_MAX} znaków; 120-170 jest technicznie akceptowalne.
+- Podobne lub identycznie zaczynające się opisy innych SKU są dozwolone.
+- Bez halucynowanych liczb/funkcji i bez bezpośredniego CTA sklepu.
 {retry_block}
 {lock_block}
 
-Zwróć wyłącznie JSON.
-"""
+Zwróć wyłącznie JSON zgodny ze schematem."""
 
 
 def generate_metatags_interactive(job: Dict) -> Dict:
-    long_signatures, short_signatures = existing_opening_signatures(job["job_key"])
-    recent_full = [row["meta_description"] for row in list_meta_jobs(statuses=["completed"], limit=60)]
     title_owners = existing_meta_title_owners(job["job_key"])
-    avoid = recent_opening_examples(24)
     last_title = ""
     last_description = ""
     last_title_errors: List[str] = []
@@ -3292,7 +3448,7 @@ def generate_metatags_interactive(job: Dict) -> Dict:
                 contents=build_meta_prompt(
                     job,
                     attempt,
-                    avoid,
+                    (),
                     previous_meta_title=last_title,
                     previous_meta_description=last_description,
                     previous_errors=[*last_title_errors, *last_description_errors],
@@ -3302,19 +3458,18 @@ def generate_metatags_interactive(job: Dict) -> Dict:
                     response_mime_type="application/json",
                     response_schema=META_RESPONSE_SCHEMA,
                     seed=style["seed"],
-                    temperature=0.72,
-                    top_p=0.92,
-                    max_output_tokens=620,
+                    temperature=0.68,
+                    top_p=0.90,
+                    max_output_tokens=GEMINI_META_MAX_OUTPUT_TOKENS,
                 ),
             )
             data = json.loads(strip_code_fences(response.text or ""))
-            candidates = extract_meta_title_candidates(data)
             if locked_title:
                 selected_title = locked_title
-                title_errors = []
+                title_errors: List[str] = []
             else:
                 selected_title, title_errors, _ = select_best_meta_title_candidate(
-                    candidates, job, existing_title_owners=title_owners
+                    extract_meta_title_candidates(data), job, existing_title_owners=title_owners
                 )
 
             generated_description = normalize_spaces(
@@ -3322,11 +3477,7 @@ def generate_metatags_interactive(job: Dict) -> Dict:
             ).strip('"„”')
             selected_description = locked_description or generated_description
             description_errors = [] if locked_description else meta_validation_errors(
-                selected_description,
-                existing_long_signatures=long_signatures,
-                existing_short_signatures=short_signatures,
-                recent_descriptions=recent_full,
-                job=job,
+                selected_description, job=job
             )
 
             last_title = selected_title
@@ -3341,15 +3492,7 @@ def generate_metatags_interactive(job: Dict) -> Dict:
                     "validation_errors": [],
                     "error": "",
                 }
-            if selected_description:
-                avoid = [*avoid, first_words(selected_description, 8)]
         except Exception as exc:
-            # Zachowujemy poprawne pole z wcześniejszej próby; błąd dotyczy tylko
-            # nieudanej odpowiedzi, a nie zaakceptowanego wyniku.
-            if not last_title_errors and last_title:
-                last_title_errors = []
-            if not last_description_errors and last_description:
-                last_description_errors = []
             api_error = f"Błąd Gemini lub JSON: {exc}"
             if not last_title:
                 last_title_errors = [api_error]
@@ -3358,7 +3501,9 @@ def generate_metatags_interactive(job: Dict) -> Dict:
 
     errors = [*last_title_errors, *last_description_errors]
     return {
-        "meta_title": last_title or normalize_generated_meta_title(build_meta_title(job.get("title", ""), job.get("author", ""))),
+        "meta_title": last_title or normalize_generated_meta_title(
+            build_meta_title(job.get("title", ""), job.get("author", ""))
+        ),
         "meta_description": last_description,
         "attempts": MAX_META_RETRIES + 1,
         "validation_errors": errors,
@@ -3376,10 +3521,10 @@ def batch_request_for_job(job: Dict, attempt: int = 0) -> Dict:
             "contents": [{"role": "user", "parts": [{"text": build_meta_prompt(job, attempt, ())}]}],
             "system_instruction": {"parts": [{"text": META_SYSTEM_PROMPT}]},
             "generation_config": {
-                "temperature": 0.72,
-                "top_p": 0.92,
+                "temperature": 0.68,
+                "top_p": 0.90,
                 "seed": style["seed"],
-                "max_output_tokens": 620,
+                "max_output_tokens": GEMINI_META_MAX_OUTPUT_TOKENS,
                 "response_mime_type": "application/json",
                 "response_schema": META_RESPONSE_SCHEMA,
             },
@@ -3387,87 +3532,82 @@ def batch_request_for_job(job: Dict, attempt: int = 0) -> Dict:
     }
 
 
-def locked_fields_from_job(job: Dict) -> Tuple[str, str]:
-    errors = parse_validation_error_list(job.get("validation_errors", ""))
-    title_errors, description_errors = split_field_errors(errors)
-    locked_title = job.get("meta_title", "") if job.get("meta_title") and not title_errors and int(job.get("attempts", 0)) > 0 else ""
-    locked_description = job.get("meta_description", "") if job.get("meta_description") and not description_errors and int(job.get("attempts", 0)) > 0 else ""
-    return locked_title, locked_description
+def _refresh_single_batch_remote(stored: Dict, api_key: str) -> Dict:
+    """Tylko operacje sieciowe; bez zapisu SQLite w wątku."""
+    client = genai.Client(api_key=api_key)
+    batch_job = client.batches.get(name=stored["job_name"])
+    state = batch_state_name(batch_job)
+    output_file_name = ""
+    error_message = ""
+    dest = getattr(batch_job, "dest", None)
+    if dest and getattr(dest, "file_name", None):
+        output_file_name = dest.file_name
+    if getattr(batch_job, "error", None):
+        error_message = str(batch_job.error)
+    content = None
+    if state == "JOB_STATE_SUCCEEDED" and output_file_name:
+        content = client.files.download(file=output_file_name)
+    return {
+        "stored": stored,
+        "state": state,
+        "output_file_name": output_file_name,
+        "error_message": error_message,
+        "content": content,
+    }
 
 
-def ingest_batch_result_bytes(job_name: str, content: bytes) -> Dict[str, int]:
-    decoded = content.decode("utf-8")
-    lines = [line for line in decoded.splitlines() if line.strip()]
-    long_signatures, short_signatures = existing_opening_signatures()
-    recent_descriptions = [row["meta_description"] for row in list_meta_jobs(statuses=["completed"], limit=100)]
-    title_owners = existing_meta_title_owners()
-    stats = {"completed": 0, "validation_failed": 0, "failed": 0}
+def refresh_and_ingest_batch_jobs(run_id: Optional[str] = None) -> List[Dict]:
+    """Równolegle sprawdza do 4 shardów, następnie bezpiecznie zapisuje wyniki."""
+    pending = [stored for stored in list_batch_jobs(run_id=run_id) if not stored["ingested_at"]]
+    if not pending:
+        return []
 
-    for line in lines:
-        try:
-            payload = json.loads(line)
-            key, text = extract_batch_response_text(payload)
-            if not key:
-                raise RuntimeError("Brak klucza zadania w odpowiedzi")
-            job = get_meta_job(key)
-            if not job:
-                raise RuntimeError(f"Nieznany klucz zadania: {key}")
-            data = json.loads(strip_code_fences(text))
-            locked_title, locked_description = locked_fields_from_job(job)
-
-            if locked_title:
-                meta_title = locked_title
-                title_errors: List[str] = []
-            else:
-                meta_title, title_errors, _ = select_best_meta_title_candidate(
-                    extract_meta_title_candidates(data),
-                    job,
-                    existing_title_owners=title_owners,
-                )
-
-            generated_description = normalize_spaces(strip_html(str(data.get("meta_description", "")))).strip('"„”')
-            meta_description = locked_description or generated_description
-            description_errors = [] if locked_description else meta_validation_errors(
-                meta_description,
-                existing_long_signatures=long_signatures,
-                existing_short_signatures=short_signatures,
-                recent_descriptions=recent_descriptions,
-                job=job,
-            )
-            errors = [*title_errors, *description_errors]
-            status = "completed" if not errors else "validation_failed"
-            save_meta_result(
-                key,
-                meta_title=meta_title,
-                meta_description=meta_description,
-                status=status,
-                attempts=int(job.get("attempts", 0)) + 1,
-                validation_errors=errors,
-                error_message="; ".join(errors),
-            )
-            if status == "completed":
-                long_signatures.add(opening_signature(meta_description, 6))
-                short_signatures[opening_signature(meta_description, 3)] += 1
-                recent_descriptions.append(meta_description)
-                recent_descriptions = recent_descriptions[-100:]
-                title_owners[normalize_for_compare(meta_title)] = str(job["sku"])
-            stats[status] += 1
-        except Exception as exc:
-            stats["failed"] += 1
+    updates: List[Dict] = []
+    api_key = str(st.secrets["GOOGLE_API_KEY"])
+    remote_results: List[Dict] = []
+    with ThreadPoolExecutor(max_workers=min(BATCH_REFRESH_WORKERS, len(pending))) as executor:
+        futures = {
+            executor.submit(_refresh_single_batch_remote, stored, api_key): stored
+            for stored in pending
+        }
+        for future in as_completed(futures):
+            stored = futures[future]
             try:
-                payload = json.loads(line)
-                key = str(payload.get("key") or payload.get("metadata", {}).get("key") or "")
-                if key:
-                    set_meta_job_error(key, str(exc))
-            except Exception:
-                pass
+                remote_results.append(future.result())
+            except Exception as exc:
+                updates.append({
+                    "job_name": stored["job_name"], "state": "ERROR", "error": str(exc)
+                })
 
-    with db_connect() as conn:
-        conn.execute(
-            "UPDATE batch_jobs SET ingested_at=?, updated_at=? WHERE job_name=?",
-            (utcnow_iso(), utcnow_iso(), job_name),
-        )
-    return stats
+    for result in remote_results:
+        stored = result["stored"]
+        state = result["state"]
+        output_file_name = result["output_file_name"]
+        error_message = result["error_message"]
+        with db_connect() as conn:
+            conn.execute(
+                """
+                UPDATE batch_jobs SET state=?, output_file_name=?, error_message=?, updated_at=?
+                WHERE job_name=?
+                """,
+                (state, output_file_name, error_message[:2000], utcnow_iso(), stored["job_name"]),
+            )
+        update = {"job_name": stored["job_name"], "state": state, "ingested": False}
+        if state == "JOB_STATE_SUCCEEDED" and result["content"] is not None:
+            update["stats"] = ingest_batch_result_bytes(stored["job_name"], result["content"])
+            update["ingested"] = True
+        elif state in {"JOB_STATE_FAILED", "JOB_STATE_CANCELLED", "JOB_STATE_EXPIRED"}:
+            with db_connect() as conn:
+                conn.execute(
+                    """
+                    UPDATE meta_jobs SET status='failed', error_message=?, updated_at=?
+                    WHERE batch_job_name=? AND status='batch_submitted'
+                    """,
+                    (error_message or state, utcnow_iso(), stored["job_name"]),
+                )
+        updates.append(update)
+    return sorted(updates, key=lambda item: item.get("job_name", ""))
+
 
 # ═══════════════════════════════════════════════════════════════════
 # SESSION STATE I UI HELPERY
@@ -4045,12 +4185,13 @@ with scale_tab:
             metrics[4].metric("Błędy", counts.get("failed", 0))
 
             products_per_batch = st.number_input(
-                "Produktów w jednym pliku batch",
+                "Docelowy rozmiar zadania Batch API",
                 min_value=100,
-                max_value=20000,
+                max_value=10000,
                 value=BATCH_PRODUCTS_PER_FILE,
                 step=100,
             )
+            st.caption("Tryb Turbo: runy od 5000 produktów są automatycznie dzielone na shardy maks. 2500 SKU i do 4 zadań jest wysyłanych równolegle.")
             if st.button("2. Wyślij oczekujące paczki tej partii do Gemini"):
                 with st.spinner("Tworzę pliki JSONL i wysyłam zadania..."):
                     submitted = submit_queued_batches(int(products_per_batch), run_id=selected_run)
@@ -4101,12 +4242,20 @@ with results_tab:
     counts = meta_status_counts(result_run or None)
     st.json(counts)
 
-    col_audit, col_requeue = st.columns(2)
-    if col_audit.button("Audytuj powtarzalne otwarcia"):
-        audit = audit_meta_jobs_for_repetition(run_id=result_run or None)
-        st.success(f"Sprawdzono {audit['checked']} produktów, oznaczono {audit['flagged']} do poprawy.")
+    st.caption("v4.4.1: podobne początki i duplikaty meta description nie blokują eksportu. Poziomy meta title są sprawdzane przede wszystkim względem nazwy produktu, nie linków i opisów innych wariantów.")
+    col_revalidate, col_audit, col_requeue = st.columns(3)
+    if col_revalidate.button("Przelicz walidację v4.4.1 bez AI"):
+        audit = revalidate_meta_jobs_v44(run_id=result_run or None)
+        st.success(
+            f"Sprawdzono {audit['checked']} produktów. Bez regenerowania zaakceptowano {audit['promoted']}; "
+            f"nadal wymagają poprawy {audit['still_failed']}."
+        )
 
-    if col_requeue.button("Przenieś błędne i powtarzalne do kolejki"):
+    if col_audit.button("Audytuj duplikaty i błędy krytyczne"):
+        audit = audit_meta_jobs_for_repetition(run_id=result_run or None)
+        st.success(f"Sprawdzono {audit['checked']} produktów. Do poprawy oznaczono {audit['flagged']} (tylko meta title); identyczne meta description: {audit.get('duplicate_descriptions', 0)} — tylko informacyjnie.")
+
+    if col_requeue.button("Przenieś błędne do kolejki"):
         count = requeue_jobs(
             ["validation_failed", "failed"],
             "Ponowienie po kontroli jakości",
