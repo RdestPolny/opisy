@@ -56,9 +56,9 @@ except ImportError:
 # STAŁE I KONFIGURACJA
 # ═══════════════════════════════════════════════════════════════════
 
-APP_VERSION = "4.4.1"
+APP_VERSION = "4.4.3"
 APP_NAME = "Generator opisów i metatagów produktów"
-PROMPT_VERSION = "meta-v4.4.1-turbo-soft-validation-title-level-fix-2026-08"
+PROMPT_VERSION = "meta-v4.4.3-title-hard-max-75-2026-08"
 DEFAULT_GEMINI_MODEL = "gemini-3.5-flash-lite"
 PERPLEXITY_MODEL = "sonar"
 PERPLEXITY_API_URL = "https://api.perplexity.ai/chat/completions"
@@ -74,6 +74,13 @@ BATCH_PRODUCTS_PER_FILE = 2500
 AKENEO_SKU_FILTER_CHUNK_SIZE = 50
 MAX_META_RETRIES = 2
 RESULT_PREVIEW_LIMIT = 200
+
+# Meta title: priorytetem jest kompletna identyfikacja wariantu produktu.
+# Nie próbujemy sztucznie mieścić się w klasycznym limicie SERP. Google może
+# skrócić prezentację, natomiast źródłowy title ma zachować ważne cechy SKU.
+META_TITLE_TARGET_MIN = 58
+META_TITLE_TARGET_MAX = 72
+META_TITLE_HARD_MAX = 75
 
 DB_PATH = Path(".streamlit/product_workflow.sqlite3")
 BATCH_DIR = Path(".streamlit/gemini_batches")
@@ -102,7 +109,7 @@ META_RESPONSE_SCHEMA = {
     "properties": {
         "meta_title": {
             "type": "string",
-            "description": "Unikalny meta title produktu, maksymalnie 60 znaków ze spacjami.",
+            "description": "Unikalny meta title produktu, maksymalnie 75 znaków ze spacjami.",
         },
         "meta_description": {
             "type": "string",
@@ -858,7 +865,7 @@ def validate_description_quality(description: str) -> Tuple[str, str]:
     return "ok", "Opis OK"
 
 
-def build_meta_title(title: str, author: str, max_chars: int = 60) -> str:
+def build_meta_title(title: str, author: str, max_chars: int = META_TITLE_HARD_MAX) -> str:
     """Awaryjny meta title używany wyłącznie, gdy Gemini nie zwróci wyniku.
 
     Główny workflow od v4.2.0 generuje meta title przez AI. Fallback nie powinien
@@ -964,7 +971,7 @@ Meta title ma identyfikować dokładnie ten wariant produktu i odpowiadać na in
 Nie przepisuj mechanicznie nazwy magazynowej. Zredaguj ją jak specjalista SEO, ale bez dopowiadania danych.
 
 TWARDE ZASADY META TITLE
-- Idealna długość: 45-60 znaków ze spacjami. Twarde maksimum: 60. Krótszy tytuł jest dobry, jeśli kompletnie identyfikuje produkt.
+- Preferowana długość: 58-72 znaki ze spacjami. Twarde maksimum: 75. Ważniejsza jest kompletna identyfikacja wariantu niż sztuczne skracanie title.
 - Nie dodawaj nazwy sklepu Bookland.
 - Nie stosuj CTA, języka reklamowego, superlatywów ani zdań opisowych.
 - Nie kończ urwanym słowem, przyimkiem, spójnikiem, separatorem ani wielokropkiem.
@@ -1989,7 +1996,7 @@ META_RESPONSE_SCHEMA = {
         "meta_title_candidates": {
             "type": "array",
             "items": {"type": "string"},
-            "description": "Cztery różne, kompletne kandydatury meta title, każda maksymalnie 60 znaków.",
+            "description": "Cztery różne, kompletne kandydatury meta title, każda maksymalnie 75 znaków.",
         },
         "meta_description": {
             "type": "string",
@@ -2106,8 +2113,11 @@ def meta_title_validation_errors(
 
     if not title:
         return ["Brak meta title"]
-    if len(title) > 60:
-        errors.append(f"Za długi meta title: {len(title)} zn. (maks. 60)")
+    if len(title) > META_TITLE_HARD_MAX:
+        errors.append(
+            f"Za długi meta title: {len(title)} zn. "
+            f"(maks. {META_TITLE_HARD_MAX}; dopuszczamy świadomie więcej niż 60)"
+        )
     if len(title) < 20 and len(source_title) >= 35:
         errors.append(f"Meta title jest zbyt ogólny lub zbyt krótki: {len(title)} zn.")
     if "..." in title or title.endswith("…"):
@@ -2181,14 +2191,22 @@ def title_candidate_score(
     length = len(title)
     score = 100.0 - 35.0 * len(errors)
 
-    if 42 <= length <= 59:
-        score += 24
-    elif 35 <= length <= 60:
-        score += 14
-    elif 28 <= length <= 60:
-        score += 5
+    # v4.4.3: długość jest tylko jednym z sygnałów rankera; kompletność ma pierwszeństwo.
+    # Ranker premiuje kompletne, naturalne title w szerokim zakresie, a 75 znaków
+    # jest jedynym twardym maksimum. Tytuł 73-75 znaków nadal może wygrać, jeśli
+    # lepiej zachowuje serię, poziom, format, platformę lub typ dostępu.
+    if META_TITLE_TARGET_MIN <= length <= META_TITLE_TARGET_MAX:
+        score += 32
+    elif META_TITLE_TARGET_MAX < length <= META_TITLE_HARD_MAX:
+        score += 29
+    elif 50 <= length < META_TITLE_TARGET_MIN:
+        score += 18
+    elif 40 <= length < 50:
+        score += 8
+    elif length <= META_TITLE_HARD_MAX:
+        score += 2
     else:
-        score -= 10
+        score -= 18
 
     for token in signals.get("identity_tokens", [])[:4]:
         if normalize_for_compare(token) in normalized:
@@ -2315,7 +2333,7 @@ Wybierz product_type spośród: student_access_code, teacher_access_code, digita
 Ustal canonical_identity: oficjalną nazwę serii, tytułu lub modelu bez śmieci katalogowych.
 
 META TITLE: CZTERY KANDYDATURY
-Zwróć cztery różne, pełne kandydatury. Każda musi mieć maksymalnie 60 znaków ze spacjami i być gotowa do publikacji.
+Zwróć cztery różne, pełne kandydatury. Każda musi mieć maksymalnie 75 znaków ze spacjami i być gotowa do publikacji.
 - Kandydat 1: najwierniejszy oficjalnej nazwie.
 - Kandydat 2: najbardziej naturalny po polsku i czytelny w SERP.
 - Kandydat 3: najbardziej zwarty, ale nadal jednoznaczny.
@@ -2400,7 +2418,7 @@ def locked_fields_from_job(job: Dict) -> Tuple[str, str]:
 # - duży run jest automatycznie shardowany do maks. 2500 produktów na zadanie,
 #   a do 4 zadań Batch API jest wysyłanych równolegle.
 
-PROMPT_VERSION = "meta-v4.4.1-turbo-soft-validation-title-level-fix-2026-08"
+PROMPT_VERSION = "meta-v4.4.3-title-hard-max-75-2026-08"
 BATCH_PRODUCTS_PER_FILE = 2500
 TURBO_BATCH_SHARD_SIZE = 2500
 BATCH_SUBMIT_WORKERS = 4
@@ -2633,7 +2651,7 @@ META_RESPONSE_SCHEMA = {
         "meta_title_candidates": {
             "type": "array",
             "items": {"type": "string"},
-            "description": "Trzy różne kompletne meta title, każdy maksymalnie 60 znaków.",
+            "description": "Trzy różne kompletne meta title, każdy maksymalnie 75 znaków.",
         },
         "meta_description": {
             "type": "string",
@@ -2647,13 +2665,21 @@ META_SYSTEM_PROMPT = """Jesteś seniorem SEO e-commerce i redaktorem informacji 
 Tworzysz metatagi dla jednego SKU na podstawie danych z Akeneo. Najpierw rozpoznaj tożsamość i wariant produktu, potem redaguj.
 
 META TITLE
-Zwróć 3 różne kandydatury, każda kompletna i <=60 znaków.
+Zwróć 3 różne, pełnowartościowe kandydatury. Jedyny twardy limit to 75 znaków ze spacjami.
+Nie twórz osobnego wariantu skróconego tylko po to, aby zmieścić się w określonej długości.
+Strategie:
+1) kandydat pełny: zwykle 65-75 znaków; maksymalnie zachowaj wartościowe cechy produktu,
+2) kandydat zbalansowany: zwykle 58-72 znaki; zachowaj kompletność przy naturalnej składni,
+3) kandydat alternatywny: zwykle 55-75 znaków; użyj innej naturalnej redakcji, ale nie usuwaj istotnych cech SKU.
 Priorytet informacji:
 1) oficjalna seria/tytuł/model,
 2) poziom/egzamin/tom/część/klasa,
 3) komponent i format odróżniający SKU,
 4) odbiorca i typ kodu/dostępu,
 5) autor tylko dla zwykłych książek, jeśli nie wypiera ważniejszych danych.
+Nie skracaj semantycznie ważnego elementu tylko po to, aby uzyskać krótszy title.
+Jeżeli pełniejsza wersja do 75 znaków lepiej identyfikuje SKU, preferuj ją nad krótszą, uboższą wersją.
+Google może skrócić prezentację w SERP - to akceptowalne; Ty masz dostarczyć kompletny i naturalny title.
 Nie ucinaj nazwy mechanicznie. Nie kończ słowem: Kod, Access, Online, Student, Teacher ani przyimkiem.
 Dla materiałów językowych zachowuj nazwy własne: MyEnglishLab, Online Practice, Teacher's Portal, eBook, eText, B2 First, C1 Advanced.
 Typ dostępu zapisuj naturalnie po polsku: kod uczniowski, kod nauczycielski, kod dostępu, bez kodu.
@@ -3104,8 +3130,10 @@ def revalidate_meta_jobs_v44(run_id: Optional[str] = None) -> Dict[str, int]:
 
 
 # ═══════════════════════════════════════════════════════════════════
-# V4.4.1 — mniej fałszywych odrzuceń + szybsze 10k SKU
+# V4.4.3 — twardy limit 75 znaków i pełniejsze meta title
 # ═══════════════════════════════════════════════════════════════════
+# - meta title ma jeden twardy limit 75 znaków; wszystkie 3 kandydatury są pełnowartościowe;
+# - ranker preferuje zachowanie kompletnej informacji o wariancie nad agresywnym skracaniem;
 # - powtarzalne początki i nawet identyczne meta description są raportowane,
 #   ale NIE zmieniają statusu na validation_failed;
 # - poziom/egzamin w meta title jest walidowany WYŁĄCZNIE względem nazwy SKU;
@@ -3115,7 +3143,7 @@ def revalidate_meta_jobs_v44(run_id: Optional[str] = None) -> Dict[str, int]:
 # - kontekst opisu jest dynamicznie krótszy dla kodów/dostępów cyfrowych;
 # - maksymalny output Gemini zmniejszony, bo schema zawiera tylko 3 tytuły + opis.
 
-PROMPT_VERSION = "meta-v4.4.1-turbo-soft-validation-title-level-fix-2026-08"
+PROMPT_VERSION = "meta-v4.4.3-title-hard-max-75-2026-08"
 META_RECENT_OPENINGS_HINT = 0
 GEMINI_META_MAX_OUTPUT_TOKENS = 320
 BATCH_REFRESH_WORKERS = 4
@@ -3415,7 +3443,9 @@ Typ: {source_product_type(job)}
 Kontekst semantyczny: {cues}
 
 META TITLE
-- 3 różne kandydatury <=60 znaków, chyba że pole jest zablokowane.
+- 3 różne pełnowartościowe kandydatury do 75 znaków, chyba że pole jest zablokowane.
+- Pełny: zwykle 65-75; zbalansowany: 58-72; alternatywny: 55-75.
+- Nie twórz specjalnie krótkiej wersji. Jeżeli dłuższy title do 75 znaków zachowuje ważną cechę SKU, preferuj go.
 - Zachowaj twarde cechy z NAZWY: serię, poziom/egzamin, format, komponent, odbiorcę i rodzaj dostępu, jeśli występują.
 - Poziom z nazwy jest wiążący; poziomy tylko z opisu nie są obowiązkowe.
 
@@ -3684,7 +3714,7 @@ def render_result_preview(result: Dict, channel: str, locale: str) -> None:
         st.text_input("meta_title", value=meta_title, disabled=True, key=f"mt_{sku}")
         st.text_area("meta_description", value=meta_description, disabled=True, height=90, key=f"md_{sku}")
         col1, col2 = st.columns(2)
-        col1.caption(f"{len(meta_title)}/60 znaków")
+        col1.caption(f"{len(meta_title)}/{META_TITLE_HARD_MAX} znaków · cel {META_TITLE_TARGET_MIN}-{META_TITLE_TARGET_MAX}")
         col2.caption(f"{len(meta_description)}/160 znaków")
         if result.get("validation_errors"):
             st.warning("; ".join(result["validation_errors"]))
