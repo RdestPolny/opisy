@@ -56,9 +56,9 @@ except ImportError:
 # STAŁE I KONFIGURACJA
 # ═══════════════════════════════════════════════════════════════════
 
-APP_VERSION = "4.4.3"
+APP_VERSION = "4.4.4"
 APP_NAME = "Generator opisów i metatagów produktów"
-PROMPT_VERSION = "meta-v4.4.3-title-hard-max-75-2026-08"
+PROMPT_VERSION = "meta-v4.4.4-validator-driven-title-autorepair-2026-08"
 DEFAULT_GEMINI_MODEL = "gemini-3.5-flash-lite"
 PERPLEXITY_MODEL = "sonar"
 PERPLEXITY_API_URL = "https://api.perplexity.ai/chat/completions"
@@ -2294,6 +2294,192 @@ def extract_meta_title_candidates(data: Dict) -> List[str]:
     return unique
 
 
+def _primary_identity_for_title_repair(job: Dict) -> str:
+    """Buduje krótki, bezpieczny rdzeń nazwy do napraw strukturalnych meta title.
+
+    Używamy przede wszystkim pierwszego członu nazwy Akeneo (zwykle seria/model),
+    a poziom dopinamy osobno. Funkcja jest uruchamiana wyłącznie jako fallback
+    dla tytułu, który już nie przeszedł walidacji - nie zastępuje normalnego rankera.
+    """
+    raw = clean_source_title_for_prompt(job.get("title", ""))
+    raw = normalize_spaces(raw)
+    if not raw:
+        return ""
+
+    # Pierwszy człon w katalogu najczęściej jest stabilną nazwą serii/modelu.
+    parts = [normalize_spaces(part) for part in re.split(r"\s*[.|;]\s*", raw) if normalize_spaces(part)]
+    identity = parts[0] if parts else raw
+
+    # Usuń kwalifikatory, które naprawa dopnie później w kontrolowanej postaci.
+    identity = re.sub(r"\s*\((?:no\s+key|without\s+key|bez\s+(?:kodu|klucza))\)\s*", " ", identity, flags=re.I)
+    identity = re.sub(r"\b(?:Student'?s|Teacher'?s)\s+(?:eBook|Book)\b.*$", "", identity, flags=re.I)
+    identity = normalize_spaces(identity).strip(" -–|,;:")
+
+    # Jeżeli pierwszy człon sam jest przesadnie długi, zostawiamy sensowną granicę
+    # słowa. To fallback; finalny walidator nadal musi zaakceptować wynik.
+    if len(identity) > 48:
+        identity = smart_truncate(identity, 48).rstrip(" -–|,;:")
+    return identity
+
+
+def _required_access_phrase(required: Dict[str, object]) -> str:
+    if required.get("without_code"):
+        return "bez klucza"
+    if required.get("teacher") and required.get("access"):
+        return "kod nauczycielski"
+    if required.get("student") and required.get("access"):
+        return "kod uczniowski"
+    if required.get("access"):
+        return "kod dostępu"
+    return ""
+
+
+def _required_component_phrases(job: Dict, required: Dict[str, object]) -> List[str]:
+    """Zwraca tylko twarde cechy wariantu, które odróżniają SKU."""
+    source = normalize_for_compare(job.get("title", ""))
+    parts: List[str] = []
+
+    # Najbardziej specyficzne platformy/komponenty przed formatem ogólnym.
+    if required.get("teacher_portal"):
+        parts.append("Teacher's Portal")
+    if required.get("myenglishlab"):
+        parts.append("MyEnglishLab")
+    if required.get("online_practice"):
+        parts.append("Online Practice")
+
+    if required.get("etext"):
+        parts.insert(0, "eText")
+    elif required.get("ebook"):
+        # Student's / Teacher's eBook niesie dodatkowo odbiorcę i jest naturalne.
+        if required.get("student") and re.search(r"student'?s\s+ebook", source):
+            parts.insert(0, "Student's eBook")
+        elif required.get("teacher") and re.search(r"teacher'?s\s+ebook", source):
+            parts.insert(0, "Teacher's eBook")
+        else:
+            parts.insert(0, "eBook")
+
+    # Zachowaj kolejność i usuń duplikaty.
+    result: List[str] = []
+    seen: Set[str] = set()
+    for part in parts:
+        key = normalize_for_compare(part)
+        if key and key not in seen:
+            seen.add(key)
+            result.append(part)
+    return result
+
+
+def _fit_repair_title(parts: Sequence[str], suffix: str = "") -> str:
+    """Składa naprawiony title bez mechanicznego urywania końcówki."""
+    clean_parts = [normalize_spaces(p).strip(" -–|,;:") for p in parts if normalize_spaces(p).strip(" -–|,;:")]
+    if not clean_parts:
+        return ""
+
+    if len(clean_parts) == 1:
+        base = clean_parts[0]
+    else:
+        base = f"{clean_parts[0]} – " + " + ".join(clean_parts[1:])
+    candidate = f"{base} | {suffix}" if suffix else base
+    candidate = normalize_generated_meta_title(candidate)
+    if len(candidate) <= META_TITLE_HARD_MAX:
+        return candidate
+
+    # Jeżeli po dodaniu twardego kwalifikatora brakuje miejsca, najpierw usuwamy
+    # najmniej specyficzny dodatkowy komponent. Nie usuwamy suffixu ani rdzenia.
+    extra = list(clean_parts[1:])
+    while extra:
+        extra.pop()
+        base = clean_parts[0] if not extra else f"{clean_parts[0]} – " + " + ".join(extra)
+        candidate = f"{base} | {suffix}" if suffix else base
+        candidate = normalize_generated_meta_title(candidate)
+        if len(candidate) <= META_TITLE_HARD_MAX:
+            return candidate
+    return ""
+
+
+def build_local_meta_title_repairs(meta_title: str, job: Dict) -> List[str]:
+    """Tworzy bezkosztowe kandydatury naprawcze na podstawie błędów walidatora.
+
+    Gdy walidator *wie*, że brakuje twardej cechy SKU, aplikacja ma spróbować ją
+    naprawić, a nie jedynie wyświetlić ostrzeżenie. Funkcja nie zgaduje cech -
+    korzysta wyłącznie z nazwy produktu / title_required_features().
+    """
+    original = normalize_generated_meta_title(meta_title)
+    if not original:
+        return []
+    errors = meta_title_validation_errors(original, job)
+    if not errors:
+        return []
+
+    required = title_required_features(job)
+    repairs: List[str] = []
+
+    # 1. Najmniej inwazyjna naprawa: dopisz brakujący kwalifikator, jeśli się mieści.
+    append_phrases: List[str] = []
+    normalized = normalize_for_compare(original)
+    levels = required.get("signals", {}).get("levels", []) if isinstance(required.get("signals"), dict) else []
+    for level in levels:
+        if normalize_for_compare(level) not in normalized:
+            append_phrases.append(str(level))
+    if required.get("ebook") and "ebook" not in normalized:
+        append_phrases.append("eBook")
+    if required.get("etext") and "etext" not in normalized:
+        append_phrases.append("eText")
+    if required.get("myenglishlab") and "myenglishlab" not in normalized:
+        append_phrases.append("MyEnglishLab")
+    if required.get("online_practice") and "online practice" not in normalized:
+        append_phrases.append("Online Practice")
+    if required.get("teacher_portal") and "teacher s portal" not in normalized:
+        append_phrases.append("Teacher's Portal")
+
+    access_phrase = _required_access_phrase(required)
+    if access_phrase and normalize_for_compare(access_phrase) not in normalized:
+        append_phrases.append(access_phrase)
+
+    if append_phrases:
+        appended = normalize_generated_meta_title(original + " | " + " | ".join(append_phrases))
+        if len(appended) <= META_TITLE_HARD_MAX:
+            repairs.append(appended)
+
+    # 2. Rekonstrukcja semantyczna: rdzeń serii + poziom + twarde komponenty + dostęp.
+    identity = _primary_identity_for_title_repair(job)
+    if identity:
+        level_tokens = [str(x) for x in levels]
+        identity_normalized = normalize_for_compare(identity)
+        for level in level_tokens:
+            if normalize_for_compare(level) not in identity_normalized:
+                identity = normalize_spaces(f"{identity} {level}")
+
+        components = _required_component_phrases(job, required)
+        reconstructed = _fit_repair_title([identity, *components], access_phrase)
+        if reconstructed:
+            repairs.append(reconstructed)
+
+        # 3. Wersja minimalistyczna zachowująca wyłącznie rdzeń + format + twardy dostęp.
+        primary_format = ""
+        if required.get("etext"):
+            primary_format = "eText"
+        elif required.get("ebook"):
+            if required.get("student"):
+                primary_format = "Student's eBook"
+            elif required.get("teacher"):
+                primary_format = "Teacher's eBook"
+            else:
+                primary_format = "eBook"
+        minimal = _fit_repair_title([identity, primary_format] if primary_format else [identity], access_phrase)
+        if minimal:
+            repairs.append(minimal)
+
+    unique: List[str] = []
+    seen: Set[str] = {normalize_for_compare(original)}
+    for candidate in repairs:
+        key = normalize_for_compare(candidate)
+        if candidate and key not in seen:
+            seen.add(key)
+            unique.append(candidate)
+    return unique
+
+
 def select_best_meta_title_candidate(
     candidates: Sequence[str],
     job: Dict,
@@ -2301,8 +2487,14 @@ def select_best_meta_title_candidate(
     existing_title_owners: Optional[Dict[str, str]] = None,
 ) -> Tuple[str, List[str], List[Tuple[str, float, List[str]]]]:
     diagnostics: List[Tuple[str, float, List[str]]] = []
-    for candidate in candidates:
-        normalized_candidate = normalize_generated_meta_title(candidate)
+    seen: Set[str] = set()
+
+    def add_candidate(value: str) -> None:
+        normalized_candidate = normalize_generated_meta_title(value)
+        key = normalize_for_compare(normalized_candidate)
+        if not normalized_candidate or key in seen:
+            return
+        seen.add(key)
         score, errors = title_candidate_score(
             normalized_candidate,
             job,
@@ -2310,11 +2502,28 @@ def select_best_meta_title_candidate(
         )
         diagnostics.append((normalized_candidate, score, errors))
 
+    # Kandydatury AI.
+    for candidate in candidates:
+        add_candidate(candidate)
+
+    # v4.4.4: walidator-driven auto-repair. Każdy błędny kandydat może stworzyć
+    # lokalne, bezkosztowe naprawy. Dzięki temu np. brak „bez klucza” nie kończy
+    # się ostrzeżeniem, jeśli da się zbudować poprawny title do 75 znaków.
+    initial = list(diagnostics)
+    for candidate, _, errors in initial:
+        if not errors:
+            continue
+        for repair in build_local_meta_title_repairs(candidate, job):
+            add_candidate(repair)
+
     if not diagnostics:
         fallback = normalize_generated_meta_title(build_meta_title(job.get("title", ""), job.get("author", "")))
-        errors = meta_title_validation_errors(fallback, job, existing_title_owners=existing_title_owners)
-        return fallback, errors, [(fallback, -9999.0, errors)]
+        add_candidate(fallback)
+        for repair in build_local_meta_title_repairs(fallback, job):
+            add_candidate(repair)
 
+    # Najpierw kandydat bez błędów, dopiero potem score. To pozwala naprawionej
+    # wersji wygrać nawet wtedy, gdy pierwotny title stylistycznie miał wyższy score.
     diagnostics.sort(key=lambda item: (not item[2], item[1]), reverse=True)
     best_title, _, best_errors = diagnostics[0]
     return best_title, best_errors, diagnostics
@@ -2418,7 +2627,7 @@ def locked_fields_from_job(job: Dict) -> Tuple[str, str]:
 # - duży run jest automatycznie shardowany do maks. 2500 produktów na zadanie,
 #   a do 4 zadań Batch API jest wysyłanych równolegle.
 
-PROMPT_VERSION = "meta-v4.4.3-title-hard-max-75-2026-08"
+PROMPT_VERSION = "meta-v4.4.4-validator-driven-title-autorepair-2026-08"
 BATCH_PRODUCTS_PER_FILE = 2500
 TURBO_BATCH_SHARD_SIZE = 2500
 BATCH_SUBMIT_WORKERS = 4
@@ -2682,7 +2891,9 @@ Jeżeli pełniejsza wersja do 75 znaków lepiej identyfikuje SKU, preferuj ją n
 Google może skrócić prezentację w SERP - to akceptowalne; Ty masz dostarczyć kompletny i naturalny title.
 Nie ucinaj nazwy mechanicznie. Nie kończ słowem: Kod, Access, Online, Student, Teacher ani przyimkiem.
 Dla materiałów językowych zachowuj nazwy własne: MyEnglishLab, Online Practice, Teacher's Portal, eBook, eText, B2 First, C1 Advanced.
-Typ dostępu zapisuj naturalnie po polsku: kod uczniowski, kod nauczycielski, kod dostępu, bez kodu.
+Typ dostępu zapisuj naturalnie po polsku: kod uczniowski, kod nauczycielski, kod dostępu, bez kodu / bez klucza.
+Jeżeli NAZWA produktu zawiera „no key”, „without key”, „bez kodu” lub „bez klucza”, KAŻDA kandydatura musi zachować tę informację. To cecha wariantu SKU, nie opcjonalny detal.
+Jeżeli walidator w retry wskazuje konkretną utraconą cechę, wszystkie nowe kandydatury muszą ją naprawić; nie powtarzaj poprzedniej wersji z tym samym błędem.
 Nie twórz zlepków typu: Online Kod, Portal Kod, eBook Kod, Kod Ucznia.
 Dla zwykłych książek preferuj „Tytuł – Autor”; przy długim tytule ważniejszy jest pełny sens tytułu niż autor. Nie używaj „praca zbiorowa”.
 
@@ -3143,7 +3354,7 @@ def revalidate_meta_jobs_v44(run_id: Optional[str] = None) -> Dict[str, int]:
 # - kontekst opisu jest dynamicznie krótszy dla kodów/dostępów cyfrowych;
 # - maksymalny output Gemini zmniejszony, bo schema zawiera tylko 3 tytuły + opis.
 
-PROMPT_VERSION = "meta-v4.4.3-title-hard-max-75-2026-08"
+PROMPT_VERSION = "meta-v4.4.4-validator-driven-title-autorepair-2026-08"
 META_RECENT_OPENINGS_HINT = 0
 GEMINI_META_MAX_OUTPUT_TOKENS = 320
 BATCH_REFRESH_WORKERS = 4
@@ -3441,6 +3652,7 @@ SYGNAŁY
 {title_signal_summary(signals)}
 Typ: {source_product_type(job)}
 Kontekst semantyczny: {cues}
+Twarde cechy wymagane przez walidator: {title_required_features(job)}
 
 META TITLE
 - 3 różne pełnowartościowe kandydatury do 75 znaków, chyba że pole jest zablokowane.
