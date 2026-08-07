@@ -56,7 +56,7 @@ except ImportError:
 # STAŁE I KONFIGURACJA
 # ═══════════════════════════════════════════════════════════════════
 
-APP_VERSION = "4.4.4"
+APP_VERSION = "4.5.1"
 APP_NAME = "Generator opisów i metatagów produktów"
 PROMPT_VERSION = "meta-v4.4.4-validator-driven-title-autorepair-2026-08"
 DEFAULT_GEMINI_MODEL = "gemini-3.5-flash-lite"
@@ -65,15 +65,17 @@ PERPLEXITY_API_URL = "https://api.perplexity.ai/chat/completions"
 DEFAULT_CHANNEL = "Bookland"
 DEFAULT_LOCALE = "pl_PL"
 
-AKENEO_TIMEOUT = 45
+AKENEO_TIMEOUT = 20
 PERPLEXITY_TIMEOUT = 45
 AKENEO_MAX_WORKERS = 4
 GEMINI_INTERACTIVE_WORKERS = 3
-INTERACTIVE_CHUNK_SIZE = 100
+INTERACTIVE_CHUNK_SIZE = 12
+GEMINI_HTTP_TIMEOUT_MS = 45_000
+AKENEO_MAX_ATTEMPTS = 3
 BATCH_PRODUCTS_PER_FILE = 2500
 AKENEO_SKU_FILTER_CHUNK_SIZE = 50
 MAX_META_RETRIES = 2
-RESULT_PREVIEW_LIMIT = 200
+RESULT_PREVIEW_LIMIT = 100
 
 # Meta title: priorytetem jest kompletna identyfikacja wariantu produktu.
 # Nie próbujemy sztucznie mieścić się w klasycznym limicie SERP. Google może
@@ -85,6 +87,9 @@ META_TITLE_HARD_MAX = 75
 DB_PATH = Path(".streamlit/product_workflow.sqlite3")
 BATCH_DIR = Path(".streamlit/gemini_batches")
 IMPORT_REPORT_DIR = Path(".streamlit/import_reports")
+INTERACTIVE_CHECKPOINT_DIR = Path(".streamlit/interactive_checkpoints")
+INTERACTIVE_CHECKPOINT_EVERY = 1
+INTERACTIVE_UI_UPDATE_EVERY = 1
 
 REQUIRED_SECRETS = [
     "AKENEO_BASE_URL",
@@ -294,6 +299,7 @@ if missing_secrets:
     st.stop()
 
 GEMINI_MODEL = str(st.secrets.get("GEMINI_MODEL", DEFAULT_GEMINI_MODEL))
+GOOGLE_API_KEY = str(st.secrets["GOOGLE_API_KEY"])
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -1097,15 +1103,31 @@ def build_description_user_message(
 # KLIENCI API
 # ═══════════════════════════════════════════════════════════════════
 
-@st.cache_resource(show_spinner=False)
+# Klienci są per-thread. W v4.5.0 jeden współdzielony klient HTTP/Gemini był
+# używany przez kilka workerów równocześnie. Przy długich przebiegach mogło to
+# prowadzić do zawieszonego połączenia, które blokowało cały chunk w as_completed().
+_thread_local = threading.local()
+
+
 def get_gemini_client() -> genai.Client:
-    return genai.Client(api_key=st.secrets["GOOGLE_API_KEY"])
+    client = getattr(_thread_local, "gemini_client", None)
+    if client is None:
+        client = genai.Client(
+            api_key=GOOGLE_API_KEY,
+            # google-genai interpretuje timeout w milisekundach. Dzięki temu
+            # pojedynczy zawieszony request nie może zatrzymać całej kolejki bez końca.
+            http_options={"timeout": GEMINI_HTTP_TIMEOUT_MS},
+        )
+        _thread_local.gemini_client = client
+    return client
 
 
-@st.cache_resource(show_spinner=False)
 def get_http_session() -> requests.Session:
-    session = requests.Session()
-    session.headers.update({"User-Agent": f"BooklandSEOGenerator/{APP_VERSION}"})
+    session = getattr(_thread_local, "http_session", None)
+    if session is None:
+        session = requests.Session()
+        session.headers.update({"User-Agent": f"BooklandSEOGenerator/{APP_VERSION}"})
+        _thread_local.http_session = session
     return session
 
 
@@ -1113,7 +1135,7 @@ def request_with_retry(
     method: str,
     url: str,
     *,
-    max_attempts: int = 6,
+    max_attempts: int = AKENEO_MAX_ATTEMPTS,
     timeout: int = AKENEO_TIMEOUT,
     **kwargs,
 ) -> requests.Response:
@@ -1261,6 +1283,250 @@ def parse_bulk_sku_payload(payload: str) -> Tuple[List[str], int]:
 def chunks(values: Sequence[str], size: int) -> Iterator[List[str]]:
     for start in range(0, len(values), size):
         yield list(values[start : start + size])
+
+
+def _decode_upload_bytes(raw_bytes: bytes) -> str:
+    try:
+        return raw_bytes.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        return raw_bytes.decode("cp1250", errors="replace")
+
+
+def _validation_errors_from_cell(value: object) -> List[str]:
+    text = str(value or "").strip()
+    if not text or text.lower() in {"nan", "none", "[]"}:
+        return []
+    try:
+        parsed = json.loads(text)
+        if isinstance(parsed, list):
+            return [str(item).strip() for item in parsed if str(item).strip()]
+    except Exception:
+        pass
+    return [part.strip() for part in re.split(r"\s*;\s*", text) if part.strip()]
+
+
+def _bool_from_cell(value: object, default: bool = True) -> bool:
+    text = str(value or "").strip().lower()
+    if not text:
+        return default
+    if text in {"1", "true", "yes", "tak"}:
+        return True
+    if text in {"0", "false", "no", "nie"}:
+        return False
+    return default
+
+
+def parse_resumable_product_file(raw_bytes: bytes) -> Tuple[List[str], Dict[str, Dict], List[str]]:
+    """Czyta zwykły TXT/CSV/TSV z SKU albo checkpoint wygenerowany przez aplikację.
+
+    Jeżeli plik ma już meta_title/meta_description, poprawne wiersze są traktowane jako
+    ukończone i nie będą ponownie wysyłane do Gemini.
+    """
+    text = _decode_upload_bytes(raw_bytes)
+    errors: List[str] = []
+    try:
+        df = pd.read_csv(
+            io.StringIO(text),
+            sep=None,
+            engine="python",
+            dtype=str,
+            keep_default_na=False,
+        )
+    except Exception:
+        skus, _ = parse_bulk_sku_payload(text)
+        return skus, {}, errors
+
+    if df.empty or len(df.columns) == 0:
+        skus, _ = parse_bulk_sku_payload(text)
+        return skus, {}, errors
+
+    normalized_columns = {normalize_for_compare(col): col for col in df.columns}
+    sku_column = next(
+        (normalized_columns[key] for key in ("sku", "identifier", "product sku", "kod", "kod produktu") if key in normalized_columns),
+        None,
+    )
+    if sku_column is None:
+        # Plik jednokolumnowy bez nagłówka często zostaje odczytany z pierwszym SKU jako nazwą kolumny.
+        skus, _ = parse_bulk_sku_payload(text)
+        return skus, {}, errors
+
+    skus, _ = normalize_sku_list(df[sku_column].tolist())
+    seed_results: Dict[str, Dict] = {}
+
+    meta_title_col = normalized_columns.get("meta title") or normalized_columns.get("meta_title")
+    meta_description_col = normalized_columns.get("meta description") or normalized_columns.get("meta_description")
+    error_col = normalized_columns.get("error")
+    validation_col = normalized_columns.get("validation errors") or normalized_columns.get("validation_errors")
+    title_col = normalized_columns.get("title")
+    desc_html_col = normalized_columns.get("description html") or normalized_columns.get("description_html")
+    url_col = normalized_columns.get("url")
+    old_desc_col = normalized_columns.get("old description") or normalized_columns.get("old_description")
+    meta_only_col = normalized_columns.get("meta only") or normalized_columns.get("meta_only")
+    status_col = normalized_columns.get("checkpoint status") or normalized_columns.get("checkpoint_status") or normalized_columns.get("status")
+
+    if meta_title_col and meta_description_col:
+        for _, row in df.iterrows():
+            sku = str(row.get(sku_column, "") or "").strip()
+            if not sku:
+                continue
+            meta_title = str(row.get(meta_title_col, "") or "").strip()
+            meta_description = str(row.get(meta_description_col, "") or "").strip()
+            error = str(row.get(error_col, "") or "").strip() if error_col else ""
+            status = str(row.get(status_col, "") or "").strip().lower() if status_col else ""
+            # Tylko realnie zakończone wiersze są checkpointem. Wiersze error/pending będą ponowione.
+            if not meta_title or not meta_description or error or status in {"pending", "error", "failed"}:
+                continue
+            seed_results[sku] = {
+                "sku": sku,
+                "title": str(row.get(title_col, "") or "") if title_col else "",
+                "description_html": str(row.get(desc_html_col, "") or "") if desc_html_col else "",
+                "url": str(row.get(url_col, "") or "") if url_col else "",
+                "old_description": str(row.get(old_desc_col, "") or "") if old_desc_col else "",
+                "research": None,
+                "meta_title": meta_title,
+                "meta_description": meta_description,
+                "error": None,
+                "validation_errors": _validation_errors_from_cell(row.get(validation_col, "")) if validation_col else [],
+                "meta_only": _bool_from_cell(row.get(meta_only_col, ""), True) if meta_only_col else True,
+                "checkpoint_source": "uploaded_csv",
+            }
+
+    return skus, seed_results, errors
+
+
+def interactive_checkpoint_key(
+    skus: Sequence[str],
+    *,
+    channel: str,
+    locale: str,
+    store_view_code: str,
+    meta_only: bool,
+    link_only: bool,
+) -> str:
+    payload = {
+        "skus": sorted(dict.fromkeys(str(sku).strip() for sku in skus if str(sku).strip())),
+        "channel": channel,
+        "locale": locale,
+        "store_view_code": store_view_code,
+        "meta_only": bool(meta_only),
+        "link_only": bool(link_only),
+        "prompt_version": PROMPT_VERSION,
+        "model": GEMINI_MODEL,
+    }
+    digest = hashlib.sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()[:20]
+    return f"interactive-{digest}"
+
+
+def interactive_checkpoint_path(checkpoint_key: str) -> Path:
+    INTERACTIVE_CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
+    return INTERACTIVE_CHECKPOINT_DIR / f"{checkpoint_key}.csv"
+
+
+def _checkpoint_row(sku: str, result: Optional[Dict]) -> Dict:
+    if not result:
+        return {
+            "sku": sku,
+            "checkpoint_status": "pending",
+            "title": "",
+            "meta_title": "",
+            "meta_description": "",
+            "validation_errors": "[]",
+            "error": "",
+            "meta_only": True,
+            "description_html": "",
+            "url": "",
+            "old_description": "",
+        }
+    validation_errors = result.get("validation_errors") or []
+    if isinstance(validation_errors, str):
+        validation_errors = _validation_errors_from_cell(validation_errors)
+    error = str(result.get("error") or "").strip()
+    status = "error" if error else ("warning" if validation_errors else "completed")
+    return {
+        "sku": sku,
+        "checkpoint_status": status,
+        "title": result.get("title", ""),
+        "meta_title": result.get("meta_title", ""),
+        "meta_description": result.get("meta_description", ""),
+        "validation_errors": json.dumps(list(validation_errors), ensure_ascii=False),
+        "error": error,
+        "meta_only": bool(result.get("meta_only", True)),
+        "description_html": result.get("description_html", ""),
+        "url": result.get("url", ""),
+        "old_description": result.get("old_description", ""),
+    }
+
+
+def write_interactive_checkpoint(path: Path, skus: Sequence[str], results_by_sku: Dict[str, Dict]) -> None:
+    """Atomowy checkpoint. Zerwany zapis nie uszkodzi poprzedniej wersji pliku."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    rows = [_checkpoint_row(sku, results_by_sku.get(sku)) for sku in skus]
+    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    pd.DataFrame(rows).to_csv(tmp_path, index=False, encoding="utf-8-sig")
+    tmp_path.replace(path)
+
+
+def load_interactive_checkpoint(path: Path) -> Dict[str, Dict]:
+    if not path.exists():
+        return {}
+    try:
+        _, results, _ = parse_resumable_product_file(path.read_bytes())
+        for result in results.values():
+            result["checkpoint_source"] = "server_csv"
+        return results
+    except Exception:
+        return {}
+
+
+def cached_meta_results_for_skus(
+    skus: Sequence[str],
+    *,
+    channel: str,
+    locale: str,
+    include_warnings: bool = True,
+) -> Dict[str, Dict]:
+    """Odzyskuje gotowe metatagi z SQLite bez ponownego wywołania Gemini."""
+    wanted = list(dict.fromkeys(str(sku).strip() for sku in skus if str(sku).strip()))
+    if not wanted:
+        return {}
+    allowed_statuses = {"completed", "validation_failed"} if include_warnings else {"completed"}
+    out: Dict[str, Dict] = {}
+    with db_connect() as conn:
+        for sku_chunk in chunks(wanted, 400):
+            placeholders = ",".join("?" for _ in sku_chunk)
+            rows = conn.execute(
+                f"""
+                SELECT * FROM meta_jobs
+                WHERE sku IN ({placeholders}) AND channel=? AND locale=?
+                  AND prompt_version=? AND model=?
+                """,
+                [*sku_chunk, channel, locale, PROMPT_VERSION, GEMINI_MODEL],
+            ).fetchall()
+            for row in rows:
+                job = dict(row)
+                if job.get("status") not in allowed_statuses:
+                    continue
+                if not job.get("meta_title") or not job.get("meta_description"):
+                    continue
+                try:
+                    validation_errors = json.loads(job.get("validation_errors") or "[]")
+                except Exception:
+                    validation_errors = []
+                out[job["sku"]] = {
+                    "sku": job["sku"],
+                    "title": job.get("title", ""),
+                    "description_html": "",
+                    "url": generate_product_url(job.get("title", "")) if job.get("title") else "",
+                    "old_description": job.get("description", ""),
+                    "research": None,
+                    "meta_title": job.get("meta_title", ""),
+                    "meta_description": job.get("meta_description", ""),
+                    "error": None,
+                    "validation_errors": validation_errors,
+                    "meta_only": True,
+                    "checkpoint_source": "sqlite",
+                }
+    return out
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -3736,10 +4002,29 @@ def generate_metatags_interactive(job: Dict) -> Dict:
                 }
         except Exception as exc:
             api_error = f"Błąd Gemini lub JSON: {exc}"
+            message = str(exc).lower()
             if not last_title:
                 last_title_errors = [api_error]
             if not last_description:
                 last_description_errors = [api_error]
+
+            # Błędy trwałe nie mają sensu w retry. Szczególnie 403 potrafił wcześniej
+            # wykonać kilka identycznych prób i wydłużyć pozornie zawieszony przebieg.
+            fatal_api_error = (
+                "permission_denied" in message
+                or "project has been denied access" in message
+                or "api_key_invalid" in message
+                or "invalid api key" in message
+            )
+            if fatal_api_error:
+                break
+
+            # Timeout jest ograniczony przez GEMINI_HTTP_TIMEOUT_MS. Pozwalamy na
+            # jedną kolejną próbę, ale nie zużywamy wszystkich retry jakościowych
+            # na powtarzające się problemy transportowe.
+            timeout_error = "timeout" in message or "timed out" in message or "deadline" in message
+            if timeout_error and attempt >= 1:
+                break
 
     errors = [*last_title_errors, *last_description_errors]
     return {
@@ -3872,6 +4157,10 @@ def init_session_state() -> None:
         "backlog_category": "",
         "active_meta_run_id": "",
         "last_import_report_path": "",
+        "interactive_seed_results": {},
+        "last_interactive_checkpoint_path": "",
+        "force_regenerate_interactive": False,
+        "reuse_warning_checkpoints": True,
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -3932,6 +4221,16 @@ def render_result_preview(result: Dict, channel: str, locale: str) -> None:
             st.warning("; ".join(result["validation_errors"]))
 
 
+def _interactive_result_is_reusable(result: Dict, *, meta_only: bool) -> bool:
+    if not result or result.get("error"):
+        return False
+    if not result.get("meta_title") or not result.get("meta_description"):
+        return False
+    if not meta_only and not result.get("description_html"):
+        return False
+    return True
+
+
 def process_selected_products(
     skus: Sequence[str],
     *,
@@ -3943,15 +4242,68 @@ def process_selected_products(
     internal_link: Optional[Dict],
     link_only: bool,
     use_research: bool,
+    resume_results: Optional[Dict[str, Dict]] = None,
+    checkpoint_path: Optional[Path] = None,
+    force_regenerate: bool = False,
+    include_warning_checkpoints: bool = True,
 ) -> List[Dict]:
-    results: List[Dict] = []
-    max_workers = GEMINI_INTERACTIVE_WORKERS
-    progress = st.progress(0, "Start")
-    total = len(skus)
-    processed = 0
+    """Przetwarzanie interaktywne odporne na odświeżenie Streamlita.
 
-    for chunk_start in range(0, total, INTERACTIVE_CHUNK_SIZE):
-        chunk = skus[chunk_start : chunk_start + INTERACTIVE_CHUNK_SIZE]
+    Gotowe wyniki są odzyskiwane kolejno z:
+    1) checkpointu wgranego przez użytkownika,
+    2) serwerowego CSV zapisywanego w trakcie pracy,
+    3) SQLite (dla trybu tylko metatagi).
+
+    Po każdym kilku nowych produktach powstaje atomowy checkpoint CSV. Dzięki temu
+    restart sesji nie oznacza ponownego płacenia za produkty już wykonane.
+    """
+    ordered_skus = list(dict.fromkeys(str(sku).strip() for sku in skus if str(sku).strip()))
+    total = len(ordered_skus)
+    if total == 0:
+        return []
+
+    results_by_sku: Dict[str, Dict] = {}
+    if not force_regenerate:
+        for sku, result in (resume_results or {}).items():
+            if sku in ordered_skus and _interactive_result_is_reusable(result, meta_only=meta_only):
+                results_by_sku[sku] = result
+
+        if checkpoint_path:
+            for sku, result in load_interactive_checkpoint(checkpoint_path).items():
+                if sku in ordered_skus and sku not in results_by_sku and _interactive_result_is_reusable(result, meta_only=meta_only):
+                    results_by_sku[sku] = result
+
+        # SQLite przechowuje metatagi po KAŻDYM produkcie, więc odzyskuje nawet
+        # rezultat powstały po ostatnim zapisie pliku CSV.
+        if meta_only:
+            sqlite_results = cached_meta_results_for_skus(
+                ordered_skus,
+                channel=channel,
+                locale=locale,
+                include_warnings=include_warning_checkpoints,
+            )
+            for sku, result in sqlite_results.items():
+                if sku not in results_by_sku and _interactive_result_is_reusable(result, meta_only=True):
+                    results_by_sku[sku] = result
+
+    pending = [sku for sku in ordered_skus if sku not in results_by_sku]
+    resumed_count = total - len(pending)
+
+    progress = st.progress(
+        resumed_count / total,
+        f"Wznowiono: {resumed_count}/{total} gotowych · do zrobienia {len(pending)}",
+    )
+    status_box = st.empty()
+    if resumed_count:
+        status_box.info(
+            f"Pominięto {resumed_count} już zapisanych SKU. Gemini dostanie tylko {len(pending)} pozostałych."
+        )
+
+    newly_processed = 0
+    max_workers = GEMINI_INTERACTIVE_WORKERS
+
+    for chunk_start in range(0, len(pending), INTERACTIVE_CHUNK_SIZE):
+        chunk = pending[chunk_start : chunk_start + INTERACTIVE_CHUNK_SIZE]
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             if meta_only:
                 futures = {
@@ -3980,17 +4332,44 @@ def process_selected_products(
                     ): sku
                     for sku in chunk
                 }
+
             for future in as_completed(futures):
                 sku = futures[future]
                 try:
                     result = future.result()
                 except Exception as exc:
-                    result = {"sku": sku, "title": "", "error": str(exc)}
-                results.append(result)
-                processed += 1
-                progress.progress(processed / total, f"Przetworzono {processed}/{total}: {sku}")
-    progress.progress(1.0, "Gotowe")
-    return results
+                    result = {"sku": sku, "title": "", "error": str(exc), "meta_only": meta_only}
+                results_by_sku[sku] = result
+                newly_processed += 1
+                done_count = resumed_count + newly_processed
+
+                # Checkpoint jest celowo częsty. Przy 500 produktach oznacza ~100
+                # małych, atomowych zapisów, ale najwyżej kilka wyników może zostać
+                # utraconych przy brutalnym ubiciu procesu.
+                if checkpoint_path and newly_processed % INTERACTIVE_CHECKPOINT_EVERY == 0:
+                    write_interactive_checkpoint(checkpoint_path, ordered_skus, results_by_sku)
+
+                # Nie wysyłamy wiadomości do przeglądarki po każdym SKU - to zmniejsza
+                # obciążenie websocketu Streamlita przy długich przebiegach.
+                if newly_processed % INTERACTIVE_UI_UPDATE_EVERY == 0 or done_count == total:
+                    progress.progress(
+                        done_count / total,
+                        f"Gotowe {done_count}/{total} · nowe {newly_processed} · wznowione {resumed_count}",
+                    )
+
+        # Twardy checkpoint po każdej małej paczce produktów.
+        if checkpoint_path:
+            write_interactive_checkpoint(checkpoint_path, ordered_skus, results_by_sku)
+
+    if checkpoint_path:
+        write_interactive_checkpoint(checkpoint_path, ordered_skus, results_by_sku)
+
+    progress.progress(1.0, f"Gotowe {total}/{total}")
+    if checkpoint_path:
+        status_box.success(f"Checkpoint zapisany: {checkpoint_path.name}")
+
+    # Zachowujemy kolejność wejściowego CSV/SKU.
+    return [results_by_sku[sku] for sku in ordered_skus if sku in results_by_sku]
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -4045,7 +4424,7 @@ with interactive_tab:
     st.subheader("Wybór produktów")
     method = st.radio(
         "Metoda",
-        ["Wyszukaj", "Wklej SKU lub URL", "Backlog"],
+        ["Wyszukaj", "Wklej SKU lub URL", "CSV / TXT z checkpointem", "Backlog"],
         horizontal=True,
         key="interactive_method",
     )
@@ -4103,6 +4482,71 @@ with interactive_tab:
             except ProductInputResolutionError as exc:
                 st.error(str(exc))
 
+    elif method == "CSV / TXT z checkpointem":
+        st.caption(
+            "Wgraj zwykły plik z kolumną SKU albo wcześniejszy checkpoint CSV. "
+            "Jeżeli plik zawiera już meta_title i meta_description, te SKU zostaną pominięte."
+        )
+
+        INTERACTIVE_CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
+        existing_checkpoint_files = sorted(
+            INTERACTIVE_CHECKPOINT_DIR.glob("interactive-*.csv"),
+            key=lambda item: item.stat().st_mtime,
+            reverse=True,
+        )[:10]
+        if existing_checkpoint_files:
+            checkpoint_options = {"": "— wybierz checkpoint —"}
+            for checkpoint_file in existing_checkpoint_files:
+                try:
+                    checkpoint_df = pd.read_csv(checkpoint_file, dtype=str, keep_default_na=False)
+                    done_count = int((checkpoint_df.get("checkpoint_status", pd.Series(dtype=str)).isin(["completed", "warning"])).sum())
+                    total_count = len(checkpoint_df)
+                except Exception:
+                    done_count, total_count = 0, 0
+                checkpoint_options[str(checkpoint_file)] = (
+                    f"{checkpoint_file.name} · {done_count}/{total_count} gotowych"
+                )
+            selected_existing_checkpoint = st.selectbox(
+                "Wznów checkpoint zapisany na serwerze",
+                options=list(checkpoint_options),
+                format_func=lambda value: checkpoint_options[value],
+                key="interactive_existing_checkpoint",
+            )
+            if selected_existing_checkpoint and st.button("Wczytaj checkpoint z serwera", key="load_server_checkpoint"):
+                checkpoint_file = Path(selected_existing_checkpoint)
+                file_skus, seed_results, _ = parse_resumable_product_file(checkpoint_file.read_bytes())
+                st.session_state.bulk_selected_products = {sku: {"title": sku} for sku in file_skus}
+                st.session_state.interactive_seed_results = seed_results
+                st.session_state.last_interactive_checkpoint_path = str(checkpoint_file)
+                st.success(f"Wczytano {len(file_skus)} SKU; gotowe: {len(seed_results)}.")
+                st.rerun()
+
+        resume_file = st.file_uploader(
+            "CSV / TSV / TXT",
+            type=["csv", "tsv", "txt"],
+            key="interactive_resume_file",
+        )
+        if resume_file is not None:
+            try:
+                file_skus, seed_results, file_errors = parse_resumable_product_file(resume_file.getvalue())
+                if file_skus:
+                    st.info(
+                        f"Plik: {len(file_skus):,} SKU · gotowe w samym pliku: {len(seed_results):,}".replace(",", " ")
+                    )
+                    if st.button("Załaduj plik do kolejki", type="primary", key="load_interactive_resume_file"):
+                        st.session_state.bulk_selected_products = {sku: {"title": sku} for sku in file_skus}
+                        st.session_state.interactive_seed_results = seed_results
+                        st.success(
+                            f"Załadowano {len(file_skus):,} SKU. {len(seed_results):,} ma już wynik i zostanie pominiętych.".replace(",", " ")
+                        )
+                        st.rerun()
+                else:
+                    st.warning("Nie znaleziono SKU w pliku.")
+                if file_errors:
+                    st.warning("\n".join(file_errors))
+            except Exception as exc:
+                st.error(f"Nie udało się odczytać pliku: {exc}")
+
     else:
         try:
             token = akeneo_get_token()
@@ -4159,16 +4603,94 @@ with interactive_tab:
         col_clear, _ = st.columns([1, 4])
         if col_clear.button("Wyczyść kolejkę"):
             st.session_state.bulk_selected_products = {}
+            st.session_state.interactive_seed_results = {}
+            st.session_state.last_interactive_checkpoint_path = ""
             st.rerun()
 
         st.markdown("---")
-        st.subheader("Generowanie")
+        st.subheader("Generowanie odporne na restart")
         st.session_state.meta_only = st.checkbox(
             "Tylko metatagi",
             value=st.session_state.meta_only,
-            help="Gemini generuje oba pola. Meta title przechodzi walidację długości, tożsamości produktu i wyróżników wariantu; meta description ma indywidualny seed i kontrolę powtarzalności.",
+            help="Gemini generuje oba pola. Każdy gotowy produkt jest checkpointowany; po restarcie gotowe SKU są pomijane.",
         )
-        if st.button("Start generowania", type="primary"):
+        col_resume_a, col_resume_b = st.columns(2)
+        st.session_state.force_regenerate_interactive = col_resume_a.checkbox(
+            "Wymuś generowanie od zera",
+            value=st.session_state.force_regenerate_interactive,
+            help="Domyślnie WYŁĄCZONE. Włącz tylko, jeśli chcesz świadomie zapłacić za ponowne wygenerowanie już gotowych SKU.",
+        )
+        st.session_state.reuse_warning_checkpoints = col_resume_b.checkbox(
+            "Przy wznowieniu akceptuj też wyniki z ostrzeżeniem",
+            value=st.session_state.reuse_warning_checkpoints,
+            help="Ostrzeżenie jakościowe nie oznacza błędu API. Domyślnie takie SKU również są pomijane przy wznowieniu.",
+        )
+
+        skus_for_checkpoint = list(st.session_state.bulk_selected_products)
+        checkpoint_key = interactive_checkpoint_key(
+            skus_for_checkpoint,
+            channel=channel,
+            locale=locale,
+            store_view_code=st.session_state.magento_store_view,
+            meta_only=st.session_state.meta_only,
+            link_only=st.session_state.link_only,
+        )
+        checkpoint_path = interactive_checkpoint_path(checkpoint_key)
+        st.session_state.last_interactive_checkpoint_path = str(checkpoint_path)
+
+        seed_count = len(st.session_state.get("interactive_seed_results", {}))
+        server_checkpoint_count = len(load_interactive_checkpoint(checkpoint_path)) if checkpoint_path.exists() else 0
+        sqlite_count = 0
+        if st.session_state.meta_only:
+            try:
+                sqlite_count = len(
+                    cached_meta_results_for_skus(
+                        skus_for_checkpoint,
+                        channel=channel,
+                        locale=locale,
+                        include_warnings=st.session_state.reuse_warning_checkpoints,
+                    )
+                )
+            except Exception:
+                sqlite_count = 0
+        reusable_estimate = min(
+            len(skus_for_checkpoint),
+            len(
+                set(st.session_state.get("interactive_seed_results", {}))
+                | set(load_interactive_checkpoint(checkpoint_path))
+                | (
+                    set(
+                        cached_meta_results_for_skus(
+                            skus_for_checkpoint,
+                            channel=channel,
+                            locale=locale,
+                            include_warnings=st.session_state.reuse_warning_checkpoints,
+                        )
+                    )
+                    if st.session_state.meta_only else set()
+                )
+            ),
+        ) if not st.session_state.force_regenerate_interactive else 0
+
+        st.caption(
+            f"Checkpoint: {checkpoint_path.name} · rozpoznane gotowe SKU: około {reusable_estimate}/{len(skus_for_checkpoint)} "
+            f"(plik wgrany {seed_count}, serwer CSV {server_checkpoint_count}, SQLite {sqlite_count})."
+        )
+        st.caption(
+            f"Tryb stabilny v4.5.1: paczki po {INTERACTIVE_CHUNK_SIZE}, {GEMINI_INTERACTIVE_WORKERS} równoległe workery, "
+            f"timeout Gemini {GEMINI_HTTP_TIMEOUT_MS // 1000}s. Wynik jest zapisywany po każdym SKU."
+        )
+
+        if checkpoint_path.exists():
+            st.download_button(
+                "Pobierz bieżący checkpoint CSV",
+                checkpoint_path.read_bytes(),
+                file_name=checkpoint_path.name,
+                mime="text/csv",
+                key="download_interactive_checkpoint_before_run",
+            )
+
+        if st.button("Start / wznów generowanie", type="primary"):
             skus = list(st.session_state.bulk_selected_products)
             try:
                 st.session_state.bulk_results = process_selected_products(
@@ -4181,9 +4703,18 @@ with interactive_tab:
                     internal_link=get_internal_link(),
                     link_only=st.session_state.link_only,
                     use_research=st.session_state.use_research,
+                    resume_results=st.session_state.get("interactive_seed_results", {}),
+                    checkpoint_path=checkpoint_path,
+                    force_regenerate=st.session_state.force_regenerate_interactive,
+                    include_warning_checkpoints=st.session_state.reuse_warning_checkpoints,
                 )
                 st.session_state.products_to_send = {
                     result["sku"]: True for result in st.session_state.bulk_results if not result.get("error")
+                }
+                st.session_state.interactive_seed_results = {
+                    result["sku"]: result
+                    for result in st.session_state.bulk_results
+                    if _interactive_result_is_reusable(result, meta_only=st.session_state.meta_only)
                 }
             except Exception as exc:
                 st.error(str(exc))
@@ -4203,6 +4734,21 @@ with interactive_tab:
             "wyniki_interaktywne.csv",
             "text/csv",
         )
+
+        checkpoint_path_value = st.session_state.get("last_interactive_checkpoint_path", "")
+        if checkpoint_path_value and Path(checkpoint_path_value).exists():
+            checkpoint_file = Path(checkpoint_path_value)
+            st.download_button(
+                "Pobierz checkpoint do późniejszego wznowienia",
+                checkpoint_file.read_bytes(),
+                file_name=checkpoint_file.name,
+                mime="text/csv",
+                key="download_interactive_checkpoint_after_run",
+            )
+            st.caption(
+                "Ten plik możesz później wgrać w trybie „CSV / TXT z checkpointem”. "
+                "Wiersze z gotowymi metatagami zostaną pominięte."
+            )
 
         if ok and not any(item.get("meta_only") for item in ok):
             st.subheader("Wysyłka opisów do Akeneo")
