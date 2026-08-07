@@ -56,9 +56,9 @@ except ImportError:
 # STAŁE I KONFIGURACJA
 # ═══════════════════════════════════════════════════════════════════
 
-APP_VERSION = "4.2.0"
+APP_VERSION = "4.3.0"
 APP_NAME = "Generator opisów i metatagów produktów"
-PROMPT_VERSION = "meta-v5-ai-title-description-elt-aware-2026-08"
+PROMPT_VERSION = "meta-v4.3-candidates-ranker-grounded-2026-08"
 DEFAULT_GEMINI_MODEL = "gemini-3.5-flash-lite"
 PERPLEXITY_MODEL = "sonar"
 PERPLEXITY_API_URL = "https://api.perplexity.ai/chat/completions"
@@ -2689,6 +2689,785 @@ def export_quality_report_csv(run_id: Optional[str] = None) -> bytes:
         )
     return pd.DataFrame(rows).to_csv(index=False).encode("utf-8-sig")
 
+
+
+# ═══════════════════════════════════════════════════════════════════
+# V4.3: KANDYDACI META TITLE + LOKALNY RANKER + BLOKOWANIE POPRAWNYCH PÓL
+# ═══════════════════════════════════════════════════════════════════
+
+# W v4.2 model zwracał jeden meta title. Przy długich nazwach kursów często
+# wybierał kompromis, który kończył się słowem „Kod”, mieszał języki albo gubił
+# wariant uczniowski. V4.3 prosi o cztery kandydatury, a następnie wybiera wynik
+# lokalnie na podstawie kompletności, naturalności i unikalności.
+META_RESPONSE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "product_type": {
+            "type": "string",
+            "description": "Krótka klasyfikacja produktu, np. student_access_code, teacher_access_code, ebook, textbook, workbook, dictionary, general_book, other.",
+        },
+        "canonical_identity": {
+            "type": "string",
+            "description": "Najkrótsza poprawna nazwa serii, tytułu lub modelu identyfikująca produkt.",
+        },
+        "meta_title_candidates": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Cztery różne, kompletne kandydatury meta title, każda maksymalnie 60 znaków.",
+        },
+        "meta_description": {
+            "type": "string",
+            "description": "Unikalny polski meta description produktu, 140-160 znaków, bez CTA i retorycznych pytań.",
+        },
+    },
+    "required": ["product_type", "canonical_identity", "meta_title_candidates", "meta_description"],
+}
+
+# Bardziej restrykcyjna lista otwarć. W analizie v4.2 część formalnie poprawnych
+# opisów zaczynała się od sztucznych konstrukcji typu „Niezrozumienie...”,
+# „Tradycyjna nauka czy...” lub od ukrytego CTA „Rozwiń...”.
+BANNED_STARTERS = tuple(dict.fromkeys((*BANNED_STARTERS,
+    "rozwiń", "rozwin", "zyskaj", "wybierz", "postaw na", "skorzystaj",
+    "naukowe cele", "niezrozumienie", "tradycyjna nauka", "ekscytacja",
+    "postępy w", "postepy w", "nowoczesne podejście", "nowoczesne podejscie",
+    "czy ", "jak ", "dlaczego ",
+)))
+
+V43_PRODUCT_TYPES = (
+    "student_access_code",
+    "teacher_access_code",
+    "digital_course_bundle",
+    "ebook",
+    "etext",
+    "online_practice",
+    "textbook",
+    "workbook",
+    "school_book",
+    "dictionary",
+    "general_book",
+    "other",
+)
+
+V43_GENERIC_POLISH_TITLE_WORDS = (
+    "Kod", "Uczeń", "Ucznia", "Nauczyciel", "Nauczyciela", "Nauczycielski",
+    "Ćwiczenia", "Podręcznik", "Zeszyt", "Dostęp",
+)
+
+
+def parse_validation_error_list(value) -> List[str]:
+    if not value:
+        return []
+    if isinstance(value, (list, tuple)):
+        return [str(item) for item in value if str(item).strip()]
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+            if isinstance(parsed, list):
+                return [str(item) for item in parsed if str(item).strip()]
+        except Exception:
+            pass
+        return [item.strip() for item in value.split(";") if item.strip()]
+    return [str(value)]
+
+
+def split_field_errors(errors: Sequence[str]) -> Tuple[List[str], List[str]]:
+    title_errors: List[str] = []
+    description_errors: List[str] = []
+    for error in errors:
+        normalized = normalize_for_compare(error)
+        if "meta title" in normalized or "tytul" in normalized or "tytuł" in error.lower():
+            title_errors.append(error)
+        else:
+            description_errors.append(error)
+    return title_errors, description_errors
+
+
+def normalize_generated_meta_title(value: str) -> str:
+    title = normalize_spaces(strip_html(value)).strip('"„”')
+    title = title.replace("—", "–")
+    title = re.sub(r"\s*[-–]\s*", " – ", title)
+    title = re.sub(r"\s*\|\s*", " | ", title)
+    title = re.sub(r"\s+([,.;:])", r"\1", title)
+    title = re.sub(r"([,.;:])(?=[A-Za-zÀ-ž0-9])", r"\1 ", title)
+    title = re.sub(r"\s{2,}", " ", title).strip()
+
+    replacements = (
+        (r"\bKod\s+Ucznia\b", "kod uczniowski"),
+        (r"\bKod\s+Uczniowski\b", "kod uczniowski"),
+        (r"\bKod\s+dla\s+Ucznia\b", "kod uczniowski"),
+        (r"\bKod\s+Nauczyciela\b", "kod nauczycielski"),
+        (r"\bKod\s+Nauczycielski\b", "kod nauczycielski"),
+        (r"\bKod\s+dla\s+Nauczyciela\b", "kod nauczycielski"),
+        (r"\bKod\s+Dostępu\b", "kod dostępu"),
+        (r"\bDostęp\s+Online\b", "dostęp online"),
+    )
+    for pattern, replacement in replacements:
+        title = re.sub(pattern, replacement, title, flags=re.IGNORECASE)
+
+    # Polskie rzeczowniki pospolite nie powinny wyglądać jak angielski Title Case.
+    for word in V43_GENERIC_POLISH_TITLE_WORDS:
+        title = re.sub(rf"(?<!^)\b{re.escape(word)}\b", word.lower(), title)
+
+    return normalize_spaces(title)
+
+
+def source_product_type(job: Dict) -> str:
+    source = normalize_for_compare(f"{job.get('title', '')} {strip_html(job.get('description', ''))[:1200]}")
+    has_access = bool(re.search(r"\b(access|code|kod|licenc|portal)\b", source))
+    if has_access and re.search(r"teacher|nauczyciel", source):
+        return "teacher_access_code"
+    if has_access and re.search(r"student|uczen|uczni|learner", source):
+        return "student_access_code"
+    if "ebook" in source and re.search(r"online practice|myenglishlab|portal|access", source):
+        return "digital_course_bundle"
+    if "etext" in source:
+        return "etext"
+    if "ebook" in source:
+        return "ebook"
+    if re.search(r"online practice|cwiczenia online", source):
+        return "online_practice"
+    if re.search(r"workbook|activity book|zeszyt cwiczen", source):
+        return "workbook"
+    if re.search(r"student'?s book|coursebook|podrecznik", source):
+        return "textbook"
+    if re.search(r"slownik|dictionary", source):
+        return "dictionary"
+    if re.search(r"klasa\s+\d|liceum|technikum|szkola podstawowa|matura", source):
+        return "school_book"
+    if job.get("author") and not re.search(r"access|code|kod|ebook|etext|online practice", source):
+        return "general_book"
+    return "other"
+
+
+def title_required_features(job: Dict) -> Dict[str, object]:
+    signals = extract_title_signals(job.get("title", ""), job.get("description", ""))
+    source = normalize_for_compare(job.get("title", ""))
+    return {
+        "type": source_product_type(job),
+        "signals": signals,
+        "student": bool(re.search(r"student|uczen|uczni|learner", source)),
+        "teacher": bool(re.search(r"teacher|nauczyciel", source)),
+        "access": bool(re.search(r"access|code|kod\s+(?:uczni|nauczyciel)|licenc", source)),
+        "without_code": bool(re.search(r"without key|no key|bez klucza|bez kodu", source)),
+        "ebook": "ebook" in source,
+        "etext": "etext" in source,
+        "myenglishlab": "myenglishlab" in source,
+        "online_practice": "online practice" in source,
+        "teacher_portal": bool(re.search(r"teacher\s+s?\s+portal|teachers?\s+portal", source)),
+    }
+
+
+def meta_title_validation_errors(
+    meta_title: str,
+    job: Dict,
+    *,
+    existing_title_owners: Optional[Dict[str, str]] = None,
+) -> List[str]:
+    errors: List[str] = []
+    title = normalize_generated_meta_title(meta_title)
+    normalized = normalize_for_compare(title)
+    source_title = clean_source_title_for_prompt(job.get("title", ""))
+    required = title_required_features(job)
+    signals = required["signals"]
+
+    if not title:
+        return ["Brak meta title"]
+    if len(title) > 60:
+        errors.append(f"Za długi meta title: {len(title)} zn. (maks. 60)")
+    if len(title) < 20 and len(source_title) >= 35:
+        errors.append(f"Meta title jest zbyt ogólny lub zbyt krótki: {len(title)} zn.")
+    if "..." in title or title.endswith("…"):
+        errors.append("Meta title zawiera wielokropek lub wygląda na ucięty")
+    if re.search(r"https?://|www\.", title, flags=re.IGNORECASE):
+        errors.append("Meta title zawiera URL")
+    if re.search(r"\b(praca\s*zbiorowa|pracazbiorowa)\b", normalized):
+        errors.append("Meta title zawiera techniczną wartość autora: praca zbiorowa")
+    if any(re.search(pattern, title, flags=re.IGNORECASE) for pattern in TITLE_INTERNAL_NOISE_PATTERNS):
+        errors.append("Meta title zawiera oznaczenie wewnętrzne lub status produktu")
+    if title.endswith(("-", "–", "—", "|", ":", ",", ";", "/", "+")):
+        errors.append("Meta title kończy się separatorem i wygląda na urwany")
+
+    final_word_match = re.search(r"([A-Za-zÀ-ž]+(?:'[A-Za-zÀ-ž]+)?)\s*$", title)
+    if final_word_match and normalize_for_compare(final_word_match.group(1)) in TITLE_DANGLING_WORDS:
+        errors.append(f"Meta title kończy się niepełnym określeniem: {final_word_match.group(1)}")
+
+    source_identity = [normalize_for_compare(item) for item in signals.get("identity_tokens", [])]
+    title_tokens = set(re.findall(r"[a-z0-9]+", normalized))
+    if source_identity and not any(token in title_tokens or token in normalized for token in source_identity[:4]):
+        errors.append("Meta title zgubił nazwę serii lub główną tożsamość produktu")
+
+    for level in signals.get("levels", []):
+        if normalize_for_compare(level) not in normalized:
+            errors.append(f"Meta title zgubił poziom lub oznaczenie egzaminu: {level}")
+
+    if required["teacher"] and not re.search(r"teacher|nauczyciel", normalized):
+        errors.append("Meta title nie odróżnia wariantu nauczycielskiego")
+    if required["student"] and not re.search(r"student|uczen|uczni", normalized):
+        errors.append("Meta title nie odróżnia wariantu uczniowskiego")
+    if required["ebook"] and "ebook" not in normalized:
+        errors.append("Meta title zgubił format eBook")
+    if required["etext"] and "etext" not in normalized:
+        errors.append("Meta title zgubił format eText")
+    if required["access"] and not re.search(r"\b(?:kod|kodem|dostep|access)\b", normalized):
+        errors.append("Meta title zgubił informację o kodzie lub dostępie")
+    if required["myenglishlab"] and "myenglishlab" not in normalized:
+        errors.append("Meta title zgubił platformę MyEnglishLab")
+    if required["online_practice"] and not re.search(r"online practice|cwiczenia online", normalized):
+        errors.append("Meta title zgubił komponent Online Practice")
+    if required["teacher_portal"] and not re.search(r"teacher s portal|portal nauczyciel", normalized):
+        errors.append("Meta title zgubił komponent Teacher's Portal")
+    if required["without_code"] and not re.search(r"bez\s+(?:kodu|klucza)", normalized):
+        errors.append("Meta title zgubił informację, że produkt jest bez kodu lub klucza")
+
+    if any(normalized.startswith(normalize_for_compare(prefix)) for prefix in ("kup", "sprawdz", "odkryj", "poznaj")):
+        errors.append("Meta title zaczyna się od CTA")
+
+    if existing_title_owners:
+        owner = existing_title_owners.get(normalized)
+        if owner and str(owner) != str(job.get("sku", "")):
+            errors.append(f"Identyczny meta title istnieje już dla innego SKU: {owner}")
+
+    return list(dict.fromkeys(errors))
+
+
+def title_candidate_score(
+    candidate: str,
+    job: Dict,
+    *,
+    existing_title_owners: Optional[Dict[str, str]] = None,
+) -> Tuple[float, List[str]]:
+    title = normalize_generated_meta_title(candidate)
+    errors = meta_title_validation_errors(title, job, existing_title_owners=existing_title_owners)
+    if not title:
+        return -10000.0, errors
+
+    required = title_required_features(job)
+    signals = required["signals"]
+    normalized = normalize_for_compare(title)
+    length = len(title)
+    score = 100.0 - 35.0 * len(errors)
+
+    if 42 <= length <= 59:
+        score += 24
+    elif 35 <= length <= 60:
+        score += 14
+    elif 28 <= length <= 60:
+        score += 5
+    else:
+        score -= 10
+
+    for token in signals.get("identity_tokens", [])[:4]:
+        if normalize_for_compare(token) in normalized:
+            score += 7
+    for level in signals.get("levels", []):
+        if normalize_for_compare(level) in normalized:
+            score += 10
+    for fmt in signals.get("formats", []):
+        if normalize_for_compare(fmt) in normalized:
+            score += 5
+    for platform in signals.get("platforms", []):
+        if normalize_for_compare(platform) in normalized:
+            score += 5
+    if required["teacher_portal"] and "teacher s portal" in normalized:
+        score += 9
+    if required["online_practice"] and "online practice" in normalized:
+        score += 7
+    if required["myenglishlab"] and "myenglishlab" in normalized:
+        score += 8
+
+    if required["student"] and re.search(r"kod\s+uczni|dla\s+ucznia|uczniowski", normalized):
+        score += 12
+    if required["teacher"] and re.search(r"kod\s+nauczyciel|dla\s+nauczyciela|nauczycielski", normalized):
+        score += 12
+    if required["access"] and re.search(r"kod\s+(?:uczni|nauczyciel|dostep)|dostep online", normalized):
+        score += 8
+    if re.search(r"(?:\||–)\s+kod\s+(?:uczni|nauczyciel|dostep)", title, flags=re.IGNORECASE):
+        score += 6
+
+    # Preferujemy jeden czytelny separator. Kilka różnych separatorów wygląda
+    # jak zlepek nazwy magazynowej, a nie redakcja SERP.
+    dash_count = len(re.findall(r"\s–\s", title))
+    pipe_count = title.count("|")
+    if dash_count == 1 and pipe_count == 0:
+        score += 6
+    elif dash_count == 1 and pipe_count == 1:
+        score += 5
+    elif dash_count + pipe_count == 0 and length >= 40:
+        score -= 5
+    if dash_count + pipe_count > 2:
+        score -= 8
+    if "&" in title:
+        score -= 4
+    if title.count(".") >= 2:
+        score -= 4
+
+    awkward_patterns = (
+        r"\buczen\s*[–|-]",
+        r"\bonline\s+kod\b",
+        r"\bportal\s+kod\b",
+        r"\bpractice\s+kod\b",
+        r"\bebook\s+kod\b",
+        r"\betext\s+kod\b",
+        r"\bkod\s+online\b",
+    )
+    for pattern in awkward_patterns:
+        if re.search(pattern, normalized):
+            score -= 12
+
+    for word in V43_GENERIC_POLISH_TITLE_WORDS:
+        if re.search(rf"(?<!^)\b{re.escape(word)}\b", title):
+            score -= 1.5
+
+    return score, errors
+
+
+def extract_meta_title_candidates(data: Dict) -> List[str]:
+    raw = data.get("meta_title_candidates", [])
+    candidates: List[str] = []
+    if isinstance(raw, str):
+        candidates.append(raw)
+    elif isinstance(raw, list):
+        candidates.extend(str(item) for item in raw if str(item).strip())
+    legacy = str(data.get("meta_title", "") or "").strip()
+    if legacy:
+        candidates.append(legacy)
+    unique: List[str] = []
+    seen: Set[str] = set()
+    for candidate in candidates:
+        normalized_candidate = normalize_generated_meta_title(candidate)
+        key = normalize_for_compare(normalized_candidate)
+        if normalized_candidate and key not in seen:
+            seen.add(key)
+            unique.append(normalized_candidate)
+    return unique
+
+
+def select_best_meta_title_candidate(
+    candidates: Sequence[str],
+    job: Dict,
+    *,
+    existing_title_owners: Optional[Dict[str, str]] = None,
+) -> Tuple[str, List[str], List[Tuple[str, float, List[str]]]]:
+    diagnostics: List[Tuple[str, float, List[str]]] = []
+    for candidate in candidates:
+        normalized_candidate = normalize_generated_meta_title(candidate)
+        score, errors = title_candidate_score(
+            normalized_candidate,
+            job,
+            existing_title_owners=existing_title_owners,
+        )
+        diagnostics.append((normalized_candidate, score, errors))
+
+    if not diagnostics:
+        fallback = normalize_generated_meta_title(build_meta_title(job.get("title", ""), job.get("author", "")))
+        errors = meta_title_validation_errors(fallback, job, existing_title_owners=existing_title_owners)
+        return fallback, errors, [(fallback, -9999.0, errors)]
+
+    diagnostics.sort(key=lambda item: (not item[2], item[1]), reverse=True)
+    best_title, _, best_errors = diagnostics[0]
+    return best_title, best_errors, diagnostics
+
+
+def meta_validation_errors(
+    meta_description: str,
+    *,
+    existing_long_signatures: Optional[Set[str]] = None,
+    existing_short_signatures: Optional[Counter] = None,
+    recent_descriptions: Optional[Sequence[str]] = None,
+    job: Optional[Dict] = None,
+) -> List[str]:
+    errors: List[str] = []
+    text = normalize_spaces(strip_html(meta_description)).strip('"„”')
+    normalized = normalize_for_compare(text)
+
+    if not text:
+        return ["Brak meta description"]
+    if len(text) < 140:
+        errors.append(f"Za krótki meta description: {len(text)} zn.")
+    if len(text) > 160:
+        errors.append(f"Za długi meta description: {len(text)} zn.")
+    if any(normalized.startswith(normalize_for_compare(prefix)) for prefix in BANNED_STARTERS):
+        errors.append("Zakazane, sprzedażowe lub sztuczne otwarcie")
+    if any(normalize_for_compare(phrase) in normalized for phrase in BANNED_CTA_PHRASES):
+        errors.append("Meta description zawiera CTA lub język sklepu")
+    if "?" in text:
+        errors.append("Meta description używa retorycznego pytania")
+    if re.search(r"https?://|www\.", text, flags=re.IGNORECASE):
+        errors.append("Meta description zawiera URL")
+    if "..." in text or text.endswith("…"):
+        errors.append("Meta description kończy się wielokropkiem")
+    if re.search(r"\b(xyz|lorem|ipsum|placeholder)\b", normalized):
+        errors.append("Meta description zawiera placeholder")
+
+    # Model nie może dodawać liczb, okresów licencji ani numerów, których nie ma
+    # w nazwie lub opisie źródłowym.
+    if job:
+        source = normalize_for_compare(f"{job.get('title', '')} {strip_html(job.get('description', ''))}")
+        generated_numbers = set(re.findall(r"\b\d+(?:[.,]\d+)?\b", normalized))
+        source_numbers = set(re.findall(r"\b\d+(?:[.,]\d+)?\b", source))
+        unsupported = sorted(generated_numbers - source_numbers)
+        if unsupported:
+            errors.append("Meta description dodaje liczby nieobecne w źródle: " + ", ".join(unsupported[:5]))
+
+    long_sig = opening_signature(text, 6)
+    short_sig = opening_signature(text, 3)
+    if existing_long_signatures and long_sig in existing_long_signatures:
+        errors.append("Powtórzone pierwsze 6 słów")
+    if existing_short_signatures and existing_short_signatures.get(short_sig, 0) >= 3:
+        errors.append("Trzywyrazowy schemat otwarcia został już wykorzystany co najmniej 3 razy")
+    if recent_descriptions:
+        prefix = normalize_for_compare(text)[:90]
+        for other in recent_descriptions:
+            other_prefix = normalize_for_compare(other)[:90]
+            if prefix and other_prefix and SequenceMatcher(None, prefix, other_prefix).ratio() >= 0.88:
+                errors.append("Początek zbyt podobny do innego meta description")
+                break
+    return list(dict.fromkeys(errors))
+
+
+META_SYSTEM_PROMPT = """Jesteś seniorem SEO e-commerce, redaktorem informacji produktowej i specjalistą od katalogów edukacyjnych Bookland.
+Dla jednego SKU wykonujesz dwie odrębne czynności: budujesz kandydatury meta title i tworzysz meta description.
+
+NAJWAŻNIEJSZA ZASADA
+Najpierw rozpoznaj produkt i jego wariant, dopiero potem redaguj. Nie skracaj nazwy od prawej strony i nie twórz zlepku przypadkowych słów.
+
+KLASYFIKACJA PRODUKTU
+Wybierz product_type spośród: student_access_code, teacher_access_code, digital_course_bundle, ebook, etext, online_practice, textbook, workbook, school_book, dictionary, general_book, other.
+Ustal canonical_identity: oficjalną nazwę serii, tytułu lub modelu bez śmieci katalogowych.
+
+META TITLE: CZTERY KANDYDATURY
+Zwróć cztery różne, pełne kandydatury. Każda musi mieć maksymalnie 60 znaków ze spacjami i być gotowa do publikacji.
+- Kandydat 1: najwierniejszy oficjalnej nazwie.
+- Kandydat 2: najbardziej naturalny po polsku i czytelny w SERP.
+- Kandydat 3: najbardziej zwarty, ale nadal jednoznaczny.
+- Kandydat 4: alternatywna redakcja zachowująca wszystkie cechy wariantu.
+
+PRIORYTETY META TITLE
+1. Nazwa serii, tytuł lub model.
+2. Poziom, egzamin, tom, część albo klasa.
+3. Komponent i format odróżniający SKU.
+4. Odbiorca oraz typ kodu lub dostępu.
+5. Autor tylko dla zwykłych książek i tylko wtedy, gdy nie wypiera ważniejszych danych.
+
+SPÓJNOŚĆ DLA MATERIAŁÓW JĘZYKOWYCH
+- Zachowuj oficjalne nazwy: MyEnglishLab, Teacher's Portal, Online Practice, eBook, eText, B2 First, C1 Advanced.
+- Tłumacz ogólne komponenty: Student's Book = podręcznik ucznia; Workbook/Activity Book = zeszyt ćwiczeń; Teacher's Book = książka nauczyciela.
+- Typ dostępu zapisuj po polsku: kod uczniowski, kod nauczycielski, kod dostępu, bez kodu.
+- Nigdy nie kończ tytułu samym słowem „Kod”, „Access”, „Student”, „Teacher”, „Online” ani przyimkiem.
+- Nie pisz „Kod Ucznia”, „Uczeń – eBook”, „Online Kod”, „Portal Kod” ani „eBook Kod”.
+- Nie mieszaj dowolnie „Online Practice” z „ćwiczeniami online”. Jeśli to oficjalna nazwa komponentu w źródle, preferuj „Online Practice”.
+- Polskie rzeczowniki pospolite zapisuj małą literą. Nazwy własne i poziomy zachowuj dokładnie.
+- Preferuj jeden separator „ – ”. Drugi separator „ | ” stosuj tylko wtedy, gdy realnie poprawia czytelność. Nie sklejaj kilku kropek i separatorów.
+
+PRZYKŁADOWY KIERUNEK, NIE SZABLON DO KOPIOWANIA
+Big English 1. eText + MyEnglishLab Student Online Access Code → Big English 1 – eText + MyEnglishLab | kod uczniowski
+Roadmap B2. eBook and Online Practice. Kod uczniowski → Roadmap B2 – eBook + Online Practice | kod uczniowski
+Business Partner B1. Teacher's Portal. Kod nauczycielski → Business Partner B1 – Teacher's Portal | kod nauczycielski
+1000 chińskich słów(ek). Ilustrowany słownik → 1000 chińskich słów(ek) – słownik ilustrowany
+
+ZWYKŁE KSIĄŻKI
+Preferuj „Tytuł – Autor”. Gdy tytuł jest długi, zachowaj pełny sens tytułu i pomiń autora. Nie używaj wartości „praca zbiorowa” ani podejrzanie sklejonych autorów.
+
+META DESCRIPTION
+- Celuj w 145-158 znaków; bezwzględny zakres to 140-160.
+- Pisz po polsku, konkretnie i informacyjnie. Bez CTA, drugiej osoby, retorycznych pytań i sztucznego problemu.
+- Nie zaczynaj od: Odkryj, Poznaj, Sprawdź, Rozwiń, Zyskaj, Wybierz, Niezrozumienie, Tradycyjna nauka, Nowoczesne podejście.
+- Dla materiałów edukacyjnych zacznij od nazwy serii, typu materiału, formatu, odbiorcy albo konkretnej funkcji.
+- Dla beletrystyki możesz zacząć od bohatera, konfliktu lub miejsca, jeśli wynikają ze źródła.
+- Nie dodawaj czasu dostępu, liczby urządzeń, funkcji, poziomu ani żadnego faktu, którego nie ma w danych.
+- Nie kopiuj całego zdania źródłowego.
+
+DANE I FORMAT
+Korzystaj wyłącznie z przekazanych danych. Zwróć tylko obiekt JSON zgodny ze schematem. Nie komentuj procesu.
+"""
+
+
+def build_meta_prompt(
+    job: Dict,
+    attempt: int = 0,
+    avoid_openings: Sequence[str] = (),
+    previous_meta_title: str = "",
+    previous_meta_description: str = "",
+    previous_errors: Sequence[str] = (),
+) -> str:
+    style = build_style_plan(
+        job["sku"],
+        job.get("title", ""),
+        job.get("author", ""),
+        job.get("description", ""),
+        attempt,
+    )
+    raw_title = normalize_spaces(strip_html(job.get("title", "")))
+    cleaned_title = clean_source_title_for_prompt(raw_title)
+    description = smart_truncate(strip_html(job.get("description", "")), 3600)
+    author, author_note = clean_author_for_prompt(job.get("author", ""), description)
+    signals = extract_title_signals(raw_title, description)
+    avoid_block = "\n".join(f"- {item}" for item in avoid_openings[:20]) or "- brak"
+    cues = ", ".join(style["semantic_cues"]) or "brak wyraźnych słów kluczowych"
+
+    prior_errors = list(previous_errors) or parse_validation_error_list(job.get("validation_errors", ""))
+    title_errors, description_errors = split_field_errors(prior_errors)
+    prior_title = previous_meta_title or (job.get("meta_title", "") if attempt > 0 else "")
+    prior_description = previous_meta_description or (job.get("meta_description", "") if attempt > 0 else "")
+    locked_title = prior_title if prior_title and not title_errors and attempt > 0 else ""
+    locked_description = prior_description if prior_description and not description_errors and attempt > 0 else ""
+
+    retry_block = ""
+    if attempt > 0 or prior_errors:
+        retry_block = f"""
+POPRZEDNIA PRÓBA
+Meta title: {prior_title or 'brak'}
+Meta description: {prior_description or 'brak'}
+Błędy walidatora:
+{chr(10).join(f'- {error}' for error in prior_errors) or '- brak'}
+
+ZASADA NAPRAWY
+- Napraw dokładnie wskazane błędy, nie wykonuj kosmetycznej parafrazy.
+- Jeśli pole było poprawne, nie pogarszaj go.
+"""
+    lock_block = ""
+    if locked_title:
+        lock_block += f"\nZABLOKOWANY META TITLE: {locked_title}\nW tablicy meta_title_candidates zwróć wyłącznie ten jeden, identyczny tytuł."
+    if locked_description:
+        lock_block += f"\nZABLOKOWANY META DESCRIPTION: {locked_description}\nZwróć go identycznie, bez zmiany ani jednego znaku."
+
+    return f"""Przygotuj metatagi dla jednego konkretnego produktu.
+
+DANE PRODUKTU
+SKU: {job['sku']}
+Surowa nazwa z Akeneo: {raw_title}
+Nazwa oczyszczona: {cleaned_title}
+Autor / marka: {author or 'brak wiarygodnych danych'}
+Uwaga o autorze: {author_note}
+Dane dodatkowe: {job.get('details', '') or 'brak'}
+Opis źródłowy: {description or 'brak opisu'}
+
+AUTOMATYCZNIE WYKRYTE SYGNAŁY
+{title_signal_summary(signals)}
+Przewidywany typ produktu: {source_product_type(job)}
+
+ZADANIE META TITLE
+- Ustal canonical_identity.
+- Zwróć 4 kandydatury, chyba że niżej zablokowano już poprawny tytuł.
+- Każdy kandydat ma być osobną decyzją redakcyjną, nie zmianą jednego znaku.
+- Zachowaj tożsamość, poziom oraz cechy wariantu: format, platformę, odbiorcę i rodzaj dostępu zgodnie z priorytetami.
+- Przelicz długość każdej kandydatury przed zwróceniem. Maksimum: 60 znaków.
+
+PLAN META DESCRIPTION
+Seed różnorodności: {style['seed']}
+Kierunek: oprzyj otwarcie na konkretnym fakcie o produkcie, nie na abstrakcyjnej emocji ani problemie.
+Rytm: {style['rhythm_mode']}
+Główny fokus: {style['focus_mode']}
+Sygnały semantyczne: {cues}
+Pierwszy konkretny fragment źródła: {style['source_lead'] or 'brak'}
+
+OTWARCIA UŻYTE OSTATNIO - NIE POWTARZAJ ICH
+{avoid_block}
+{retry_block}
+{lock_block}
+
+Zwróć wyłącznie JSON.
+"""
+
+
+def generate_metatags_interactive(job: Dict) -> Dict:
+    long_signatures, short_signatures = existing_opening_signatures(job["job_key"])
+    recent_full = [row["meta_description"] for row in list_meta_jobs(statuses=["completed"], limit=60)]
+    title_owners = existing_meta_title_owners(job["job_key"])
+    avoid = recent_opening_examples(24)
+    last_title = ""
+    last_description = ""
+    last_title_errors: List[str] = []
+    last_description_errors: List[str] = []
+
+    for attempt in range(MAX_META_RETRIES + 1):
+        style = build_style_plan(
+            job["sku"], job.get("title", ""), job.get("author", ""), job.get("description", ""), attempt
+        )
+        locked_title = last_title if last_title and not last_title_errors else ""
+        locked_description = last_description if last_description and not last_description_errors else ""
+        try:
+            response = get_gemini_client().models.generate_content(
+                model=GEMINI_MODEL,
+                contents=build_meta_prompt(
+                    job,
+                    attempt,
+                    avoid,
+                    previous_meta_title=last_title,
+                    previous_meta_description=last_description,
+                    previous_errors=[*last_title_errors, *last_description_errors],
+                ),
+                config=types.GenerateContentConfig(
+                    system_instruction=META_SYSTEM_PROMPT,
+                    response_mime_type="application/json",
+                    response_schema=META_RESPONSE_SCHEMA,
+                    seed=style["seed"],
+                    temperature=0.72,
+                    top_p=0.92,
+                    max_output_tokens=620,
+                ),
+            )
+            data = json.loads(strip_code_fences(response.text or ""))
+            candidates = extract_meta_title_candidates(data)
+            if locked_title:
+                selected_title = locked_title
+                title_errors = []
+            else:
+                selected_title, title_errors, _ = select_best_meta_title_candidate(
+                    candidates, job, existing_title_owners=title_owners
+                )
+
+            generated_description = normalize_spaces(
+                strip_html(str(data.get("meta_description", "")))
+            ).strip('"„”')
+            selected_description = locked_description or generated_description
+            description_errors = [] if locked_description else meta_validation_errors(
+                selected_description,
+                existing_long_signatures=long_signatures,
+                existing_short_signatures=short_signatures,
+                recent_descriptions=recent_full,
+                job=job,
+            )
+
+            last_title = selected_title
+            last_description = selected_description
+            last_title_errors = title_errors
+            last_description_errors = description_errors
+            if not title_errors and not description_errors:
+                return {
+                    "meta_title": selected_title,
+                    "meta_description": selected_description,
+                    "attempts": attempt + 1,
+                    "validation_errors": [],
+                    "error": "",
+                }
+            if selected_description:
+                avoid = [*avoid, first_words(selected_description, 8)]
+        except Exception as exc:
+            # Zachowujemy poprawne pole z wcześniejszej próby; błąd dotyczy tylko
+            # nieudanej odpowiedzi, a nie zaakceptowanego wyniku.
+            if not last_title_errors and last_title:
+                last_title_errors = []
+            if not last_description_errors and last_description:
+                last_description_errors = []
+            api_error = f"Błąd Gemini lub JSON: {exc}"
+            if not last_title:
+                last_title_errors = [api_error]
+            if not last_description:
+                last_description_errors = [api_error]
+
+    errors = [*last_title_errors, *last_description_errors]
+    return {
+        "meta_title": last_title or normalize_generated_meta_title(build_meta_title(job.get("title", ""), job.get("author", ""))),
+        "meta_description": last_description,
+        "attempts": MAX_META_RETRIES + 1,
+        "validation_errors": errors,
+        "error": "; ".join(errors),
+    }
+
+
+def batch_request_for_job(job: Dict, attempt: int = 0) -> Dict:
+    style = build_style_plan(
+        job["sku"], job.get("title", ""), job.get("author", ""), job.get("description", ""), attempt
+    )
+    return {
+        "key": job["job_key"],
+        "request": {
+            "contents": [{"role": "user", "parts": [{"text": build_meta_prompt(job, attempt, ())}]}],
+            "system_instruction": {"parts": [{"text": META_SYSTEM_PROMPT}]},
+            "generation_config": {
+                "temperature": 0.72,
+                "top_p": 0.92,
+                "seed": style["seed"],
+                "max_output_tokens": 620,
+                "response_mime_type": "application/json",
+                "response_schema": META_RESPONSE_SCHEMA,
+            },
+        },
+    }
+
+
+def locked_fields_from_job(job: Dict) -> Tuple[str, str]:
+    errors = parse_validation_error_list(job.get("validation_errors", ""))
+    title_errors, description_errors = split_field_errors(errors)
+    locked_title = job.get("meta_title", "") if job.get("meta_title") and not title_errors and int(job.get("attempts", 0)) > 0 else ""
+    locked_description = job.get("meta_description", "") if job.get("meta_description") and not description_errors and int(job.get("attempts", 0)) > 0 else ""
+    return locked_title, locked_description
+
+
+def ingest_batch_result_bytes(job_name: str, content: bytes) -> Dict[str, int]:
+    decoded = content.decode("utf-8")
+    lines = [line for line in decoded.splitlines() if line.strip()]
+    long_signatures, short_signatures = existing_opening_signatures()
+    recent_descriptions = [row["meta_description"] for row in list_meta_jobs(statuses=["completed"], limit=100)]
+    title_owners = existing_meta_title_owners()
+    stats = {"completed": 0, "validation_failed": 0, "failed": 0}
+
+    for line in lines:
+        try:
+            payload = json.loads(line)
+            key, text = extract_batch_response_text(payload)
+            if not key:
+                raise RuntimeError("Brak klucza zadania w odpowiedzi")
+            job = get_meta_job(key)
+            if not job:
+                raise RuntimeError(f"Nieznany klucz zadania: {key}")
+            data = json.loads(strip_code_fences(text))
+            locked_title, locked_description = locked_fields_from_job(job)
+
+            if locked_title:
+                meta_title = locked_title
+                title_errors: List[str] = []
+            else:
+                meta_title, title_errors, _ = select_best_meta_title_candidate(
+                    extract_meta_title_candidates(data),
+                    job,
+                    existing_title_owners=title_owners,
+                )
+
+            generated_description = normalize_spaces(strip_html(str(data.get("meta_description", "")))).strip('"„”')
+            meta_description = locked_description or generated_description
+            description_errors = [] if locked_description else meta_validation_errors(
+                meta_description,
+                existing_long_signatures=long_signatures,
+                existing_short_signatures=short_signatures,
+                recent_descriptions=recent_descriptions,
+                job=job,
+            )
+            errors = [*title_errors, *description_errors]
+            status = "completed" if not errors else "validation_failed"
+            save_meta_result(
+                key,
+                meta_title=meta_title,
+                meta_description=meta_description,
+                status=status,
+                attempts=int(job.get("attempts", 0)) + 1,
+                validation_errors=errors,
+                error_message="; ".join(errors),
+            )
+            if status == "completed":
+                long_signatures.add(opening_signature(meta_description, 6))
+                short_signatures[opening_signature(meta_description, 3)] += 1
+                recent_descriptions.append(meta_description)
+                recent_descriptions = recent_descriptions[-100:]
+                title_owners[normalize_for_compare(meta_title)] = str(job["sku"])
+            stats[status] += 1
+        except Exception as exc:
+            stats["failed"] += 1
+            try:
+                payload = json.loads(line)
+                key = str(payload.get("key") or payload.get("metadata", {}).get("key") or "")
+                if key:
+                    set_meta_job_error(key, str(exc))
+            except Exception:
+                pass
+
+    with db_connect() as conn:
+        conn.execute(
+            "UPDATE batch_jobs SET ingested_at=?, updated_at=? WHERE job_name=?",
+            (utcnow_iso(), utcnow_iso(), job_name),
+        )
+    return stats
 
 # ═══════════════════════════════════════════════════════════════════
 # SESSION STATE I UI HELPERY
