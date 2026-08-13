@@ -60,7 +60,6 @@ except ImportError:
 APP_VERSION = "4.6.3"
 APP_NAME = "Generator opisów i metatagów produktów"
 PROMPT_VERSION = "meta-v4.4.4-validator-driven-title-autorepair-2026-08"
-DESCRIPTION_PROMPT_VERSION = "description-v4.6.1-required-structure"
 DEFAULT_GEMINI_MODEL = "gemini-3.5-flash-lite"
 PERPLEXITY_MODEL = "sonar"
 PERPLEXITY_API_URL = "https://api.perplexity.ai/chat/completions"
@@ -1396,8 +1395,7 @@ def _bool_from_cell(value: object, default: bool = True) -> bool:
 def parse_resumable_product_file(raw_bytes: bytes) -> Tuple[List[str], Dict[str, Dict], List[str]]:
     """Czyta zwykły TXT/CSV/TSV z SKU albo checkpoint wygenerowany przez aplikację.
 
-    Gotowe opisy albo kompletne metatagi są traktowane jako checkpoint i nie będą
-    ponownie wysyłane do Gemini w odpowiadającym im generatorze.
+    Wyłącznie kompletne metatagi są traktowane jako checkpoint.
     """
     text = _decode_upload_bytes(raw_bytes)
     errors: List[str] = []
@@ -1435,7 +1433,6 @@ def parse_resumable_product_file(raw_bytes: bytes) -> Tuple[List[str], Dict[str,
     error_col = normalized_columns.get("error")
     validation_col = normalized_columns.get("validation errors") or normalized_columns.get("validation_errors")
     title_col = normalized_columns.get("title")
-    desc_html_col = normalized_columns.get("description html") or normalized_columns.get("description_html")
     url_col = normalized_columns.get("url")
     old_desc_col = normalized_columns.get("old description") or normalized_columns.get("old_description")
     status_col = normalized_columns.get("checkpoint status") or normalized_columns.get("checkpoint_status") or normalized_columns.get("status")
@@ -1449,18 +1446,12 @@ def parse_resumable_product_file(raw_bytes: bytes) -> Tuple[List[str], Dict[str,
             meta_description = str(row.get(meta_description_col, "") or "").strip()
             error = str(row.get(error_col, "") or "").strip() if error_col else ""
             status = str(row.get(status_col, "") or "").strip().lower() if status_col else ""
-            description_html = str(row.get(desc_html_col, "") or "") if desc_html_col else ""
-            # Gotowy jest pełny opis albo komplet metatagów. Błędy i pending zawsze ponawiamy.
-            if (
-                error
-                or status in {"pending", "error", "failed"}
-                or (not description_html and (not meta_title or not meta_description))
-            ):
+            if not meta_title or not meta_description or error or status in {"pending", "error", "failed"}:
                 continue
             seed_results[sku] = {
                 "sku": sku,
                 "title": str(row.get(title_col, "") or "") if title_col else "",
-                "description_html": description_html,
+                "description_html": "",
                 "url": str(row.get(url_col, "") or "") if url_col else "",
                 "old_description": str(row.get(old_desc_col, "") or "") if old_desc_col else "",
                 "research": None,
@@ -1468,7 +1459,7 @@ def parse_resumable_product_file(raw_bytes: bytes) -> Tuple[List[str], Dict[str,
                 "meta_description": meta_description,
                 "error": None,
                 "validation_errors": _validation_errors_from_cell(row.get(validation_col, "")) if validation_col else [],
-                "meta_only": is_meta_only_result({"description_html": description_html}),
+                "meta_only": True,
                 "checkpoint_source": "uploaded_csv",
             }
 
@@ -1481,17 +1472,12 @@ def interactive_checkpoint_key(
     channel: str,
     locale: str,
     store_view_code: str,
-    meta_only: bool,
-    link_only: bool,
 ) -> str:
     payload = {
         "skus": sorted(dict.fromkeys(str(sku).strip() for sku in skus if str(sku).strip())),
         "channel": channel,
         "locale": locale,
         "store_view_code": store_view_code,
-        "meta_only": bool(meta_only),
-        "link_only": bool(link_only),
-        "description_prompt_version": DESCRIPTION_PROMPT_VERSION,
         "prompt_version": PROMPT_VERSION,
         "model": GEMINI_MODEL,
     }
@@ -1532,8 +1518,8 @@ def _checkpoint_row(sku: str, result: Optional[Dict]) -> Dict:
         "meta_description": result.get("meta_description", ""),
         "validation_errors": json.dumps(list(validation_errors), ensure_ascii=False),
         "error": error,
-        "meta_only": is_meta_only_result(result),
-        "description_html": result.get("description_html", ""),
+        "meta_only": True,
+        "description_html": "",
         "url": result.get("url", ""),
         "old_description": result.get("old_description", ""),
     }
@@ -4358,6 +4344,8 @@ def reset_interactive_results() -> None:
     st.session_state.bulk_results = []
     st.session_state.interactive_seed_results = {}
     st.session_state.last_interactive_checkpoint_path = ""
+    for key in ("interactive_method", "interactive_resume_file", "interactive_existing_checkpoint"):
+        st.session_state.pop(key, None)
 
 
 def get_internal_link() -> Optional[Dict]:
@@ -4429,13 +4417,12 @@ def process_selected_products(
 ) -> List[Dict]:
     """Przetwarzanie interaktywne odporne na odświeżenie Streamlita.
 
-    Gotowe wyniki są odzyskiwane kolejno z:
+    W generatorze metatagów gotowe wyniki są odzyskiwane kolejno z:
     1) checkpointu wgranego przez użytkownika,
     2) serwerowego CSV zapisywanego w trakcie pracy,
     3) SQLite (dla trybu tylko metatagi).
 
-    Po każdym kilku nowych produktach powstaje atomowy checkpoint CSV. Dzięki temu
-    restart sesji nie oznacza ponownego płacenia za produkty już wykonane.
+    Jeśli przekazano checkpoint_path, po każdym SKU powstaje atomowy checkpoint CSV.
     """
     ordered_skus = list(dict.fromkeys(str(sku).strip() for sku in skus if str(sku).strip()))
     total = len(ordered_skus)
@@ -4620,9 +4607,10 @@ with interactive_tab:
         else "Ten generator nie tworzy ani nie zmienia opisów produktów."
     )
     st.subheader("Wybór produktów")
+    file_method = "CSV / TXT z checkpointem" if st.session_state.meta_only else "CSV / TXT ze SKU"
     method = st.radio(
         "Metoda",
-        ["Wyszukaj", "Wklej SKU lub URL", "CSV / TXT z checkpointem", "Backlog"],
+        ["Wyszukaj", "Wklej SKU lub URL", file_method, "Backlog"],
         horizontal=True,
         key="interactive_method",
     )
@@ -4680,44 +4668,46 @@ with interactive_tab:
             except ProductInputResolutionError as exc:
                 st.error(str(exc))
 
-    elif method == "CSV / TXT z checkpointem":
-        st.caption(
-            "Wgraj zwykły plik z kolumną SKU albo wcześniejszy checkpoint CSV. "
-            "Jeżeli plik zawiera już meta_title i meta_description, te SKU zostaną pominięte."
-        )
-
-        INTERACTIVE_CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
-        existing_checkpoint_files = sorted(
-            INTERACTIVE_CHECKPOINT_DIR.glob("interactive-*.csv"),
-            key=lambda item: item.stat().st_mtime,
-            reverse=True,
-        )[:10]
-        if existing_checkpoint_files:
-            checkpoint_options = {"": "— wybierz checkpoint —"}
-            for checkpoint_file in existing_checkpoint_files:
-                try:
-                    checkpoint_df = pd.read_csv(checkpoint_file, dtype=str, keep_default_na=False)
-                    done_count = int((checkpoint_df.get("checkpoint_status", pd.Series(dtype=str)).isin(["completed", "warning"])).sum())
-                    total_count = len(checkpoint_df)
-                except Exception:
-                    done_count, total_count = 0, 0
-                checkpoint_options[str(checkpoint_file)] = (
-                    f"{checkpoint_file.name} · {done_count}/{total_count} gotowych"
-                )
-            selected_existing_checkpoint = st.selectbox(
-                "Wznów checkpoint zapisany na serwerze",
-                options=list(checkpoint_options),
-                format_func=lambda value: checkpoint_options[value],
-                key="interactive_existing_checkpoint",
+    elif method == file_method:
+        if st.session_state.meta_only:
+            st.caption(
+                "Wgraj zwykły plik z kolumną SKU albo wcześniejszy checkpoint CSV. "
+                "SKU z gotowymi metatagami zostaną pominięte."
             )
-            if selected_existing_checkpoint and st.button("Wczytaj checkpoint z serwera", key="load_server_checkpoint"):
-                checkpoint_file = Path(selected_existing_checkpoint)
-                file_skus, seed_results, _ = parse_resumable_product_file(checkpoint_file.read_bytes())
-                st.session_state.bulk_selected_products = {sku: {"title": sku} for sku in file_skus}
-                st.session_state.interactive_seed_results = seed_results
-                st.session_state.last_interactive_checkpoint_path = str(checkpoint_file)
-                st.success(f"Wczytano {len(file_skus)} SKU; gotowe: {len(seed_results)}.")
-                st.rerun()
+            INTERACTIVE_CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
+            existing_checkpoint_files = sorted(
+                INTERACTIVE_CHECKPOINT_DIR.glob("interactive-*.csv"),
+                key=lambda item: item.stat().st_mtime,
+                reverse=True,
+            )[:10]
+            if existing_checkpoint_files:
+                checkpoint_options = {"": "— wybierz checkpoint —"}
+                for checkpoint_file in existing_checkpoint_files:
+                    try:
+                        checkpoint_df = pd.read_csv(checkpoint_file, dtype=str, keep_default_na=False)
+                        done_count = int((checkpoint_df.get("checkpoint_status", pd.Series(dtype=str)).isin(["completed", "warning"])).sum())
+                        total_count = len(checkpoint_df)
+                    except Exception:
+                        done_count, total_count = 0, 0
+                    checkpoint_options[str(checkpoint_file)] = (
+                        f"{checkpoint_file.name} · {done_count}/{total_count} gotowych"
+                    )
+                selected_existing_checkpoint = st.selectbox(
+                    "Wznów checkpoint zapisany na serwerze",
+                    options=list(checkpoint_options),
+                    format_func=lambda value: checkpoint_options[value],
+                    key="interactive_existing_checkpoint",
+                )
+                if selected_existing_checkpoint and st.button("Wczytaj checkpoint z serwera", key="load_server_checkpoint"):
+                    checkpoint_file = Path(selected_existing_checkpoint)
+                    file_skus, seed_results, _ = parse_resumable_product_file(checkpoint_file.read_bytes())
+                    st.session_state.bulk_selected_products = {sku: {"title": sku} for sku in file_skus}
+                    st.session_state.interactive_seed_results = seed_results
+                    st.session_state.last_interactive_checkpoint_path = str(checkpoint_file)
+                    st.success(f"Wczytano {len(file_skus)} SKU; gotowe: {len(seed_results)}.")
+                    st.rerun()
+        else:
+            st.caption("Wgraj CSV, TSV lub TXT z kolumną SKU. Wszystkie produkty zostaną wygenerowane od nowa.")
 
         resume_file = st.file_uploader(
             "CSV / TSV / TXT",
@@ -4728,15 +4718,14 @@ with interactive_tab:
             try:
                 file_skus, seed_results, file_errors = parse_resumable_product_file(resume_file.getvalue())
                 if file_skus:
-                    st.info(
-                        f"Plik: {len(file_skus):,} SKU · gotowe w samym pliku: {len(seed_results):,}".replace(",", " ")
-                    )
+                    st.info(f"Plik: {len(file_skus):,} SKU".replace(",", " "))
                     if st.button("Załaduj plik do kolejki", type="primary", key="load_interactive_resume_file"):
                         st.session_state.bulk_selected_products = {sku: {"title": sku} for sku in file_skus}
-                        st.session_state.interactive_seed_results = seed_results
-                        st.success(
-                            f"Załadowano {len(file_skus):,} SKU. {len(seed_results):,} ma już wynik i zostanie pominiętych.".replace(",", " ")
-                        )
+                        st.session_state.interactive_seed_results = seed_results if st.session_state.meta_only else {}
+                        message = f"Załadowano {len(file_skus):,} SKU."
+                        if st.session_state.meta_only:
+                            message += f" {len(seed_results):,} ma już metatagi i zostanie pominiętych."
+                        st.success(message.replace(",", " "))
                         st.rerun()
                 else:
                     st.warning("Nie znaleziono SKU w pliku.")
@@ -4824,19 +4813,17 @@ with interactive_tab:
             include_warning_checkpoints = False
             st.caption("Każde uruchomienie tworzy wszystkie wybrane opisy od nowa.")
 
-        skus_for_checkpoint = list(st.session_state.bulk_selected_products)
-        checkpoint_key = interactive_checkpoint_key(
-            skus_for_checkpoint,
-            channel=channel,
-            locale=locale,
-            store_view_code=st.session_state.magento_store_view,
-            meta_only=st.session_state.meta_only,
-            link_only=st.session_state.link_only if not st.session_state.meta_only else False,
-        )
-        checkpoint_path = interactive_checkpoint_path(checkpoint_key)
-        st.session_state.last_interactive_checkpoint_path = str(checkpoint_path)
-
+        checkpoint_path: Optional[Path] = None
         if st.session_state.meta_only:
+            skus_for_checkpoint = list(st.session_state.bulk_selected_products)
+            checkpoint_key = interactive_checkpoint_key(
+                skus_for_checkpoint,
+                channel=channel,
+                locale=locale,
+                store_view_code=st.session_state.magento_store_view,
+            )
+            checkpoint_path = interactive_checkpoint_path(checkpoint_key)
+            st.session_state.last_interactive_checkpoint_path = str(checkpoint_path)
             seed_results = set(st.session_state.get("interactive_seed_results", {}))
             server_results = set(load_interactive_checkpoint(checkpoint_path))
             try:
@@ -4855,12 +4842,18 @@ with interactive_tab:
                 f"Checkpoint: {checkpoint_path.name} · rozpoznane gotowe SKU: około {reusable_estimate}/{len(skus_for_checkpoint)} "
                 f"(plik wgrany {len(seed_results)}, serwer CSV {len(server_results)}, SQLite {len(sqlite_results)})."
             )
+        else:
+            st.session_state.last_interactive_checkpoint_path = ""
         st.caption(
             f"Tryb stabilny v{APP_VERSION}: paczki po {INTERACTIVE_CHUNK_SIZE}, {GEMINI_INTERACTIVE_WORKERS} równoległe workery, "
-            f"timeout Gemini {GEMINI_HTTP_TIMEOUT_MS // 1000}s. Wynik jest zapisywany po każdym SKU."
+            f"timeout Gemini {GEMINI_HTTP_TIMEOUT_MS // 1000}s. "
+            + (
+                "Checkpoint jest zapisywany po każdym SKU."
+                if st.session_state.meta_only else "Generator opisów nie używa checkpointów."
+            )
         )
 
-        if checkpoint_path.exists():
+        if checkpoint_path and checkpoint_path.exists():
             st.download_button(
                 "Pobierz bieżący checkpoint CSV",
                 checkpoint_path.read_bytes(),
@@ -4894,11 +4887,14 @@ with interactive_tab:
                 st.session_state.products_to_send = {
                     result["sku"]: True for result in st.session_state.bulk_results if not result.get("error")
                 }
-                st.session_state.interactive_seed_results = {
-                    result["sku"]: result
-                    for result in st.session_state.bulk_results
-                    if is_reusable_result(result, meta_only=st.session_state.meta_only)
-                }
+                st.session_state.interactive_seed_results = (
+                    {
+                        result["sku"]: result
+                        for result in st.session_state.bulk_results
+                        if is_reusable_result(result, meta_only=True)
+                    }
+                    if st.session_state.meta_only else {}
+                )
             except Exception as exc:
                 st.error(str(exc))
 
@@ -4919,7 +4915,7 @@ with interactive_tab:
         )
 
         checkpoint_path_value = st.session_state.get("last_interactive_checkpoint_path", "")
-        if checkpoint_path_value and Path(checkpoint_path_value).exists():
+        if st.session_state.meta_only and checkpoint_path_value and Path(checkpoint_path_value).exists():
             checkpoint_file = Path(checkpoint_path_value)
             st.download_button(
                 "Pobierz checkpoint do późniejszego wznowienia",
@@ -4930,11 +4926,7 @@ with interactive_tab:
             )
             st.caption(
                 "Ten plik możesz później wgrać w trybie „CSV / TXT z checkpointem”. "
-                + (
-                    "Wiersze z gotowymi opisami zostaną pominięte."
-                    if not st.session_state.meta_only
-                    else "Wiersze z gotowymi metatagami zostaną pominięte."
-                )
+                "Wiersze z gotowymi metatagami zostaną pominięte."
             )
 
         if ok and not any(item.get("meta_only") for item in ok):
