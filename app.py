@@ -57,7 +57,7 @@ except ImportError:
 # STAŁE I KONFIGURACJA
 # ═══════════════════════════════════════════════════════════════════
 
-APP_VERSION = "4.6.3"
+APP_VERSION = "4.7.0"
 APP_NAME = "Generator opisów i metatagów produktów"
 PROMPT_VERSION = "meta-v4.4.4-validator-driven-title-autorepair-2026-08"
 DEFAULT_GEMINI_MODEL = "gemini-3.5-flash-lite"
@@ -280,6 +280,8 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded",
 )
+
+from visual_editor import visual_html_editor
 
 st.markdown(
     """
@@ -4368,20 +4370,14 @@ def render_result_preview(result: Dict) -> None:
     is_meta_only = is_meta_only_result(result)
 
     if not is_meta_only:
-        editor_key = f"html_editor_{sku}_{hashlib.sha256(description_html.encode()).hexdigest()[:10]}"
-        tabs = st.tabs(["HTML", "Podgląd", "Edytuj"] + (["Research"] if result.get("research") else []))
+        editor_key = f"visual_editor_{sku}_{hashlib.sha256(description_html.encode()).hexdigest()[:10]}"
+        tabs = st.tabs(["Edytuj wizualnie", "Podgląd", "HTML"] + (["Research"] if result.get("research") else []))
         with tabs[0]:
-            st.code(description_html, language="html")
+            st.session_state[edit_key] = visual_html_editor(description_html, key=editor_key)
         with tabs[1]:
-            st.markdown(st.session_state.get(editor_key, description_html), unsafe_allow_html=True)
+            st.markdown(st.session_state.get(edit_key, description_html), unsafe_allow_html=True)
         with tabs[2]:
-            st.session_state[edit_key] = st.text_area(
-                "Opis HTML",
-                value=description_html,
-                height=350,
-                key=editor_key,
-                label_visibility="collapsed",
-            )
+            st.code(st.session_state.get(edit_key, description_html), language="html")
         if result.get("research") and len(tabs) > 3:
             with tabs[3]:
                 st.markdown(result["research"])
