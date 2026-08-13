@@ -57,7 +57,7 @@ except ImportError:
 # STAŁE I KONFIGURACJA
 # ═══════════════════════════════════════════════════════════════════
 
-APP_VERSION = "4.6.2"
+APP_VERSION = "4.6.3"
 APP_NAME = "Generator opisów i metatagów produktów"
 PROMPT_VERSION = "meta-v4.4.4-validator-driven-title-autorepair-2026-08"
 DESCRIPTION_PROMPT_VERSION = "description-v4.6.1-required-structure"
@@ -4343,8 +4343,8 @@ def init_session_state() -> None:
         "last_import_report_path": "",
         "interactive_seed_results": {},
         "last_interactive_checkpoint_path": "",
-        "force_regenerate_interactive": False,
-        "reuse_warning_checkpoints": True,
+        "force_regenerate_meta": False,
+        "reuse_warning_meta": True,
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -4807,17 +4807,22 @@ with interactive_tab:
 
         st.markdown("---")
         st.subheader("Generowanie opisów" if not st.session_state.meta_only else "Generowanie metatagów")
-        col_resume_a, col_resume_b = st.columns(2)
-        st.session_state.force_regenerate_interactive = col_resume_a.checkbox(
-            "Wymuś generowanie od zera",
-            value=st.session_state.force_regenerate_interactive,
-            help="Domyślnie WYŁĄCZONE. Włącz tylko, jeśli chcesz świadomie zapłacić za ponowne wygenerowanie już gotowych SKU.",
-        )
-        st.session_state.reuse_warning_checkpoints = col_resume_b.checkbox(
-            "Przy wznowieniu akceptuj też wyniki z ostrzeżeniem",
-            value=st.session_state.reuse_warning_checkpoints,
-            help="Ostrzeżenie jakościowe nie oznacza błędu API. Domyślnie takie SKU również są pomijane przy wznowieniu.",
-        )
+        if st.session_state.meta_only:
+            col_resume_a, col_resume_b = st.columns(2)
+            force_regenerate = col_resume_a.checkbox(
+                "Wymuś generowanie od zera",
+                key="force_regenerate_meta",
+                help="Włącz tylko, jeśli chcesz ponownie wygenerować już gotowe metatagi.",
+            )
+            include_warning_checkpoints = col_resume_b.checkbox(
+                "Przy wznowieniu akceptuj też wyniki z ostrzeżeniem",
+                key="reuse_warning_meta",
+                help="Ostrzeżenie jakościowe nie oznacza błędu API.",
+            )
+        else:
+            force_regenerate = True
+            include_warning_checkpoints = False
+            st.caption("Każde uruchomienie tworzy wszystkie wybrane opisy od nowa.")
 
         skus_for_checkpoint = list(st.session_state.bulk_selected_products)
         checkpoint_key = interactive_checkpoint_key(
@@ -4831,44 +4836,25 @@ with interactive_tab:
         checkpoint_path = interactive_checkpoint_path(checkpoint_key)
         st.session_state.last_interactive_checkpoint_path = str(checkpoint_path)
 
-        seed_count = len(st.session_state.get("interactive_seed_results", {}))
-        server_checkpoint_count = len(load_interactive_checkpoint(checkpoint_path)) if checkpoint_path.exists() else 0
-        sqlite_count = 0
         if st.session_state.meta_only:
+            seed_results = set(st.session_state.get("interactive_seed_results", {}))
+            server_results = set(load_interactive_checkpoint(checkpoint_path))
             try:
-                sqlite_count = len(
+                sqlite_results = set(
                     cached_meta_results_for_skus(
-                        skus_for_checkpoint,
-                        channel=channel,
-                        locale=locale,
-                        include_warnings=st.session_state.reuse_warning_checkpoints,
+                        skus_for_checkpoint, channel=channel, locale=locale,
+                        include_warnings=include_warning_checkpoints,
                     )
                 )
             except Exception:
-                sqlite_count = 0
-        reusable_estimate = min(
-            len(skus_for_checkpoint),
-            len(
-                set(st.session_state.get("interactive_seed_results", {}))
-                | set(load_interactive_checkpoint(checkpoint_path))
-                | (
-                    set(
-                        cached_meta_results_for_skus(
-                            skus_for_checkpoint,
-                            channel=channel,
-                            locale=locale,
-                            include_warnings=st.session_state.reuse_warning_checkpoints,
-                        )
-                    )
-                    if st.session_state.meta_only else set()
-                )
-            ),
-        ) if not st.session_state.force_regenerate_interactive else 0
-
-        st.caption(
-            f"Checkpoint: {checkpoint_path.name} · rozpoznane gotowe SKU: około {reusable_estimate}/{len(skus_for_checkpoint)} "
-            f"(plik wgrany {seed_count}, serwer CSV {server_checkpoint_count}, SQLite {sqlite_count})."
-        )
+                sqlite_results = set()
+            reusable_estimate = 0 if force_regenerate else min(
+                len(skus_for_checkpoint), len(seed_results | server_results | sqlite_results)
+            )
+            st.caption(
+                f"Checkpoint: {checkpoint_path.name} · rozpoznane gotowe SKU: około {reusable_estimate}/{len(skus_for_checkpoint)} "
+                f"(plik wgrany {len(seed_results)}, serwer CSV {len(server_results)}, SQLite {len(sqlite_results)})."
+            )
         st.caption(
             f"Tryb stabilny v{APP_VERSION}: paczki po {INTERACTIVE_CHUNK_SIZE}, {GEMINI_INTERACTIVE_WORKERS} równoległe workery, "
             f"timeout Gemini {GEMINI_HTTP_TIMEOUT_MS // 1000}s. Wynik jest zapisywany po każdym SKU."
@@ -4883,7 +4869,7 @@ with interactive_tab:
                 key="download_interactive_checkpoint_before_run",
             )
 
-        start_label = "Start / wznów generowanie opisów" if not st.session_state.meta_only else "Start / wznów generowanie metatagów"
+        start_label = "Generuj opisy od nowa" if not st.session_state.meta_only else "Start / wznów generowanie metatagów"
         if st.button(start_label, type="primary"):
             skus = list(st.session_state.bulk_selected_products)
             try:
@@ -4897,10 +4883,13 @@ with interactive_tab:
                     internal_link=get_internal_link() if not st.session_state.meta_only else None,
                     link_only=st.session_state.link_only if not st.session_state.meta_only else False,
                     use_research=st.session_state.use_research if not st.session_state.meta_only else False,
-                    resume_results=st.session_state.get("interactive_seed_results", {}),
+                    resume_results=(
+                        st.session_state.get("interactive_seed_results", {})
+                        if st.session_state.meta_only else {}
+                    ),
                     checkpoint_path=checkpoint_path,
-                    force_regenerate=st.session_state.force_regenerate_interactive,
-                    include_warning_checkpoints=st.session_state.reuse_warning_checkpoints,
+                    force_regenerate=force_regenerate,
+                    include_warning_checkpoints=include_warning_checkpoints,
                 )
                 st.session_state.products_to_send = {
                     result["sku"]: True for result in st.session_state.bulk_results if not result.get("error")
