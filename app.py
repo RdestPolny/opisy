@@ -23,7 +23,8 @@ import requests
 import streamlit as st
 from google import genai
 from google.genai import types
-from streamlit_quill import st_quill
+
+from description_output import is_meta_only_result, is_reusable_result, validate_description_html
 
 try:
     from product_input import ProductInputResolutionError, resolve_product_inputs
@@ -56,9 +57,10 @@ except ImportError:
 # STAŁE I KONFIGURACJA
 # ═══════════════════════════════════════════════════════════════════
 
-APP_VERSION = "4.6.0"
+APP_VERSION = "4.6.2"
 APP_NAME = "Generator opisów i metatagów produktów"
 PROMPT_VERSION = "meta-v4.4.4-validator-driven-title-autorepair-2026-08"
+DESCRIPTION_PROMPT_VERSION = "description-v4.6.1-required-structure"
 DEFAULT_GEMINI_MODEL = "gemini-3.5-flash-lite"
 PERPLEXITY_MODEL = "sonar"
 PERPLEXITY_API_URL = "https://api.perplexity.ai/chat/completions"
@@ -916,13 +918,6 @@ def clean_ai_fingerprints(text: str) -> str:
     return re.sub(r"\*\*(.*?)\*\*", r"<b>\1</b>", text)
 
 
-def normalize_quill_html(text: str) -> str:
-    text = re.sub(r"<strong>(.*?)</strong>", r"<b>\1</b>", text, flags=re.DOTALL)
-    text = re.sub(r"<em>(.*?)</em>", r"<i>\1</i>", text, flags=re.DOTALL)
-    text = re.sub(r' (class|style|data-[^=]*)="[^"]*"', "", text)
-    return text.strip()
-
-
 def validate_description_quality(description: str) -> Tuple[str, str]:
     length = len(strip_html(description))
     if length == 0:
@@ -1124,7 +1119,8 @@ STRUKTURA
 <p>Wstęp 4-6 zdań.</p>
 <h2>Nagłówek z konkretną korzyścią lub tematem</h2>
 <p>Rozwinięcie 5-8 zdań.</p>
-Opcjonalnie drugi <h2> i <p>.
+<h2>Drugi nagłówek rozwijający inny aspekt produktu</h2>
+<p>Dalszy opis 4-6 zdań.</p>
 <h3>Krótkie podsumowanie jako ostatni element.</h3>
 
 UNIKAJ
@@ -1280,24 +1276,42 @@ def generate_description(
     link_only: bool = False,
     research: Optional[str] = None,
 ) -> str:
-    try:
-        system_prompt = (
-            build_system_prompt_link_only(internal_link)
-            if link_only and internal_link
-            else build_system_prompt_full(internal_link)
-        )
-        response = get_gemini_client().models.generate_content(
-            model=GEMINI_MODEL,
-            contents=build_description_user_message(product_data, internal_link, research),
-            config=types.GenerateContentConfig(
-                system_instruction=system_prompt,
-                temperature=0.75,
-                max_output_tokens=2400,
-            ),
-        )
-        return clean_ai_fingerprints(strip_code_fences(response.text or ""))
-    except Exception as exc:
-        return f"BŁĄD GEMINI: {exc}"
+    link_only = bool(link_only and internal_link)
+    system_prompt = (
+        build_system_prompt_link_only(internal_link)
+        if link_only and internal_link
+        else build_system_prompt_full(internal_link)
+    )
+    user_message = build_description_user_message(product_data, internal_link, research)
+    last_errors: List[str] = []
+    for attempt in range(2):
+        try:
+            response = get_gemini_client().models.generate_content(
+                model=GEMINI_MODEL,
+                contents=user_message + (
+                    "\nPoprzedni wynik był niepoprawny: " + "; ".join(last_errors) +
+                    ". Wygeneruj cały opis ponownie."
+                    if last_errors else ""
+                ),
+                config=types.GenerateContentConfig(
+                    system_instruction=system_prompt,
+                    temperature=0.75,
+                    max_output_tokens=2400,
+                ),
+            )
+            description = clean_ai_fingerprints(strip_code_fences(response.text or ""))
+            last_errors = validate_description_html(
+                description,
+                require_full_structure=not link_only,
+                required_link=(internal_link or {}).get("url", ""),
+            )
+            if not last_errors:
+                return description
+        except Exception as exc:
+            last_errors = [str(exc)]
+            if attempt == 0:
+                continue
+    return "BŁĄD GEMINI: niepoprawny opis: " + "; ".join(last_errors)
 
 
 
@@ -1382,8 +1396,8 @@ def _bool_from_cell(value: object, default: bool = True) -> bool:
 def parse_resumable_product_file(raw_bytes: bytes) -> Tuple[List[str], Dict[str, Dict], List[str]]:
     """Czyta zwykły TXT/CSV/TSV z SKU albo checkpoint wygenerowany przez aplikację.
 
-    Jeżeli plik ma już meta_title/meta_description, poprawne wiersze są traktowane jako
-    ukończone i nie będą ponownie wysyłane do Gemini.
+    Gotowe opisy albo kompletne metatagi są traktowane jako checkpoint i nie będą
+    ponownie wysyłane do Gemini w odpowiadającym im generatorze.
     """
     text = _decode_upload_bytes(raw_bytes)
     errors: List[str] = []
@@ -1424,7 +1438,6 @@ def parse_resumable_product_file(raw_bytes: bytes) -> Tuple[List[str], Dict[str,
     desc_html_col = normalized_columns.get("description html") or normalized_columns.get("description_html")
     url_col = normalized_columns.get("url")
     old_desc_col = normalized_columns.get("old description") or normalized_columns.get("old_description")
-    meta_only_col = normalized_columns.get("meta only") or normalized_columns.get("meta_only")
     status_col = normalized_columns.get("checkpoint status") or normalized_columns.get("checkpoint_status") or normalized_columns.get("status")
 
     if meta_title_col and meta_description_col:
@@ -1436,13 +1449,18 @@ def parse_resumable_product_file(raw_bytes: bytes) -> Tuple[List[str], Dict[str,
             meta_description = str(row.get(meta_description_col, "") or "").strip()
             error = str(row.get(error_col, "") or "").strip() if error_col else ""
             status = str(row.get(status_col, "") or "").strip().lower() if status_col else ""
-            # Tylko realnie zakończone wiersze są checkpointem. Wiersze error/pending będą ponowione.
-            if not meta_title or not meta_description or error or status in {"pending", "error", "failed"}:
+            description_html = str(row.get(desc_html_col, "") or "") if desc_html_col else ""
+            # Gotowy jest pełny opis albo komplet metatagów. Błędy i pending zawsze ponawiamy.
+            if (
+                error
+                or status in {"pending", "error", "failed"}
+                or (not description_html and (not meta_title or not meta_description))
+            ):
                 continue
             seed_results[sku] = {
                 "sku": sku,
                 "title": str(row.get(title_col, "") or "") if title_col else "",
-                "description_html": str(row.get(desc_html_col, "") or "") if desc_html_col else "",
+                "description_html": description_html,
                 "url": str(row.get(url_col, "") or "") if url_col else "",
                 "old_description": str(row.get(old_desc_col, "") or "") if old_desc_col else "",
                 "research": None,
@@ -1450,7 +1468,7 @@ def parse_resumable_product_file(raw_bytes: bytes) -> Tuple[List[str], Dict[str,
                 "meta_description": meta_description,
                 "error": None,
                 "validation_errors": _validation_errors_from_cell(row.get(validation_col, "")) if validation_col else [],
-                "meta_only": _bool_from_cell(row.get(meta_only_col, ""), True) if meta_only_col else True,
+                "meta_only": is_meta_only_result({"description_html": description_html}),
                 "checkpoint_source": "uploaded_csv",
             }
 
@@ -1473,6 +1491,7 @@ def interactive_checkpoint_key(
         "store_view_code": store_view_code,
         "meta_only": bool(meta_only),
         "link_only": bool(link_only),
+        "description_prompt_version": DESCRIPTION_PROMPT_VERSION,
         "prompt_version": PROMPT_VERSION,
         "model": GEMINI_MODEL,
     }
@@ -1513,7 +1532,7 @@ def _checkpoint_row(sku: str, result: Optional[Dict]) -> Dict:
         "meta_description": result.get("meta_description", ""),
         "validation_errors": json.dumps(list(validation_errors), ensure_ascii=False),
         "error": error,
-        "meta_only": bool(result.get("meta_only", True)),
+        "meta_only": is_meta_only_result(result),
         "description_html": result.get("description_html", ""),
         "url": result.get("url", ""),
         "old_description": result.get("old_description", ""),
@@ -2021,12 +2040,12 @@ def process_product_from_akeneo(
     token: str,
     channel: str,
     locale: str,
-    store_view_code: str,
     internal_link: Optional[Dict] = None,
     link_only: bool = False,
     use_research: bool = True,
 ) -> Dict:
     try:
+        link_only = bool(link_only and internal_link)
         product_details = akeneo_get_product_details(sku, token, channel, locale)
         if not product_details:
             return {"sku": sku, "title": "", "error": "Produkt nie znaleziony"}
@@ -2052,35 +2071,6 @@ def process_product_from_akeneo(
                 "description_quality": quality,
             }
 
-        job_key, _ = upsert_meta_job(
-            sku=sku,
-            channel=channel,
-            locale=locale,
-            store_view_code=store_view_code,
-            product_data={**product_data, "description": description_html},
-            source_updated=product_details.get("updated", ""),
-            force_regenerate=True,
-        )
-        job = get_meta_job(job_key)
-        generated = generate_metatags_interactive(job) if job else {
-            "meta_title": build_meta_title(product_data["title"], product_data["author"]),  # fallback bez AI
-            "meta_description": "",
-            "attempts": 0,
-            "validation_errors": ["Brak zadania"],
-            "error": "Brak zadania",
-        }
-        if job:
-            status = "completed" if not generated["validation_errors"] else "validation_failed"
-            save_meta_result(
-                job_key,
-                meta_title=generated["meta_title"],
-                meta_description=generated["meta_description"],
-                status=status,
-                attempts=generated["attempts"],
-                validation_errors=generated["validation_errors"],
-                error_message=generated["error"],
-            )
-
         return {
             "sku": sku,
             "title": product_data["title"],
@@ -2088,11 +2078,12 @@ def process_product_from_akeneo(
             "url": generate_product_url(product_data["title"]),
             "old_description": product_data["description"],
             "research": research,
-            "meta_title": generated["meta_title"],
-            "meta_description": generated["meta_description"],
-            "error": generated["error"] or None,
+            "meta_title": "",
+            "meta_description": "",
+            "error": None,
             "description_quality": quality,
-            "validation_errors": generated["validation_errors"],
+            "meta_only": False,
+            "validation_errors": [],
         }
     except Exception as exc:
         return {
@@ -4335,6 +4326,7 @@ def refresh_and_ingest_batch_jobs(run_id: Optional[str] = None) -> List[Dict]:
 def init_session_state() -> None:
     defaults = {
         "bulk_results": [],
+        "generator_mode": "Generator opisów",
         "bulk_selected_products": {},
         "products_to_send": {},
         "link_active": False,
@@ -4362,6 +4354,12 @@ def init_session_state() -> None:
 init_session_state()
 
 
+def reset_interactive_results() -> None:
+    st.session_state.bulk_results = []
+    st.session_state.interactive_seed_results = {}
+    st.session_state.last_interactive_checkpoint_path = ""
+
+
 def get_internal_link() -> Optional[Dict]:
     if (
         st.session_state.get("link_active")
@@ -4375,52 +4373,42 @@ def get_internal_link() -> Optional[Dict]:
     return None
 
 
-def render_result_preview(result: Dict, channel: str, locale: str) -> None:
+def render_result_preview(result: Dict) -> None:
     sku = result["sku"]
     edit_key = f"edit_{sku}"
-    is_meta_only = result.get("meta_only", False)
+    description_html = result.get("description_html", "")
+    is_meta_only = is_meta_only_result(result)
 
     if not is_meta_only:
-        if edit_key not in st.session_state:
-            st.session_state[edit_key] = result.get("description_html", "")
+        editor_key = f"html_editor_{sku}_{hashlib.sha256(description_html.encode()).hexdigest()[:10]}"
         tabs = st.tabs(["HTML", "Podgląd", "Edytuj"] + (["Research"] if result.get("research") else []))
         with tabs[0]:
-            st.code(result.get("description_html", ""), language="html")
+            st.code(description_html, language="html")
         with tabs[1]:
-            st.markdown(st.session_state.get(edit_key, ""), unsafe_allow_html=True)
+            st.markdown(st.session_state.get(editor_key, description_html), unsafe_allow_html=True)
         with tabs[2]:
-            quill_value = st_quill(
-                value=st.session_state.get(edit_key, ""),
-                html=True,
-                key=f"quill_{sku}",
-                toolbar=[[{"header": [2, 3, False]}], ["bold", "link"], ["clean"]],
+            st.session_state[edit_key] = st.text_area(
+                "Opis HTML",
+                value=description_html,
+                height=350,
+                key=editor_key,
+                label_visibility="collapsed",
             )
-            if quill_value is not None:
-                st.session_state[edit_key] = normalize_quill_html(quill_value)
         if result.get("research") and len(tabs) > 3:
             with tabs[3]:
                 st.markdown(result["research"])
 
-    with st.expander("Metatagi Magento", expanded=is_meta_only):
-        meta_title = result.get("meta_title", "")
-        meta_description = result.get("meta_description", "")
-        st.text_input("meta_title", value=meta_title, disabled=True, key=f"mt_{sku}")
-        st.text_area("meta_description", value=meta_description, disabled=True, height=90, key=f"md_{sku}")
-        col1, col2 = st.columns(2)
-        col1.caption(f"{len(meta_title)}/{META_TITLE_HARD_MAX} znaków · cel {META_TITLE_TARGET_MIN}-{META_TITLE_TARGET_MAX}")
-        col2.caption(f"{len(meta_description)}/160 znaków")
-        if result.get("validation_errors"):
-            st.warning("; ".join(result["validation_errors"]))
-
-
-def _interactive_result_is_reusable(result: Dict, *, meta_only: bool) -> bool:
-    if not result or result.get("error"):
-        return False
-    if not result.get("meta_title") or not result.get("meta_description"):
-        return False
-    if not meta_only and not result.get("description_html"):
-        return False
-    return True
+    if is_meta_only or result.get("meta_title") or result.get("meta_description"):
+        with st.expander("Metatagi Magento", expanded=is_meta_only):
+            meta_title = result.get("meta_title", "")
+            meta_description = result.get("meta_description", "")
+            st.text_input("meta_title", value=meta_title, disabled=True, key=f"mt_{sku}")
+            st.text_area("meta_description", value=meta_description, disabled=True, height=90, key=f"md_{sku}")
+            col1, col2 = st.columns(2)
+            col1.caption(f"{len(meta_title)}/{META_TITLE_HARD_MAX} znaków · cel {META_TITLE_TARGET_MIN}-{META_TITLE_TARGET_MAX}")
+            col2.caption(f"{len(meta_description)}/160 znaków")
+            if result.get("validation_errors"):
+                st.warning("; ".join(result["validation_errors"]))
 
 
 def process_selected_products(
@@ -4457,12 +4445,12 @@ def process_selected_products(
     results_by_sku: Dict[str, Dict] = {}
     if not force_regenerate:
         for sku, result in (resume_results or {}).items():
-            if sku in ordered_skus and _interactive_result_is_reusable(result, meta_only=meta_only):
+            if sku in ordered_skus and is_reusable_result(result, meta_only=meta_only):
                 results_by_sku[sku] = result
 
         if checkpoint_path:
             for sku, result in load_interactive_checkpoint(checkpoint_path).items():
-                if sku in ordered_skus and sku not in results_by_sku and _interactive_result_is_reusable(result, meta_only=meta_only):
+                if sku in ordered_skus and sku not in results_by_sku and is_reusable_result(result, meta_only=meta_only):
                     results_by_sku[sku] = result
 
         # SQLite przechowuje metatagi po KAŻDYM produkcie, więc odzyskuje nawet
@@ -4475,7 +4463,7 @@ def process_selected_products(
                 include_warnings=include_warning_checkpoints,
             )
             for sku, result in sqlite_results.items():
-                if sku not in results_by_sku and _interactive_result_is_reusable(result, meta_only=True):
+                if sku not in results_by_sku and is_reusable_result(result, meta_only=True):
                     results_by_sku[sku] = result
 
     pending = [sku for sku in ordered_skus if sku not in results_by_sku]
@@ -4517,7 +4505,6 @@ def process_selected_products(
                         token,
                         channel,
                         locale,
-                        store_view_code,
                         internal_link,
                         link_only,
                         use_research,
@@ -4575,7 +4562,22 @@ st.markdown(
 )
 
 with st.sidebar:
-    st.header("Ustawienia")
+    st.header("Generator")
+    generator_mode = st.radio(
+        "Wybierz osobny tryb pracy",
+        ["Generator opisów", "Generator metatagów"],
+        key="generator_mode",
+        on_change=reset_interactive_results,
+    )
+    st.session_state.meta_only = generator_mode == "Generator metatagów"
+    st.caption(
+        "Tworzy wyłącznie pełne opisy HTML."
+        if not st.session_state.meta_only
+        else "Tworzy wyłącznie meta title i meta description. Opisy produktów pozostają bez zmian."
+    )
+
+    st.markdown("---")
+    st.subheader("Ustawienia wspólne")
     channel = st.selectbox("Kanał", [DEFAULT_CHANNEL, "B2B"], index=0)
     locale = st.text_input("Locale", value=DEFAULT_LOCALE)
     st.session_state.magento_store_view = st.text_input(
@@ -4583,36 +4585,40 @@ with st.sidebar:
         value=st.session_state.magento_store_view,
     )
 
-    st.markdown("---")
-    st.subheader("Linkowanie wewnętrzne")
-    st.session_state.link_active = st.checkbox("Włącz linkowanie", value=st.session_state.link_active)
-    st.session_state.link_only = st.checkbox(
-        "Tylko dodaj link - bez przepisywania opisu",
-        value=st.session_state.link_only,
-    )
-    st.session_state.link_url = st.text_input("URL linku", value=st.session_state.link_url)
-    st.session_state.link_category = st.text_input("Kategoria / anchor hint", value=st.session_state.link_category)
+    if not st.session_state.meta_only:
+        st.markdown("---")
+        st.subheader("Opcje opisów")
+        st.session_state.link_active = st.checkbox("Włącz linkowanie", value=st.session_state.link_active)
+        st.session_state.link_only = st.checkbox(
+            "Tylko dodaj link - bez przepisywania opisu",
+            value=st.session_state.link_only,
+        )
+        st.session_state.link_url = st.text_input("URL linku", value=st.session_state.link_url)
+        st.session_state.link_category = st.text_input("Kategoria / anchor hint", value=st.session_state.link_category)
+        st.session_state.use_research = st.checkbox(
+            "Wzbogacaj opisy researchem Perplexity",
+            value=st.session_state.use_research,
+        )
+        if st.session_state.use_research and "PERPLEXITY_API_KEY" not in st.secrets:
+            st.caption("Brak PERPLEXITY_API_KEY - research będzie pomijany.")
 
-    st.markdown("---")
-    st.subheader("Research")
-    st.session_state.use_research = st.checkbox(
-        "Wzbogacaj pełne opisy researchem Perplexity",
-        value=st.session_state.use_research,
-    )
-    if st.session_state.use_research and "PERPLEXITY_API_KEY" not in st.secrets:
-        st.caption("Brak PERPLEXITY_API_KEY - research będzie pomijany.")
-
-    st.markdown("---")
-    st.metric("Opisane produkty", optimized_products_count())
-    if st.button("Wyczyść licznik opisanych produktów"):
-        clear_optimized_products()
-        st.rerun()
+        st.markdown("---")
+        st.metric("Opisane produkty", optimized_products_count())
+        if st.button("Wyczyść licznik opisanych produktów"):
+            clear_optimized_products()
+            st.rerun()
 
 interactive_tab, scale_tab, results_tab = st.tabs(
-    ["Praca interaktywna", "Metatagi 50k / Batch API", "Wyniki i kontrola jakości"]
+    [generator_mode, "Metatagi 50k / Batch API", "Kontrola metatagów"]
 )
 
 with interactive_tab:
+    st.header(generator_mode)
+    st.info(
+        "Ten generator tworzy pełne opisy HTML. Metatagi są generowane w osobnym trybie."
+        if not st.session_state.meta_only
+        else "Ten generator nie tworzy ani nie zmienia opisów produktów."
+    )
     st.subheader("Wybór produktów")
     method = st.radio(
         "Metoda",
@@ -4800,12 +4806,7 @@ with interactive_tab:
             st.rerun()
 
         st.markdown("---")
-        st.subheader("Generowanie odporne na restart")
-        st.session_state.meta_only = st.checkbox(
-            "Tylko metatagi",
-            value=st.session_state.meta_only,
-            help="Gemini generuje oba pola. Każdy gotowy produkt jest checkpointowany; po restarcie gotowe SKU są pomijane.",
-        )
+        st.subheader("Generowanie opisów" if not st.session_state.meta_only else "Generowanie metatagów")
         col_resume_a, col_resume_b = st.columns(2)
         st.session_state.force_regenerate_interactive = col_resume_a.checkbox(
             "Wymuś generowanie od zera",
@@ -4825,7 +4826,7 @@ with interactive_tab:
             locale=locale,
             store_view_code=st.session_state.magento_store_view,
             meta_only=st.session_state.meta_only,
-            link_only=st.session_state.link_only,
+            link_only=st.session_state.link_only if not st.session_state.meta_only else False,
         )
         checkpoint_path = interactive_checkpoint_path(checkpoint_key)
         st.session_state.last_interactive_checkpoint_path = str(checkpoint_path)
@@ -4869,7 +4870,7 @@ with interactive_tab:
             f"(plik wgrany {seed_count}, serwer CSV {server_checkpoint_count}, SQLite {sqlite_count})."
         )
         st.caption(
-            f"Tryb stabilny v4.6.0: paczki po {INTERACTIVE_CHUNK_SIZE}, {GEMINI_INTERACTIVE_WORKERS} równoległe workery, "
+            f"Tryb stabilny v{APP_VERSION}: paczki po {INTERACTIVE_CHUNK_SIZE}, {GEMINI_INTERACTIVE_WORKERS} równoległe workery, "
             f"timeout Gemini {GEMINI_HTTP_TIMEOUT_MS // 1000}s. Wynik jest zapisywany po każdym SKU."
         )
 
@@ -4882,7 +4883,8 @@ with interactive_tab:
                 key="download_interactive_checkpoint_before_run",
             )
 
-        if st.button("Start / wznów generowanie", type="primary"):
+        start_label = "Start / wznów generowanie opisów" if not st.session_state.meta_only else "Start / wznów generowanie metatagów"
+        if st.button(start_label, type="primary"):
             skus = list(st.session_state.bulk_selected_products)
             try:
                 st.session_state.bulk_results = process_selected_products(
@@ -4892,9 +4894,9 @@ with interactive_tab:
                     locale=locale,
                     store_view_code=st.session_state.magento_store_view,
                     meta_only=st.session_state.meta_only,
-                    internal_link=get_internal_link(),
-                    link_only=st.session_state.link_only,
-                    use_research=st.session_state.use_research,
+                    internal_link=get_internal_link() if not st.session_state.meta_only else None,
+                    link_only=st.session_state.link_only if not st.session_state.meta_only else False,
+                    use_research=st.session_state.use_research if not st.session_state.meta_only else False,
                     resume_results=st.session_state.get("interactive_seed_results", {}),
                     checkpoint_path=checkpoint_path,
                     force_regenerate=st.session_state.force_regenerate_interactive,
@@ -4906,7 +4908,7 @@ with interactive_tab:
                 st.session_state.interactive_seed_results = {
                     result["sku"]: result
                     for result in st.session_state.bulk_results
-                    if _interactive_result_is_reusable(result, meta_only=st.session_state.meta_only)
+                    if is_reusable_result(result, meta_only=st.session_state.meta_only)
                 }
             except Exception as exc:
                 st.error(str(exc))
@@ -4921,9 +4923,9 @@ with interactive_tab:
 
         data_frame = pd.DataFrame(results)
         st.download_button(
-            "Pobierz wyniki CSV",
+            "Pobierz opisy CSV" if not st.session_state.meta_only else "Pobierz metatagi CSV",
             data_frame.to_csv(index=False).encode("utf-8-sig"),
-            "wyniki_interaktywne.csv",
+            "opisy_produkty.csv" if not st.session_state.meta_only else "metatagi_produkty.csv",
             "text/csv",
         )
 
@@ -4939,7 +4941,11 @@ with interactive_tab:
             )
             st.caption(
                 "Ten plik możesz później wgrać w trybie „CSV / TXT z checkpointem”. "
-                "Wiersze z gotowymi metatagami zostaną pominięte."
+                + (
+                    "Wiersze z gotowymi opisami zostaną pominięte."
+                    if not st.session_state.meta_only
+                    else "Wiersze z gotowymi metatagami zostaną pominięte."
+                )
             )
 
         if ok and not any(item.get("meta_only") for item in ok):
@@ -4977,7 +4983,7 @@ with interactive_tab:
             with st.expander(f"{label} {result['sku']} - {result.get('title', '')}"):
                 if result.get("error"):
                     st.error(result["error"])
-                render_result_preview(result, channel, locale)
+                render_result_preview(result)
         if len(results) > RESULT_PREVIEW_LIMIT:
             st.caption(f"Wyświetlono pierwsze {RESULT_PREVIEW_LIMIT} wyników, aby nie przeciążać Streamlita.")
 
