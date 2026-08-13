@@ -33,6 +33,7 @@ _visual_editor = st.components.v2.component(
     .editor h2 { font-size: 1.45rem; margin: 1.25rem 0 .5rem; }
     .editor h3 { font-size: 1.2rem; margin: 1.1rem 0 .5rem; }
     .editor p { margin: .65rem 0; }
+    .editor b { font-weight: 700; }
     .editor a { color: var(--st-primary-color); text-decoration: underline; }
     .source { display: none; resize: vertical; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .9rem; }
     :host(.show-source) .editor { display: none; }
@@ -48,7 +49,7 @@ _visual_editor = st.components.v2.component(
 
       const publish = (html) => {
         clearTimeout(timer);
-        setStateValue('html', html);
+        setStateValue('html', html.replaceAll(/<strong>/gi, '<b>').replaceAll(/<[/]strong>/gi, '</b>'));
       };
       const current = data.html ?? '';
       if (!editor.matches(':focus') && !source.matches(':focus') && editor.innerHTML !== current) {

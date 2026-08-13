@@ -57,7 +57,7 @@ except ImportError:
 # STAŁE I KONFIGURACJA
 # ═══════════════════════════════════════════════════════════════════
 
-APP_VERSION = "4.7.0"
+APP_VERSION = "4.7.1"
 APP_NAME = "Generator opisów i metatagów produktów"
 PROMPT_VERSION = "meta-v4.4.4-validator-driven-title-autorepair-2026-08"
 DEFAULT_GEMINI_MODEL = "gemini-3.5-flash-lite"
@@ -392,6 +392,13 @@ def init_db() -> None:
                 updated_at TEXT NOT NULL,
                 ingested_at TEXT NOT NULL DEFAULT ''
             );
+
+            CREATE TABLE IF NOT EXISTS description_workspace (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                selected_skus TEXT NOT NULL DEFAULT '[]',
+                results TEXT NOT NULL DEFAULT '[]',
+                updated_at TEXT NOT NULL
+            );
             """
         )
 
@@ -408,6 +415,47 @@ def init_db() -> None:
 
 
 init_db()
+
+
+def load_description_workspace() -> Dict:
+    with db_connect() as conn:
+        row = conn.execute(
+            "SELECT selected_skus, results, updated_at FROM description_workspace WHERE id=1"
+        ).fetchone()
+    if not row:
+        return {"selected_skus": [], "results": [], "updated_at": ""}
+    try:
+        return {
+            "selected_skus": json.loads(row["selected_skus"]),
+            "results": json.loads(row["results"]),
+            "updated_at": row["updated_at"],
+        }
+    except (TypeError, ValueError):
+        return {"selected_skus": [], "results": [], "updated_at": ""}
+
+
+def save_description_workspace(selected_skus: Sequence[str], results: Sequence[Dict]) -> None:
+    with db_connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO description_workspace(id, selected_skus, results, updated_at)
+            VALUES (1, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                selected_skus=excluded.selected_skus,
+                results=excluded.results,
+                updated_at=excluded.updated_at
+            """,
+            (
+                json.dumps(list(selected_skus), ensure_ascii=False),
+                json.dumps(list(results), ensure_ascii=False, default=str),
+                utcnow_iso(),
+            ),
+        )
+
+
+def clear_description_workspace() -> None:
+    with db_connect() as conn:
+        conn.execute("DELETE FROM description_workspace WHERE id=1")
 
 
 def add_optimized_product(sku: str, title: str, url: str) -> None:
@@ -1099,10 +1147,11 @@ def build_system_prompt_full(internal_link: Optional[Dict] = None) -> str:
     if internal_link and internal_link.get("url") and internal_link.get("category"):
         link_block = f"""
 ## LINKOWANIE WEWNĘTRZNE
-Wpleć jeden naturalny link do kategorii:
+Wpleć dokładnie jeden naturalny link do kategorii. Nie twórz żadnych innych linków:
 - kategoria: {internal_link['category']}
 - URL: {internal_link['url']}
-- format: <a href="{internal_link['url']}">naturalny anchor</a>
+- wymagany format: <a href="{internal_link['url']}">naturalny anchor</a>
+- href musi być skopiowany znak w znak; nie wymyślaj ani nie skracaj adresu
 """
 
     return f"""Jesteś doświadczonym copywriterem e-commerce i ekspertem SEO dla księgarni Bookland.
@@ -1115,6 +1164,8 @@ ZASADY FORMATOWANIA
 - Używaj zwykłego dywizu - zamiast półpauzy i pauzy.
 - Nie twórz list punktowanych.
 - Nie dopowiadaj faktów, których nie ma w danych ani researchu.
+- Każdy z trzech akapitów musi zawierać 1-2 krótkie, merytoryczne wyróżnienia <b>fraza</b>.
+- Nagłówki H2 i H3 nie mogą kończyć się kropką, przecinkiem, dwukropkiem ani innym znakiem interpunkcyjnym.
 {link_block}
 STRUKTURA
 <p>Wstęp 4-6 zdań.</p>
@@ -1122,7 +1173,16 @@ STRUKTURA
 <p>Rozwinięcie 5-8 zdań.</p>
 <h2>Drugi nagłówek rozwijający inny aspekt produktu</h2>
 <p>Dalszy opis 4-6 zdań.</p>
-<h3>Krótkie podsumowanie jako ostatni element.</h3>
+<h3>Krótkie podsumowanie jako ostatni element</h3>
+
+WIARYGODNOŚĆ DANYCH
+- Pola TYTUŁ, AUTOR i WYDAWNICTWO z katalogu są nadrzędne wobec researchu i opisu źródłowego.
+- Nie zgaduj autora z nazwy wydawnictwa, marki ani fragmentu tytułu.
+- Osobę możesz nazwać autorem wyłącznie na podstawie pola AUTOR; research służy tylko do wzbogacenia tematu książki.
+- Zachowuj dokładną pisownię nazw własnych i polskie znaki z danych katalogowych.
+- Przed zwróceniem tekstu sprawdź polską gramatykę, odmianę, interpunkcję oraz znaki diakrytyczne.
+- „Praca zbiorowa” oznacza wielu autorów: nie pisz „autorem jest praca zbiorowa” ani „autorstwa pracy zbiorowej”.
+- Jeśli wspominasz wydawcę, użyj naturalnej formy, np. „wydawnictwo Muza”, „oficyna Zwierciadło” albo „wydawca Kalamar”; nie pisz samego „wydane przez Muza”.
 
 UNIKAJ
 - powtórzeń,
@@ -1147,7 +1207,8 @@ def build_description_user_message(
 ) -> str:
     parts = [
         f"TYTUŁ PRODUKTU: {product_data.get('title', '')}",
-        f"AUTOR/MARKA: {product_data.get('author', '')}",
+        f"AUTOR: {product_data.get('author', '')}",
+        f"WYDAWNICTWO: {product_data.get('publisher', '')}",
         f"DANE TECHNICZNE: {product_data.get('details', '')}",
         f"ORYGINALNY OPIS: {product_data.get('description', '')}",
     ]
@@ -1285,7 +1346,7 @@ def generate_description(
     )
     user_message = build_description_user_message(product_data, internal_link, research)
     last_errors: List[str] = []
-    for attempt in range(2):
+    for attempt in range(3):
         try:
             response = get_gemini_client().models.generate_content(
                 model=GEMINI_MODEL,
@@ -1296,7 +1357,7 @@ def generate_description(
                 ),
                 config=types.GenerateContentConfig(
                     system_instruction=system_prompt,
-                    temperature=0.75,
+                    temperature=0.55,
                     max_output_tokens=2400,
                 ),
             )
@@ -1957,6 +2018,7 @@ def _prepare_product_data(product_details: Dict) -> Dict:
     return {
         "title": safe_string_value(product_details.get("title")),
         "author": safe_string_value(product_details.get("author")),
+        "publisher": safe_string_value(product_details.get("publisher")),
         "details": safe_string_value(product_details.get("details")),
         "description": safe_string_value(product_details.get("description")),
     }
@@ -2072,6 +2134,8 @@ def process_product_from_akeneo(
             "description_quality": quality,
             "meta_only": False,
             "validation_errors": [],
+            "required_link": (internal_link or {}).get("url", ""),
+            "link_only": link_only,
         }
     except Exception as exc:
         return {
@@ -4312,10 +4376,16 @@ def refresh_and_ingest_batch_jobs(run_id: Optional[str] = None) -> List[Dict]:
 # ═══════════════════════════════════════════════════════════════════
 
 def init_session_state() -> None:
+    workspace = load_description_workspace()
+    restored_results = workspace["results"]
+    restored_products = {sku: {"title": sku} for sku in workspace["selected_skus"]}
+    for result in restored_results:
+        if result.get("sku") in restored_products:
+            restored_products[result["sku"]]["title"] = result.get("title", result["sku"])
     defaults = {
-        "bulk_results": [],
+        "bulk_results": restored_results,
         "generator_mode": "Generator opisów",
-        "bulk_selected_products": {},
+        "bulk_selected_products": restored_products,
         "products_to_send": {},
         "link_active": False,
         "link_only": False,
@@ -4343,7 +4413,15 @@ init_session_state()
 
 
 def reset_interactive_results() -> None:
-    st.session_state.bulk_results = []
+    if st.session_state.get("generator_mode") == "Generator opisów":
+        workspace = load_description_workspace()
+        st.session_state.bulk_results = workspace["results"]
+        st.session_state.bulk_selected_products = {
+            sku: {"title": sku} for sku in workspace["selected_skus"]
+        }
+    else:
+        st.session_state.bulk_results = []
+        st.session_state.bulk_selected_products = {}
     st.session_state.interactive_seed_results = {}
     st.session_state.last_interactive_checkpoint_path = ""
     for key in ("interactive_method", "interactive_resume_file", "interactive_existing_checkpoint"):
@@ -4370,10 +4448,21 @@ def render_result_preview(result: Dict) -> None:
     is_meta_only = is_meta_only_result(result)
 
     if not is_meta_only:
-        editor_key = f"visual_editor_{sku}_{hashlib.sha256(description_html.encode()).hexdigest()[:10]}"
+        editor_seed = result.setdefault(
+            "editor_seed",
+            hashlib.sha256(description_html.encode()).hexdigest()[:10],
+        )
+        editor_key = f"visual_editor_{sku}_{editor_seed}"
         tabs = st.tabs(["Edytuj wizualnie", "Podgląd", "HTML"] + (["Research"] if result.get("research") else []))
         with tabs[0]:
-            st.session_state[edit_key] = visual_html_editor(description_html, key=editor_key)
+            edited_html = visual_html_editor(description_html, key=editor_key)
+            st.session_state[edit_key] = edited_html
+            if edited_html != description_html:
+                result["description_html"] = edited_html
+                save_description_workspace(
+                    list(st.session_state.bulk_selected_products),
+                    st.session_state.bulk_results,
+                )
         with tabs[1]:
             st.markdown(st.session_state.get(edit_key, description_html), unsafe_allow_html=True)
         with tabs[2]:
@@ -4504,6 +4593,12 @@ def process_selected_products(
                 results_by_sku[sku] = result
                 newly_processed += 1
                 done_count = resumed_count + newly_processed
+
+                if not meta_only:
+                    save_description_workspace(
+                        ordered_skus,
+                        [results_by_sku[item] for item in ordered_skus if item in results_by_sku],
+                    )
 
                 # Checkpoint jest celowo częsty. Przy 500 produktach oznacza ~100
                 # małych, atomowych zapisów, ale najwyżej kilka wyników może zostać
@@ -4785,6 +4880,8 @@ with interactive_tab:
         st.info(f"W kolejce: {len(st.session_state.bulk_selected_products)} produktów")
         col_clear, _ = st.columns([1, 4])
         if col_clear.button("Wyczyść kolejkę"):
+            if not st.session_state.meta_only:
+                clear_description_workspace()
             st.session_state.bulk_selected_products = {}
             st.session_state.interactive_seed_results = {}
             st.session_state.last_interactive_checkpoint_path = ""
@@ -4862,6 +4959,8 @@ with interactive_tab:
         if st.button(start_label, type="primary"):
             skus = list(st.session_state.bulk_selected_products)
             try:
+                if not st.session_state.meta_only:
+                    save_description_workspace(skus, [])
                 st.session_state.bulk_results = process_selected_products(
                     skus,
                     token=akeneo_get_token(),
@@ -4896,6 +4995,11 @@ with interactive_tab:
 
     if st.session_state.bulk_results:
         results = st.session_state.bulk_results
+        if not st.session_state.meta_only:
+            st.caption(
+                "Wyniki i zmiany w edytorze zapisują się automatycznie w obszarze roboczym. "
+                "Aby opublikować je w Akeneo, nadal kliknij „Wyślij zaznaczone”."
+            )
         ok = [item for item in results if not item.get("error")]
         errors = [item for item in results if item.get("error")]
         col_ok, col_err = st.columns(2)
@@ -4944,6 +5048,13 @@ with interactive_tab:
                 for index, item in enumerate(to_send, start=1):
                     try:
                         final_html = st.session_state.get(f"edit_{item['sku']}", item["description_html"])
+                        validation_errors = validate_description_html(
+                            final_html,
+                            require_full_structure=not item.get("link_only", False),
+                            required_link=item.get("required_link", ""),
+                        )
+                        if validation_errors:
+                            raise ValueError("opis nie przeszedł kontroli: " + "; ".join(validation_errors))
                         akeneo_update_description(item["sku"], final_html, channel, locale)
                         add_optimized_product(item["sku"], item["title"], item["url"])
                         sent += 1
