@@ -45,10 +45,7 @@ _visual_editor = st.components.v2.component(
       const editor = parentElement.querySelector('.editor');
       const source = parentElement.querySelector('.source');
       const toolbar = parentElement.querySelector('.toolbar');
-      let timer;
-
       const publish = (html) => {
-        clearTimeout(timer);
         setStateValue('html', html.replaceAll(/<strong>/gi, '<b>').replaceAll(/<[/]strong>/gi, '</b>'));
       };
       const current = data.html ?? '';
@@ -59,8 +56,6 @@ _visual_editor = st.components.v2.component(
 
       editor.oninput = () => {
         source.value = editor.innerHTML;
-        clearTimeout(timer);
-        timer = setTimeout(() => publish(editor.innerHTML), 600);
       };
       editor.onblur = () => publish(editor.innerHTML);
       editor.onpaste = (event) => {
@@ -108,27 +103,24 @@ _visual_editor = st.components.v2.component(
         }
       };
       source.oninput = () => {
-        clearTimeout(timer);
-        timer = setTimeout(() => publish(source.value), 600);
+        editor.innerHTML = source.value;
       };
       source.onblur = () => {
         editor.innerHTML = source.value;
         publish(source.value);
       };
-
-      return () => clearTimeout(timer);
     }
     """,
 )
 
 
-def visual_html_editor(value: str, *, key: str) -> str:
+def visual_html_editor(value: str, *, key: str, on_change=None) -> str:
     state = st.session_state.get(key, {})
     current = state.get("html", value)
     result = _visual_editor(
         data={"html": current},
         default={"html": current},
         key=key,
-        on_html_change=lambda: None,
+        on_html_change=on_change or (lambda: None),
     )
     return result.html if result.html is not None else current

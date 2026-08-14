@@ -57,7 +57,7 @@ except ImportError:
 # STAŁE I KONFIGURACJA
 # ═══════════════════════════════════════════════════════════════════
 
-APP_VERSION = "4.7.1"
+APP_VERSION = "4.7.2"
 APP_NAME = "Generator opisów i metatagów produktów"
 PROMPT_VERSION = "meta-v4.4.4-validator-driven-title-autorepair-2026-08"
 DEFAULT_GEMINI_MODEL = "gemini-3.5-flash-lite"
@@ -4403,6 +4403,7 @@ def init_session_state() -> None:
         "last_interactive_checkpoint_path": "",
         "force_regenerate_meta": False,
         "reuse_warning_meta": True,
+        "active_editor_sku": "",
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -4410,6 +4411,22 @@ def init_session_state() -> None:
 
 
 init_session_state()
+
+
+def clear_product_queue() -> None:
+    if not st.session_state.get("meta_only"):
+        clear_description_workspace()
+    st.session_state.bulk_selected_products = {}
+    st.session_state.bulk_results = []
+    st.session_state.products_to_send = {}
+    st.session_state.interactive_seed_results = {}
+    st.session_state.last_interactive_checkpoint_path = ""
+    st.session_state.search_res = []
+    st.session_state.manual_product_input = ""
+    st.session_state.active_editor_sku = ""
+    for key in list(st.session_state):
+        if key.startswith(("edit_", "visual_editor_", "send_")):
+            st.session_state.pop(key, None)
 
 
 def reset_interactive_results() -> None:
@@ -4455,7 +4472,11 @@ def render_result_preview(result: Dict) -> None:
         editor_key = f"visual_editor_{sku}_{editor_seed}"
         tabs = st.tabs(["Edytuj wizualnie", "Podgląd", "HTML"] + (["Research"] if result.get("research") else []))
         with tabs[0]:
-            edited_html = visual_html_editor(description_html, key=editor_key)
+            edited_html = visual_html_editor(
+                description_html,
+                key=editor_key,
+                on_change=lambda: st.session_state.__setitem__("active_editor_sku", sku),
+            )
             st.session_state[edit_key] = edited_html
             if edited_html != description_html:
                 result["description_html"] = edited_html
@@ -4727,7 +4748,15 @@ with interactive_tab:
             st.markdown("</div>", unsafe_allow_html=True)
 
     elif method == "Wklej SKU lub URL":
-        raw_text = st.text_area("SKU lub URL - jeden na linię", height=170)
+        loaded_count = st.session_state.pop("manual_products_loaded", 0)
+        if loaded_count:
+            st.session_state.manual_product_input = ""
+            st.success(f"Dodano {loaded_count} produktów.")
+        raw_text = st.text_area(
+            "SKU lub URL - jeden na linię",
+            height=170,
+            key="manual_product_input",
+        )
         if st.button("Załaduj produkty", type="primary"):
             raw_inputs = [line.strip() for line in raw_text.splitlines() if line.strip()]
             try:
@@ -4753,7 +4782,11 @@ with interactive_tab:
                     st.session_state.bulk_selected_products[item["sku"]] = {"title": item.get("title", item["sku"])}
                     accepted += 1
                 if accepted:
-                    st.success(f"Dodano {accepted} produktów.")
+                    if input_errors:
+                        st.success(f"Dodano {accepted} produktów.")
+                    else:
+                        st.session_state.manual_products_loaded = accepted
+                        st.rerun()
                 if input_errors:
                     st.warning("\n".join(f"- {error}" for error in input_errors))
             except ProductInputResolutionError as exc:
@@ -4879,13 +4912,7 @@ with interactive_tab:
     if st.session_state.bulk_selected_products:
         st.info(f"W kolejce: {len(st.session_state.bulk_selected_products)} produktów")
         col_clear, _ = st.columns([1, 4])
-        if col_clear.button("Wyczyść kolejkę"):
-            if not st.session_state.meta_only:
-                clear_description_workspace()
-            st.session_state.bulk_selected_products = {}
-            st.session_state.interactive_seed_results = {}
-            st.session_state.last_interactive_checkpoint_path = ""
-            st.rerun()
+        col_clear.button("Wyczyść kolejkę", on_click=clear_product_queue)
 
         st.markdown("---")
         st.subheader("Generowanie opisów" if not st.session_state.meta_only else "Generowanie metatagów")
@@ -5066,12 +5093,17 @@ with interactive_tab:
                     st.error("\n".join(send_errors))
 
         st.subheader("Podgląd wyników")
+        active_editor_sku = st.session_state.get("active_editor_sku", "")
         for result in results[:RESULT_PREVIEW_LIMIT]:
             label = "✅" if not result.get("error") else "⚠️"
-            with st.expander(f"{label} {result['sku']} - {result.get('title', '')}"):
+            with st.expander(
+                f"{label} {result['sku']} - {result.get('title', '')}",
+                expanded=result["sku"] == active_editor_sku,
+            ):
                 if result.get("error"):
                     st.error(result["error"])
                 render_result_preview(result)
+        st.session_state.active_editor_sku = ""
         if len(results) > RESULT_PREVIEW_LIMIT:
             st.caption(f"Wyświetlono pierwsze {RESULT_PREVIEW_LIMIT} wyników, aby nie przeciążać Streamlita.")
 
