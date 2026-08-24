@@ -1,31 +1,39 @@
 import unittest
 
-from description_output import is_meta_only_result, is_reusable_result, validate_description_html
+from description_output import is_meta_only_result, is_reusable_result, sanitize_html, validate_description_html
 
 
 class DescriptionOutputTests(unittest.TestCase):
     def test_accepts_required_structure(self):
         paragraph = "Konkretny opis produktu oparty wyłącznie na przekazanych informacjach. " * 5
-        html = f"<p><b>Wyróżnik</b> {paragraph}</p><h2>Pierwszy</h2><p><b>Temat</b> {paragraph}</p><h2>Drugi</h2><p><b>Korzyść</b> {paragraph}</p><h3>Finał</h3>"
+        html = f"<p><b>Wyróżnik</b> {paragraph}</p><h2>Pierwszy</h2><p><b>Temat</b> {paragraph}</p><h2>Drugi</h2><p><b>Korzyść</b> {paragraph}</p>"
         self.assertEqual(validate_description_html(html), [])
 
     def test_rejects_missing_heading_and_empty_output(self):
         self.assertTrue(validate_description_html(""))
         self.assertIn(
-            "opis musi zawierać dokładnie dwa nagłówki <h2>",
-            validate_description_html("<p>Wstęp.</p><h2>Jeden</h2><p>Opis.</p><h3>Finał</h3>"),
+            "opis musi zawierać co najmniej dwa śródtytuły (nagłówki <h2> lub <h3>)",
+            validate_description_html("<p>Wstęp.</p><h2>Jeden</h2><p>Opis.</p>"),
         )
 
     def test_rejects_short_or_unbolded_paragraph_and_heading_punctuation(self):
         paragraph = "Długi konkretny opis produktu oparty na danych katalogowych. " * 6
         html = (
             f"<p><b>Wstęp</b> {paragraph}</p><h2>Nagłówek.</h2>"
-            f"<p>{paragraph}</p><h2>Drugi</h2><p><b>Za krótko</b></p><h3>Finał</h3>"
+            f"<p>{paragraph}</p><h2>Drugi</h2><p><b>Za krótko</b></p>"
         )
         errors = validate_description_html(html)
-        self.assertIn("każdy z trzech akapitów musi mieć co najmniej 220 znaków", errors)
+        self.assertIn("każdy z głównych akapitów musi mieć co najmniej 180 znaków", errors)
         self.assertIn("każdy akapit musi zawierać co najmniej jedno wyróżnienie <b>", errors)
         self.assertIn("nagłówki <h2> i <h3> nie mogą kończyć się znakiem interpunkcyjnym", errors)
+
+    def test_sanitize_html_cleans_spans_and_styles(self):
+        dirty = '<p>Książka <b>Tytuł</b> <span style="font-family: inherit; color: red;">tekst w spanie</span> dalszy tekst</p>'
+        cleaned = sanitize_html(dirty)
+        self.assertNotIn("<span", cleaned)
+        self.assertNotIn("style=", cleaned)
+        self.assertIn("tekst w spanie", cleaned)
+        self.assertEqual(validate_description_html(dirty, require_full_structure=False), [])
 
     def test_requires_internal_link(self):
         self.assertIn(
@@ -58,3 +66,4 @@ class DescriptionOutputTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

@@ -19,6 +19,16 @@ class VisualEditorTests(unittest.TestCase):
             self.assertEqual(component.call_args.kwargs["data"]["html"], "<p>Edycja</p>")
             self.assertIs(component.call_args.kwargs["on_html_change"], on_change)
 
+    def test_sanitizes_html_output(self):
+        dirty_result = type("Result", (), {"html": '<p>Książka <strong>Tytuł</strong> <span style="color: red;">tekst</span></p>'})()
+        with (
+            patch.object(visual_editor.st, "session_state", {}),
+            patch.object(visual_editor, "_visual_editor", return_value=dirty_result),
+        ):
+            output = visual_editor.visual_html_editor("<p>Start</p>", key="editor")
+            self.assertEqual(output, "<p>Książka <b>Tytuł</b> tekst</p>")
+
 
 if __name__ == "__main__":
     unittest.main()
+

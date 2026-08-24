@@ -24,7 +24,7 @@ import streamlit as st
 from google import genai
 from google.genai import types
 
-from description_output import is_meta_only_result, is_reusable_result, validate_description_html
+from description_output import is_meta_only_result, is_reusable_result, sanitize_html, validate_description_html
 
 try:
     from product_input import ProductInputResolutionError, resolve_product_inputs
@@ -57,9 +57,9 @@ except ImportError:
 # STAŁE I KONFIGURACJA
 # ═══════════════════════════════════════════════════════════════════
 
-APP_VERSION = "4.7.2"
+APP_VERSION = "4.8.0"
 APP_NAME = "Generator opisów i metatagów produktów"
-PROMPT_VERSION = "meta-v4.4.4-validator-driven-title-autorepair-2026-08"
+PROMPT_VERSION = "meta-v4.8.0-enhanced-descriptions-and-author-labels-2026-08"
 DEFAULT_GEMINI_MODEL = "gemini-3.5-flash-lite"
 PERPLEXITY_MODEL = "sonar"
 PERPLEXITY_API_URL = "https://api.perplexity.ai/chat/completions"
@@ -69,9 +69,9 @@ DEFAULT_LOCALE = "pl_PL"
 AKENEO_TIMEOUT = 20
 PERPLEXITY_TIMEOUT = 45
 AKENEO_MAX_WORKERS = 4
-GEMINI_INTERACTIVE_WORKERS = 3
-INTERACTIVE_CHUNK_SIZE = 12
-GEMINI_HTTP_TIMEOUT_MS = 45_000
+GEMINI_INTERACTIVE_WORKERS = 2
+INTERACTIVE_CHUNK_SIZE = 10
+GEMINI_HTTP_TIMEOUT_MS = 60_000
 AKENEO_MAX_ATTEMPTS = 3
 BATCH_PRODUCTS_PER_FILE = 2500
 AKENEO_SKU_FILTER_CHUNK_SIZE = 50
@@ -1018,15 +1018,10 @@ def clean_source_title_for_prompt(value: str) -> str:
 def clean_author_for_prompt(value: str, description: str = "") -> Tuple[str, str]:
     """Zwraca (autor, ostrzeżenie) bez przepychania błędnych danych do promptu."""
     author = normalize_spaces(strip_html(value)).strip('"„”')
+    author = _clean_option_slug(author)
     normalized = normalize_for_compare(author)
     if normalized in {"", "pracazbiorowa", "praca zbiorowa", "various authors", "brak", "none"}:
-        return "", "Brak wiarygodnego autora - nie dodawaj autora do meta title."
-    if " " not in author and len(author) >= 14 and re.fullmatch(r"[A-Za-zÀ-ž]+", author):
-        if normalize_for_compare(author) not in normalize_for_compare(strip_html(description)):
-            return "", (
-                f"Pole autora wygląda na sklejone lub techniczne ({author}). "
-                "Nie używaj go, chyba że poprawna forma imienia i nazwiska występuje w opisie źródłowym."
-            )
+        return "", "Brak pojedynczego autora (praca zbiorowa) - sformułuj to naturalnie lub pomiń w meta title."
     return author, "Autor może być użyty wyłącznie wtedy, gdy zwiększa trafność i mieści się bez skracania istoty produktu."
 
 
@@ -1156,41 +1151,43 @@ Wpleć dokładnie jeden naturalny link do kategorii. Nie twórz żadnych innych 
 
     return f"""Jesteś doświadczonym copywriterem e-commerce i ekspertem SEO dla księgarni Bookland.
 
-Pisz angażujące, konkretne i semantycznie bogate opisy, bez lania wody.
+Pisz angażujące, konkretne i semantycznie bogate opisy produktów, bez lania wody.
 
-ZASADY FORMATOWANIA
-- Tylko HTML: <p>, <h2>, <h3>, <b>, <a>.
+ZASADY FORMATOWANIA I STRUKTURA
+- Używaj wyłącznie czystego HTML: <p>, <h2>, <h3>, <b>, <a>.
 - Bez Markdownu.
 - Używaj zwykłego dywizu - zamiast półpauzy i pauzy.
-- Nie twórz list punktowanych.
-- Nie dopowiadaj faktów, których nie ma w danych ani researchu.
-- Każdy z trzech akapitów musi zawierać 1-2 krótkie, merytoryczne wyróżnienia <b>fraza</b>.
+- Nie twórz list punktowanych (<ul>, <ol>, <li>).
+- Nie dopowiadaj zmyślonych faktów, których nie ma w danych ani researchu.
 - Nagłówki H2 i H3 nie mogą kończyć się kropką, przecinkiem, dwukropkiem ani innym znakiem interpunkcyjnym.
+- Nagłówek musi być zwięzłym śródtytułem (3-8 słów), nigdy całym długim zdaniem. ZAKAZ tworzenia nagłówka o treści „Krótkie podsumowanie” lub „Podsumowanie”.
 {link_block}
-STRUKTURA
-<p>Wstęp 4-6 zdań.</p>
-<h2>Nagłówek z konkretną korzyścią lub tematem</h2>
-<p>Rozwinięcie 5-8 zdań.</p>
-<h2>Drugi nagłówek rozwijający inny aspekt produktu</h2>
-<p>Dalszy opis 4-6 zdań.</p>
-<h3>Krótkie podsumowanie jako ostatni element</h3>
+UKŁAD TREŚCI
+1. Pierwszy akapit <p>: Wprowadzenie (4-6 zdań). Już w 1-2 zdaniu OBOWIĄZKOWO wymień i pogrub kluczowe encje:
+   - pełny oficjalny tytuł: <b>Pełny Tytuł Książki</b>,
+   - autora/autorów: <b>Imię Nazwisko</b> (lub np. <b>autorami są: Imię Nazwisko i Imię Nazwisko</b> / <b>praca zbiorowa pod redakcją...</b>),
+   - wydawnictwo: <b>Wydawnictwo XYZ</b> (lub oficyna, wydawca).
+2. Śródtytuł <h2>: Zwięzły, merytoryczny nagłówek charakteryzujący główny temat, fabułę lub zawartość książki/produktu.
+3. Drugi akapit <p>: Rozwinięcie (5-8 zdań) przedstawiające treść, zagadnienia, strukturę publikacji lub walory edukacyjne. Wyróżnij 1-2 kluczowe pojęcia pogrubieniem <b>kluczowa fraza</b>.
+4. Śródtytuł <h2>: Drugi nagłówek akcentujący korzyści dla czytelnika, grupę docelową lub unikalne cechy wydania.
+5. Trzeci akapit <p>: Podsumowanie i rekomendacja (4-6 zdań) wskazujące, dla kogo ta publikacja jest idealnym wyborem i co zyskuje odbiorca. Wyróżnij 1-2 pojęcia pogrubieniem <b>fraza</b>. Opis kończy się tym akapitem.
 
-WIARYGODNOŚĆ DANYCH
+WIARYGODNOŚĆ DANYCH I JĘZYK POLSKI
 - Pola TYTUŁ, AUTOR i WYDAWNICTWO z katalogu są nadrzędne wobec researchu i opisu źródłowego.
-- Nie zgaduj autora z nazwy wydawnictwa, marki ani fragmentu tytułu.
-- Osobę możesz nazwać autorem wyłącznie na podstawie pola AUTOR; research służy tylko do wzbogacenia tematu książki.
-- Zachowuj dokładną pisownię nazw własnych i polskie znaki z danych katalogowych.
-- Przed zwróceniem tekstu sprawdź polską gramatykę, odmianę, interpunkcję oraz znaki diakrytyczne.
-- „Praca zbiorowa” oznacza wielu autorów: nie pisz „autorem jest praca zbiorowa” ani „autorstwa pracy zbiorowej”.
-- Jeśli wspominasz wydawcę, użyj naturalnej formy, np. „wydawnictwo Muza”, „oficyna Zwierciadło” albo „wydawca Kalamar”; nie pisz samego „wydane przez Muza”.
+- Zadbaj o poprawną polską odmianę nazwisk i tytułów przez przypadki (np. „książka autorstwa <b>Stephena Kinga</b>”, „napisana przez <b>Olgę Tokarczuk</b>”).
+- Gdy jest jeden autor: użyj formy pojedynczej (np. „autorem jest <b>...</b>”, „napisana przez <b>...</b>”).
+- Gdy jest kilku autorów: użyj formy mnogiej (np. „autorami publikacji są <b>...</b>”, „stworzona przez zespół autorów: <b>...</b>”).
+- „Praca zbiorowa” oznacza publikację wielu autorów: sformułuj to naturalnie (np. „<b>praca zbiorowa</b>”, „publikacja przygotowana przez zespół specjalistów”), nie pisz „autorem jest praca zbiorowa”.
+- Wydawcę wprowadzaj w naturalnej formie (np. „ukazała się nakładem <b>Wydawnictwa PWN</b>”, „przygotowana przez <b>Wydawnictwo Muza</b>”).
+- Nie wymyślaj ani nie zniekształcaj nazwisk.
 
 UNIKAJ
 - powtórzeń,
-- ogólników typu „Ta książka jest wyjątkowa”,
+- ogólników typu „Ta książka jest wyjątkowa”, „Must-have na półce”,
 - zaczynania od pytania lub cytatu,
 - nieuzasadnionych superlatywów.
 
-Zwróć tylko gotowy HTML."""
+Zwróć tylko gotowy kod HTML opisu."""
 
 
 def build_system_prompt_link_only(internal_link: Dict) -> str:
@@ -1332,6 +1329,43 @@ def research_book_with_perplexity(title: str, author: str) -> Optional[str]:
 # GEMINI: OPISY ORAZ AI META TITLE + META DESCRIPTION
 # ═══════════════════════════════════════════════════════════════════
 
+def call_gemini_with_retry(
+    model: str,
+    contents: Any,
+    config: types.GenerateContentConfig,
+    max_attempts: int = 4,
+):
+    client = get_gemini_client()
+    last_exc: Optional[Exception] = None
+    for attempt in range(max_attempts):
+        try:
+            return client.models.generate_content(
+                model=model,
+                contents=contents,
+                config=config,
+            )
+        except Exception as exc:
+            last_exc = exc
+            err_msg = str(exc).lower()
+            if "429" in err_msg or "resource_exhausted" in err_msg or "quota" in err_msg:
+                wait_sec = 3.5 * (attempt + 1)
+                match = re.search(r"retry\s+(?:in|after)\s+([0-9.]+)\s*s", str(exc), re.IGNORECASE)
+                if match:
+                    try:
+                        wait_sec = max(float(match.group(1)) + 0.5, 2.0)
+                    except ValueError:
+                        pass
+                time.sleep(min(wait_sec, 30.0))
+                continue
+            if "503" in err_msg or "500" in err_msg or "unavailable" in err_msg:
+                time.sleep(2.0 * (attempt + 1))
+                continue
+            raise exc
+    if last_exc:
+        raise last_exc
+    raise RuntimeError("Nie udało się uzyskać odpowiedzi z Gemini")
+
+
 def generate_description(
     product_data: Dict,
     internal_link: Optional[Dict] = None,
@@ -1346,13 +1380,14 @@ def generate_description(
     )
     user_message = build_description_user_message(product_data, internal_link, research)
     last_errors: List[str] = []
+    last_description: str = ""
     for attempt in range(3):
         try:
-            response = get_gemini_client().models.generate_content(
+            response = call_gemini_with_retry(
                 model=GEMINI_MODEL,
                 contents=user_message + (
                     "\nPoprzedni wynik był niepoprawny: " + "; ".join(last_errors) +
-                    ". Wygeneruj cały opis ponownie."
+                    ". Wygeneruj cały opis ponownie zgodnie ze strukturą."
                     if last_errors else ""
                 ),
                 config=types.GenerateContentConfig(
@@ -1361,7 +1396,10 @@ def generate_description(
                     max_output_tokens=2400,
                 ),
             )
-            description = clean_ai_fingerprints(strip_code_fences(response.text or ""))
+            raw_text = clean_ai_fingerprints(strip_code_fences(response.text or ""))
+            description = sanitize_html(raw_text)
+            if description:
+                last_description = description
             last_errors = validate_description_html(
                 description,
                 require_full_structure=not link_only,
@@ -1373,6 +1411,8 @@ def generate_description(
             last_errors = [str(exc)]
             if attempt == 0:
                 continue
+    if last_description:
+        return last_description
     return "BŁĄD GEMINI: niepoprawny opis: " + "; ".join(last_errors)
 
 
@@ -1744,12 +1784,50 @@ def akeneo_product_exists(sku: str, token: str) -> bool:
     return response.status_code == 200
 
 
+def _clean_option_slug(code: str) -> str:
+    """Format fallback dla kodów opcji Akeneo, jeśli brak etykiety w API."""
+    if not code:
+        return ""
+    if "_" in code or "-" in code:
+        parts = re.split(r"[_\-]+", code)
+        cleaned = " ".join(part.capitalize() for part in parts if part)
+        cleaned = re.sub(r"\bPwn\b", "PWN", cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r"\bOop\b", "", cleaned, flags=re.IGNORECASE)
+        return cleaned.strip()
+    return code
+
+
+@st.cache_data(ttl=7200, show_spinner=False)
+def akeneo_get_option_label(attribute_code: str, option_code: str, token: str, locale: str = DEFAULT_LOCALE) -> str:
+    if not option_code or not token:
+        return _clean_option_slug(option_code)
+    try:
+        response = request_with_retry(
+            "GET",
+            _akeneo_root() + f"/api/rest/v1/attributes/{attribute_code}/options/{option_code}",
+            headers=akeneo_headers(token),
+            max_attempts=2,
+            timeout=10,
+        )
+        if response.status_code == 200:
+            data = response.json()
+            labels = data.get("labels") or {}
+            label = labels.get(locale) or labels.get("pl_PL") or labels.get("en_US") or labels.get("default")
+            if label:
+                return str(label).strip()
+    except Exception:
+        pass
+    return _clean_option_slug(option_code)
+
+
 def _value_from_values(
     values: Dict,
     names: Sequence[str],
     channel: str,
     locale: str,
     join_lists: bool = False,
+    token: str = "",
+    resolve_option: bool = False,
 ) -> str:
     for name in names:
         entries = values.get(name) or []
@@ -1759,32 +1837,43 @@ def _value_from_values(
             if scope_ok and locale_ok:
                 data = entry.get("data", "")
                 if isinstance(data, list):
+                    if resolve_option and token:
+                        return ", ".join(akeneo_get_option_label(name, str(item).strip(), token, locale) for item in data if str(item).strip())
                     return ", ".join(str(item).strip() for item in data if str(item).strip())
-                return safe_string_value(data)
+                val = safe_string_value(data)
+                if resolve_option and token and val:
+                    return akeneo_get_option_label(name, val, token, locale) or val
+                return val
         if entries:
             data = entries[0].get("data", "")
             if isinstance(data, list):
+                if resolve_option and token:
+                    return ", ".join(akeneo_get_option_label(name, str(item).strip(), token, locale) for item in data if str(item).strip())
                 return ", ".join(str(item).strip() for item in data if str(item).strip())
-            return safe_string_value(data)
+            val = safe_string_value(data)
+            if resolve_option and token and val:
+                return akeneo_get_option_label(name, val, token, locale) or val
+            return val
     return ""
 
 
-def parse_akeneo_product(item: Dict, channel: str, locale: str) -> Dict:
+def parse_akeneo_product(item: Dict, channel: str, locale: str, token: str = "") -> Dict:
     values = item.get("values", {})
-    publisher = _value_from_values(values, ["publisher", "wydawnictwo"], channel, locale)
+    publisher = _value_from_values(values, ["publisher", "wydawnictwo", "brand", "marka"], channel, locale, token=token, resolve_option=True)
     year = _value_from_values(values, ["year", "rok_wydania"], channel, locale)
     pages = _value_from_values(values, ["pages", "liczba_stron"], channel, locale)
-    cover = _value_from_values(values, ["cover_type", "oprawa"], channel, locale)
+    cover = _value_from_values(values, ["cover_type", "oprawa"], channel, locale, token=token, resolve_option=True)
     details = ", ".join(
         f"{label}: {value}"
         for label, value in (("Wydawnictwo", publisher), ("Rok", year), ("Strony", pages), ("Oprawa", cover))
         if value
     )
+    author = _value_from_values(values, ["author", "autor"], channel, locale, join_lists=True, token=token, resolve_option=True)
     return {
         "identifier": item.get("identifier", ""),
         "title": _value_from_values(values, ["name"], channel, locale) or item.get("identifier", ""),
         "description": _value_from_values(values, ["description"], channel, locale),
-        "author": _value_from_values(values, ["author", "autor"], channel, locale, join_lists=True),
+        "author": author,
         "publisher": publisher,
         "year": year,
         "pages": pages,
@@ -1848,7 +1937,7 @@ def akeneo_iter_products_search_after(
         payload = response.json()
         items = payload.get("_embedded", {}).get("items", [])
         for item in items:
-            parsed = parse_akeneo_product(item, channel, locale)
+            parsed = parse_akeneo_product(item, channel, locale, token=token)
             if only_with_description and not strip_html(parsed.get("description", "")):
                 continue
             yield parsed
@@ -1883,7 +1972,7 @@ def akeneo_search_products(
         if response.status_code != 200:
             continue
         for item in response.json().get("_embedded", {}).get("items", []):
-            parsed = parse_akeneo_product(item, DEFAULT_CHANNEL, locale)
+            parsed = parse_akeneo_product(item, DEFAULT_CHANNEL, locale, token=token)
             sku = parsed["identifier"]
             if sku:
                 products[sku] = {
@@ -4162,7 +4251,7 @@ def generate_metatags_interactive(job: Dict) -> Dict:
         locked_title = last_title if last_title and not last_title_errors else ""
         locked_description = last_description if last_description and not last_description_errors else ""
         try:
-            response = get_gemini_client().models.generate_content(
+            response = call_gemini_with_retry(
                 model=GEMINI_MODEL,
                 contents=build_meta_prompt(
                     job,
@@ -4491,6 +4580,40 @@ def render_result_preview(result: Dict) -> None:
         if result.get("research") and len(tabs) > 3:
             with tabs[3]:
                 st.markdown(result["research"])
+
+        col_reg, _ = st.columns([3, 4])
+        with col_reg:
+            if st.button("♻️ Regeneruj ten opis", key=f"regen_btn_{sku}", type="secondary"):
+                try:
+                    with st.spinner(f"Regenerowanie opisu dla {sku}..."):
+                        token = akeneo_get_token()
+                        internal_link = get_internal_link()
+                        link_only = st.session_state.get("link_only", False)
+                        use_research = st.session_state.get("use_research", True)
+                        channel = st.session_state.get("channel", DEFAULT_CHANNEL)
+                        locale = st.session_state.get("locale", DEFAULT_LOCALE)
+                        new_res = process_product_from_akeneo(
+                            sku,
+                            token,
+                            channel,
+                            locale,
+                            internal_link=internal_link,
+                            link_only=link_only,
+                            use_research=use_research,
+                        )
+                        for idx, item in enumerate(st.session_state.bulk_results):
+                            if item["sku"] == sku:
+                                st.session_state.bulk_results[idx] = new_res
+                                break
+                        st.session_state[edit_key] = new_res.get("description_html", "")
+                        save_description_workspace(
+                            list(st.session_state.bulk_selected_products),
+                            st.session_state.bulk_results,
+                        )
+                        st.session_state.active_editor_sku = sku
+                        st.rerun()
+                except Exception as exc:
+                    st.error(f"Błąd podczas regeneracji opisu: {exc}")
 
     if is_meta_only or result.get("meta_title") or result.get("meta_description"):
         with st.expander("Metatagi Magento", expanded=is_meta_only):
@@ -5096,14 +5219,14 @@ with interactive_tab:
         active_editor_sku = st.session_state.get("active_editor_sku", "")
         for result in results[:RESULT_PREVIEW_LIMIT]:
             label = "✅" if not result.get("error") else "⚠️"
+            is_active = (result["sku"] == active_editor_sku) or (bool(result.get("error")) and not active_editor_sku)
             with st.expander(
                 f"{label} {result['sku']} - {result.get('title', '')}",
-                expanded=result["sku"] == active_editor_sku,
+                expanded=is_active,
             ):
                 if result.get("error"):
                     st.error(result["error"])
                 render_result_preview(result)
-        st.session_state.active_editor_sku = ""
         if len(results) > RESULT_PREVIEW_LIMIT:
             st.caption(f"Wyświetlono pierwsze {RESULT_PREVIEW_LIMIT} wyników, aby nie przeciążać Streamlita.")
 
