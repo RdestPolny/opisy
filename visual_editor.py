@@ -51,6 +51,7 @@ if hasattr(st.components, "v2") and hasattr(st.components.v2, "component"):
           const source = parentElement.querySelector('.source');
           const toolbar = parentElement.querySelector('.toolbar');
           const blockSelect = toolbar.querySelector('.block-select');
+          let savedRange = null;
 
           const cleanHtml = (raw) => {
             let h = raw || '';
@@ -87,26 +88,78 @@ if hasattr(st.components, "v2") and hasattr(st.components.v2, "component"):
             source.value = current;
           }
 
-          const updateBlockSelect = () => {
-            const sel = window.getSelection();
-            if (!sel || !sel.rangeCount) return;
-            let node = sel.anchorNode;
+          const selectionIsInsideEditor = (selection) => {
+            if (!selection || !selection.rangeCount) return false;
+            const node = selection.getRangeAt(0).commonAncestorContainer;
+            return node === editor || editor.contains(node.nodeType === 3 ? node.parentNode : node);
+          };
+
+          const saveSelection = () => {
+            const selection = window.getSelection();
+            if (selectionIsInsideEditor(selection)) {
+              savedRange = selection.getRangeAt(0).cloneRange();
+            }
+          };
+
+          const restoreSelection = () => {
+            if (!savedRange) return false;
+            const selection = window.getSelection();
+            selection.removeAllRanges();
+            selection.addRange(savedRange);
+            return true;
+          };
+
+          const selectedBlock = () => {
+            const selection = window.getSelection();
+            if (!selectionIsInsideEditor(selection)) return null;
+            let node = selection.anchorNode;
             if (node && node.nodeType === 3) node = node.parentNode;
             while (node && node !== editor && node !== parentElement) {
               const tag = (node.tagName || '').toLowerCase();
-              if (['p', 'h2', 'h3'].includes(tag)) {
-                blockSelect.value = tag;
-                return;
-              }
+              if (['p', 'h2', 'h3'].includes(tag)) return node;
               node = node.parentNode;
             }
-            blockSelect.value = 'p';
+            return null;
+          };
+
+          const selectAtEnd = (element) => {
+            const range = document.createRange();
+            range.selectNodeContents(element);
+            range.collapse(false);
+            const selection = window.getSelection();
+            selection.removeAllRanges();
+            selection.addRange(range);
+            savedRange = range.cloneRange();
+          };
+
+          const replaceCurrentBlock = (tagName) => {
+            restoreSelection();
+            const block = selectedBlock();
+            if (!block) {
+              return document.execCommand('formatBlock', false, tagName);
+            }
+            if (block.tagName.toLowerCase() === tagName) return true;
+            const replacement = document.createElement(tagName);
+            while (block.firstChild) replacement.appendChild(block.firstChild);
+            block.replaceWith(replacement);
+            selectAtEnd(replacement);
+            return true;
+          };
+
+          const updateBlockSelect = () => {
+            const block = selectedBlock();
+            blockSelect.value = block ? block.tagName.toLowerCase() : 'p';
+            saveSelection();
           };
 
           editor.oninput = () => {
             source.value = cleanHtml(editor.innerHTML);
+            saveSelection();
           };
-          editor.onblur = () => publish(editor.innerHTML);
+          editor.onblur = () => {
+            saveSelection();
+            publish(editor.innerHTML);
+          };
           editor.onkeyup = updateBlockSelect;
           editor.onmouseup = updateBlockSelect;
 
@@ -140,11 +193,13 @@ if hasattr(st.components, "v2") and hasattr(st.components.v2, "component"):
             const text = event.clipboardData.getData('text/plain');
             document.execCommand('insertText', false, text);
             source.value = cleanHtml(editor.innerHTML);
+            saveSelection();
           };
 
+          blockSelect.onpointerdown = () => saveSelection();
           blockSelect.onchange = (event) => {
             editor.focus();
-            document.execCommand('formatBlock', false, event.target.value);
+            replaceCurrentBlock(event.target.value);
             source.value = cleanHtml(editor.innerHTML);
             publish(editor.innerHTML);
           };
@@ -152,6 +207,7 @@ if hasattr(st.components, "v2") and hasattr(st.components.v2, "component"):
           toolbar.querySelectorAll('[data-command]').forEach((button) => {
             button.onmousedown = (event) => event.preventDefault();
             button.onclick = () => {
+              restoreSelection();
               const command = button.dataset.command;
               let value = null;
               if (command === 'createLink') {
@@ -167,9 +223,11 @@ if hasattr(st.components, "v2") and hasattr(st.components.v2, "component"):
                 }
               }
               editor.focus();
+              restoreSelection();
               document.execCommand(command, false, value);
               source.value = cleanHtml(editor.innerHTML);
               publish(editor.innerHTML);
+              saveSelection();
             };
           });
 
@@ -217,4 +275,3 @@ def visual_html_editor(value: str, *, key: str, on_change=None) -> str:
     )
     res_val = result.html if result.html is not None else current
     return sanitize_html(res_val)
-

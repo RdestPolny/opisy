@@ -1,3 +1,4 @@
 .streamlit/secrets.toml
+config.json
 __pycache__/
 .DS_Store

@@ -1,10 +1,23 @@
 import re
+import unicodedata
 from html.parser import HTMLParser
-from typing import List
+from typing import List, Sequence
 from urllib.parse import urlsplit, urlunsplit
 
 
 ALLOWED_TAGS = {"p", "h2", "h3", "b", "a"}
+
+BOLD_GENERIC_PHRASES = {
+    "autor",
+    "autorzy",
+    "czytelnik",
+    "czytelnicy",
+    "ksiazka",
+    "publikacja",
+    "temat",
+    "tresc",
+    "wiedza",
+}
 
 
 def is_meta_only_result(result: dict) -> bool:
@@ -73,6 +86,7 @@ class _DescriptionParser(HTMLParser):
         self.headings: List[dict] = []
         self._paragraph = None
         self._heading = None
+        self._bold_text = None
 
     def handle_starttag(self, tag: str, attrs) -> None:
         tag = tag.lower()
@@ -82,10 +96,14 @@ class _DescriptionParser(HTMLParser):
         attrs = dict(attrs)
         if tag == "a":
             self.hrefs.append(attrs.get("href", "").strip())
+            if self._paragraph is not None:
+                self._paragraph["link_count"] += 1
         if tag == "p":
-            self._paragraph = {"text": [], "bold": False}
+            self._paragraph = {"text": [], "bold_phrases": [], "link_count": 0}
         elif tag in {"h2", "h3"}:
             self._heading = {"tag": tag, "text": []}
+        elif tag == "b" and self._paragraph is not None:
+            self._bold_text = []
         self.stack.append(tag)
 
     def handle_endtag(self, tag: str) -> None:
@@ -100,6 +118,11 @@ class _DescriptionParser(HTMLParser):
             self._heading["text"] = " ".join(self._heading["text"]).strip()
             self.headings.append(self._heading)
             self._heading = None
+        elif tag == "b" and self._bold_text is not None:
+            phrase = " ".join(self._bold_text).strip()
+            if phrase and self._paragraph is not None:
+                self._paragraph["bold_phrases"].append(phrase)
+            self._bold_text = None
 
     def handle_data(self, data: str) -> None:
         text = re.sub(r"\s+", " ", data).strip()
@@ -107,8 +130,8 @@ class _DescriptionParser(HTMLParser):
             return
         if self._paragraph is not None:
             self._paragraph["text"].append(text)
-            if "b" in self.stack:
-                self._paragraph["bold"] = True
+            if self._bold_text is not None:
+                self._bold_text.append(text)
         if self._heading is not None:
             self._heading["text"].append(text)
 
@@ -118,11 +141,31 @@ def _normalized_url(value: str) -> str:
     return urlunsplit((parts.scheme.lower(), parts.netloc.lower(), parts.path.rstrip("/") or "/", parts.query, ""))
 
 
+def _normalized_text(value: str) -> str:
+    text = unicodedata.normalize("NFKD", value or "")
+    text = "".join(char for char in text if not unicodedata.combining(char))
+    text = re.sub(r"[^a-z0-9]+", " ", text.lower())
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _weak_bold_phrase(value: str) -> bool:
+    normalized = _normalized_text(value)
+    if not normalized:
+        return True
+    words = normalized.split()
+    if len(words) > 7:
+        return True
+    return len(words) == 1 and normalized in BOLD_GENERIC_PHRASES
+
+
 def validate_description_html(
     value: str,
     *,
     require_full_structure: bool = True,
     required_link: str = "",
+    required_link_paragraph: int = 0,
+    required_contributors: Sequence[str] = (),
+    required_contributor_role: str = "",
 ) -> List[str]:
     cleaned_value = sanitize_html(value)
     plain_text = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", cleaned_value or "")).strip()
@@ -145,8 +188,14 @@ def validate_description_html(
             errors.append("opis musi zawierać co najmniej trzy akapity <p>")
         elif any(len(paragraph["text"]) < 180 for paragraph in parser.paragraphs):
             errors.append("każdy z głównych akapitów musi mieć co najmniej 180 znaków")
-        if parser.paragraphs and any(not paragraph["bold"] for paragraph in parser.paragraphs):
-            errors.append("każdy akapit musi zawierać co najmniej jedno wyróżnienie <b>")
+        if parser.paragraphs and any(len(paragraph["bold_phrases"]) < 2 for paragraph in parser.paragraphs):
+            errors.append("każdy akapit musi zawierać co najmniej dwa merytoryczne wyróżnienia <b>")
+        if any(
+            _weak_bold_phrase(phrase)
+            for paragraph in parser.paragraphs
+            for phrase in paragraph["bold_phrases"]
+        ):
+            errors.append("pogrubienia muszą obejmować konkretne frazy, a nie ogólne pojedyncze słowa")
         if any(re.search(r"[.!?,;:]$", heading["text"]) for heading in parser.headings):
             errors.append("nagłówki <h2> i <h3> nie mogą kończyć się znakiem interpunkcyjnym")
     if required_link:
@@ -154,4 +203,31 @@ def validate_description_html(
         hrefs = [_normalized_url(href) for href in parser.hrefs if href]
         if hrefs != [expected]:
             errors.append("opis musi zawierać dokładnie jeden link z wymaganym adresem URL")
+        elif required_link_paragraph:
+            link_paragraphs = [
+                index
+                for index, paragraph in enumerate(parser.paragraphs, start=1)
+                if paragraph["link_count"]
+            ]
+            if link_paragraphs != [required_link_paragraph]:
+                errors.append(f"link wewnętrzny musi znajdować się w akapicie {required_link_paragraph}")
+
+    normalized_plain_text = _normalized_text(plain_text)
+    missing_contributors = [
+        contributor
+        for contributor in required_contributors
+        if _normalized_text(contributor) not in normalized_plain_text
+    ]
+    if missing_contributors:
+        errors.append("opis pomija twórców: " + ", ".join(missing_contributors))
+
+    if required_contributor_role == "redakcja naukowa":
+        role_markers = (
+            "pod redakcja",
+            "redakcja naukowa",
+            "redaktorzy naukowi",
+            "redaktorki naukowe",
+        )
+        if not any(marker in normalized_plain_text for marker in role_markers):
+            errors.append("opis musi wskazywać, że wymienione osoby odpowiadają za redakcję naukową")
     return list(dict.fromkeys(errors))

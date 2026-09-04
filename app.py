@@ -15,7 +15,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from difflib import SequenceMatcher
 from pathlib import Path
-from typing import Dict, Iterable, Iterator, List, Optional, Sequence, Set, Tuple
+from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence, Set, Tuple
 from urllib.parse import urljoin
 
 import pandas as pd
@@ -24,6 +24,11 @@ import streamlit as st
 from google import genai
 from google.genai import types
 
+from akeneo_payloads import (
+    build_metatag_product_update,
+    parse_collection_response,
+    serialize_collection_updates,
+)
 from description_output import is_meta_only_result, is_reusable_result, sanitize_html, validate_description_html
 
 try:
@@ -57,9 +62,9 @@ except ImportError:
 # STAŁE I KONFIGURACJA
 # ═══════════════════════════════════════════════════════════════════
 
-APP_VERSION = "4.8.0"
+APP_VERSION = "4.9.0"
 APP_NAME = "Generator opisów i metatagów produktów"
-PROMPT_VERSION = "meta-v4.8.0-enhanced-descriptions-and-author-labels-2026-08"
+PROMPT_VERSION = "meta-v4.9.0-contributors-description-quality-akeneo-write-2026-09"
 DEFAULT_GEMINI_MODEL = "gemini-3.5-flash-lite"
 PERPLEXITY_MODEL = "sonar"
 PERPLEXITY_API_URL = "https://api.perplexity.ai/chat/completions"
@@ -73,6 +78,7 @@ GEMINI_INTERACTIVE_WORKERS = 2
 INTERACTIVE_CHUNK_SIZE = 10
 GEMINI_HTTP_TIMEOUT_MS = 60_000
 AKENEO_MAX_ATTEMPTS = 3
+AKENEO_META_UPDATE_CHUNK_SIZE = 100
 BATCH_PRODUCTS_PER_FILE = 2500
 AKENEO_SKU_FILTER_CHUNK_SIZE = 50
 MAX_META_RETRIES = 2
@@ -366,6 +372,9 @@ def init_db() -> None:
                 normalized_hash TEXT NOT NULL DEFAULT '',
                 validation_errors TEXT NOT NULL DEFAULT '',
                 error_message TEXT NOT NULL DEFAULT '',
+                akeneo_status TEXT NOT NULL DEFAULT '',
+                akeneo_sent_at TEXT NOT NULL DEFAULT '',
+                akeneo_error TEXT NOT NULL DEFAULT '',
                 batch_job_name TEXT NOT NULL DEFAULT '',
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
@@ -410,6 +419,9 @@ def init_db() -> None:
 
         ensure_column("meta_jobs", "run_id", "TEXT NOT NULL DEFAULT ''")
         ensure_column("meta_jobs", "source_type", "TEXT NOT NULL DEFAULT 'catalog'")
+        ensure_column("meta_jobs", "akeneo_status", "TEXT NOT NULL DEFAULT ''")
+        ensure_column("meta_jobs", "akeneo_sent_at", "TEXT NOT NULL DEFAULT ''")
+        ensure_column("meta_jobs", "akeneo_error", "TEXT NOT NULL DEFAULT ''")
         ensure_column("batch_jobs", "run_id", "TEXT NOT NULL DEFAULT ''")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_meta_jobs_run ON meta_jobs(run_id)")
 
@@ -618,7 +630,8 @@ def save_meta_result(
             UPDATE meta_jobs SET
                 meta_title=?, meta_description=?, status=?, attempts=?,
                 opening_signature=?, short_opening_signature=?, normalized_hash=?,
-                validation_errors=?, error_message=?, updated_at=?
+                validation_errors=?, error_message=?, akeneo_status='',
+                akeneo_sent_at='', akeneo_error='', updated_at=?
             WHERE job_key=?
             """,
             (
@@ -684,6 +697,39 @@ def list_meta_jobs(
         params.append(int(limit))
     with db_connect() as conn:
         return [dict(row) for row in conn.execute(sql, params).fetchall()]
+
+
+def list_meta_delivery_jobs(
+    *,
+    run_id: Optional[str] = None,
+    include_sent: bool = False,
+) -> List[Dict]:
+    """Zwraca najnowszy poprawny wynik dla SKU/kanału/locale, bez ciężkich pól źródłowych."""
+    sql = """
+        SELECT job_key, sku, channel, locale, meta_title, meta_description,
+               akeneo_status, akeneo_sent_at, akeneo_error, created_at, updated_at
+        FROM meta_jobs
+        WHERE status='completed' AND meta_title<>'' AND meta_description<>''
+    """
+    params: List[object] = []
+    if run_id:
+        sql += " AND run_id=?"
+        params.append(run_id)
+    sql += " ORDER BY created_at DESC, updated_at DESC"
+    with db_connect() as conn:
+        rows = [dict(row) for row in conn.execute(sql, params).fetchall()]
+
+    latest: List[Dict] = []
+    seen: Set[Tuple[str, str, str]] = set()
+    for row in rows:
+        identity = (str(row["sku"]), str(row["channel"]), str(row["locale"]))
+        if identity in seen:
+            continue
+        seen.add(identity)
+        if not include_sent and row.get("akeneo_status") == "sent":
+            continue
+        latest.append(row)
+    return latest
 
 
 def iter_meta_job_chunks(
@@ -1025,6 +1071,42 @@ def clean_author_for_prompt(value: str, description: str = "") -> Tuple[str, str
     return author, "Autor może być użyty wyłącznie wtedy, gdy zwiększa trafność i mieści się bez skracania istoty produktu."
 
 
+def split_contributor_names(value: str) -> List[str]:
+    """Rozdziela awaryjny tekst autorów; podstawowym źródłem pozostaje lista opcji Akeneo."""
+    text = normalize_spaces(strip_html(value))
+    if not text:
+        return []
+    parts = re.split(r"\s*(?:,|;|\s+i\s+|\s+and\s+|\s*&\s*)\s*", text, flags=re.IGNORECASE)
+    return list(dict.fromkeys(part.strip() for part in parts if part.strip()))
+
+
+def format_contributor_names(contributors: Sequence[str]) -> str:
+    names = list(dict.fromkeys(normalize_spaces(name) for name in contributors if normalize_spaces(name)))
+    if len(names) < 2:
+        return names[0] if names else ""
+    return ", ".join(names[:-1]) + " i " + names[-1]
+
+
+def detect_contributor_role(*sources: str) -> str:
+    """Rozpoznaje rolę redakcyjną tylko wtedy, gdy źródło mówi o niej wprost."""
+    text = normalize_for_compare(" ".join(source for source in sources if source))
+    markers = (
+        "redakcja naukowa",
+        "pod redakcja",
+        "redaktor naukowy",
+        "redaktorzy naukowi",
+        "redaktorka naukowa",
+        "redaktorki naukowe",
+        "redaktorami naukowymi",
+        "redaktorkami naukowymi",
+        "edited by",
+        "edited",
+        "scientific editor",
+        "scientific editors",
+    )
+    return "redakcja naukowa" if any(marker in text for marker in markers) else ""
+
+
 
 
 def title_signal_summary(signals: Dict[str, List[str]]) -> str:
@@ -1147,6 +1229,7 @@ Wpleć dokładnie jeden naturalny link do kategorii. Nie twórz żadnych innych 
 - URL: {internal_link['url']}
 - wymagany format: <a href="{internal_link['url']}">naturalny anchor</a>
 - href musi być skopiowany znak w znak; nie wymyślaj ani nie skracaj adresu
+- umieść link w drugim akapicie, w zdaniu rozwijającym temat; nie w pierwszym ani ostatnim zdaniu opisu
 """
 
     return f"""Jesteś doświadczonym copywriterem e-commerce i ekspertem SEO dla księgarni Bookland.
@@ -1159,22 +1242,24 @@ ZASADY FORMATOWANIA I STRUKTURA
 - Używaj zwykłego dywizu - zamiast półpauzy i pauzy.
 - Nie twórz list punktowanych (<ul>, <ol>, <li>).
 - Nie dopowiadaj zmyślonych faktów, których nie ma w danych ani researchu.
+- Każdy akapit musi zawierać 2-3 krótkie, merytoryczne pogrubienia. Pogrubiaj konkretne encje, zagadnienia, cechy i korzyści, nie pojedyncze ogólniki typu „książka”, „publikacja”, „wiedza” czy „czytelnik”.
 - Nagłówki H2 i H3 nie mogą kończyć się kropką, przecinkiem, dwukropkiem ani innym znakiem interpunkcyjnym.
 - Nagłówek musi być zwięzłym śródtytułem (3-8 słów), nigdy całym długim zdaniem. ZAKAZ tworzenia nagłówka o treści „Krótkie podsumowanie” lub „Podsumowanie”.
 {link_block}
 UKŁAD TREŚCI
 1. Pierwszy akapit <p>: Wprowadzenie (4-6 zdań). Już w 1-2 zdaniu OBOWIĄZKOWO wymień i pogrub kluczowe encje:
    - pełny oficjalny tytuł: <b>Pełny Tytuł Książki</b>,
-   - autora/autorów: <b>Imię Nazwisko</b> (lub np. <b>autorami są: Imię Nazwisko i Imię Nazwisko</b> / <b>praca zbiorowa pod redakcją...</b>),
+   - wszystkich twórców dokładnie w formie przekazanej w polu TWÓRCY KANONICZNI,
    - wydawnictwo: <b>Wydawnictwo XYZ</b> (lub oficyna, wydawca).
 2. Śródtytuł <h2>: Zwięzły, merytoryczny nagłówek charakteryzujący główny temat, fabułę lub zawartość książki/produktu.
-3. Drugi akapit <p>: Rozwinięcie (5-8 zdań) przedstawiające treść, zagadnienia, strukturę publikacji lub walory edukacyjne. Wyróżnij 1-2 kluczowe pojęcia pogrubieniem <b>kluczowa fraza</b>.
+3. Drugi akapit <p>: Rozwinięcie (5-8 zdań) przedstawiające treść, zagadnienia, strukturę publikacji lub walory edukacyjne. Wyróżnij 2-3 kluczowe pojęcia pogrubieniem <b>kluczowa fraza</b>.
 4. Śródtytuł <h2>: Drugi nagłówek akcentujący korzyści dla czytelnika, grupę docelową lub unikalne cechy wydania.
-5. Trzeci akapit <p>: Podsumowanie i rekomendacja (4-6 zdań) wskazujące, dla kogo ta publikacja jest idealnym wyborem i co zyskuje odbiorca. Wyróżnij 1-2 pojęcia pogrubieniem <b>fraza</b>. Opis kończy się tym akapitem.
+5. Trzeci akapit <p>: Podsumowanie i rekomendacja (4-6 zdań) wskazujące, dla kogo ta publikacja jest idealnym wyborem i co zyskuje odbiorca. Wyróżnij 2-3 pojęcia pogrubieniem <b>fraza</b>. Opis kończy się tym akapitem.
 
 WIARYGODNOŚĆ DANYCH I JĘZYK POLSKI
-- Pola TYTUŁ, AUTOR i WYDAWNICTWO z katalogu są nadrzędne wobec researchu i opisu źródłowego.
-- Zadbaj o poprawną polską odmianę nazwisk i tytułów przez przypadki (np. „książka autorstwa <b>Stephena Kinga</b>”, „napisana przez <b>Olgę Tokarczuk</b>”).
+- Pola TYTUŁ, TWÓRCY KANONICZNI i WYDAWNICTWO z katalogu są nadrzędne wobec researchu i opisu źródłowego. Research może doprecyzować rolę twórców, ale nie może zmienić ani skrócić ich listy.
+- Wymień każdą osobę z pola TWÓRCY KANONICZNI dokładnie raz i zachowaj pełną pisownię, kolejność członów, łączniki oraz polskie znaki. Najbezpieczniej użyj mianownika w konstrukcji „Autorzy: ...” albo „Redakcja naukowa: ...”.
+- Jeśli ROLA TWÓRCÓW to „redakcja naukowa”, nie nazywaj tych osób autorami. Użyj sformułowania „pod redakcją naukową” lub „Redakcja naukowa: ...”.
 - Gdy jest jeden autor: użyj formy pojedynczej (np. „autorem jest <b>...</b>”, „napisana przez <b>...</b>”).
 - Gdy jest kilku autorów: użyj formy mnogiej (np. „autorami publikacji są <b>...</b>”, „stworzona przez zespół autorów: <b>...</b>”).
 - „Praca zbiorowa” oznacza publikację wielu autorów: sformułuj to naturalnie (np. „<b>praca zbiorowa</b>”, „publikacja przygotowana przez zespół specjalistów”), nie pisz „autorem jest praca zbiorowa”.
@@ -1202,10 +1287,14 @@ def build_description_user_message(
     internal_link: Optional[Dict] = None,
     research: Optional[str] = None,
 ) -> str:
+    contributors = product_data.get("contributors") or split_contributor_names(product_data.get("author", ""))
+    contributor_role = product_data.get("contributor_role", "")
     parts = [
         f"TYTUŁ PRODUKTU: {product_data.get('title', '')}",
-        f"AUTOR: {product_data.get('author', '')}",
+        f"TWÓRCY KANONICZNI ({len(contributors)}): {format_contributor_names(contributors) or 'brak danych'}",
+        f"ROLA TWÓRCÓW: {contributor_role or 'autor / autorzy według katalogu'}",
         f"WYDAWNICTWO: {product_data.get('publisher', '')}",
+        f"ISBN/EAN: {product_data.get('isbn') or product_data.get('ean') or ''}",
         f"DANE TECHNICZNE: {product_data.get('details', '')}",
         f"ORYGINALNY OPIS: {product_data.get('description', '')}",
     ]
@@ -1290,15 +1379,17 @@ PERPLEXITY_SYSTEM_PROMPT = """Badaj książki i autorów. Odpowiadaj po polsku.
 Podawaj tylko konkretne, możliwe do zweryfikowania fakty. Nie generalizuj."""
 
 
-def research_book_with_perplexity(title: str, author: str) -> Optional[str]:
+def research_book_with_perplexity(title: str, author: str, isbn: str = "") -> Optional[str]:
     api_key = str(st.secrets.get("PERPLEXITY_API_KEY", ""))
     if not api_key:
         return None
 
     query = (
         f"Podaj kluczowe informacje o książce „{title}”"
-        + (f" autorstwa {author}" if author else "")
-        + ". Uwzględnij temat, gatunek, wyróżniki i odbiorcę. Maksymalnie 250 słów."
+        + (f"; osoby przypisane w katalogu: {author}" if author else "")
+        + (f", ISBN/EAN {isbn}" if isbn else "")
+        + ". Najpierw jednoznacznie ustal, czy wymienione osoby są autorami, redaktorami lub odpowiadają za redakcję naukową. "
+        "Następnie uwzględnij temat, gatunek, wyróżniki i odbiorcę. Nie pomijaj żadnej osoby. Maksymalnie 250 słów."
     )
     payload = {
         "model": PERPLEXITY_MODEL,
@@ -1373,6 +1464,17 @@ def generate_description(
     research: Optional[str] = None,
 ) -> str:
     link_only = bool(link_only and internal_link)
+    product_data = dict(product_data)
+    contributors = product_data.get("contributors") or split_contributor_names(product_data.get("author", ""))
+    product_data["contributors"] = contributors
+    product_data["author"] = format_contributor_names(contributors) or product_data.get("author", "")
+    if not product_data.get("contributor_role"):
+        product_data["contributor_role"] = detect_contributor_role(
+            product_data.get("title", ""),
+            product_data.get("details", ""),
+            product_data.get("description", ""),
+            research or "",
+        )
     system_prompt = (
         build_system_prompt_link_only(internal_link)
         if link_only and internal_link
@@ -1380,7 +1482,6 @@ def generate_description(
     )
     user_message = build_description_user_message(product_data, internal_link, research)
     last_errors: List[str] = []
-    last_description: str = ""
     for attempt in range(3):
         try:
             response = call_gemini_with_retry(
@@ -1398,12 +1499,13 @@ def generate_description(
             )
             raw_text = clean_ai_fingerprints(strip_code_fences(response.text or ""))
             description = sanitize_html(raw_text)
-            if description:
-                last_description = description
             last_errors = validate_description_html(
                 description,
                 require_full_structure=not link_only,
                 required_link=(internal_link or {}).get("url", ""),
+                required_link_paragraph=2 if internal_link and not link_only else 0,
+                required_contributors=contributors if not link_only else (),
+                required_contributor_role=product_data.get("contributor_role", "") if not link_only else "",
             )
             if not last_errors:
                 return description
@@ -1411,8 +1513,6 @@ def generate_description(
             last_errors = [str(exc)]
             if attempt == 0:
                 continue
-    if last_description:
-        return last_description
     return "BŁĄD GEMINI: niepoprawny opis: " + "; ".join(last_errors)
 
 
@@ -1684,6 +1784,7 @@ def cached_meta_results_for_skus(
                 except Exception:
                     validation_errors = []
                 out[job["sku"]] = {
+                    "job_key": job.get("job_key", ""),
                     "sku": job["sku"],
                     "title": job.get("title", ""),
                     "description_html": "",
@@ -1754,9 +1855,10 @@ def akeneo_existing_attribute_codes(token: str) -> List[str]:
     np. `autor` zamiast `author` albo `wydawnictwo` zamiast `publisher`.
     """
     candidates = [
-        "name", "description", "author", "autor", "publisher", "wydawnictwo",
+        "name", "description", "author", "autor", "editor", "editors", "redaktor",
+        "redaktorzy", "redakcja", "redakcja_naukowa", "publisher", "wydawnictwo",
         "year", "rok_wydania", "pages", "liczba_stron", "cover_type", "oprawa",
-        "ean", "isbn",
+        "ean", "isbn", "meta_title", "meta_description",
     ]
     existing: List[str] = []
     for code in candidates:
@@ -1812,7 +1914,14 @@ def akeneo_get_option_label(attribute_code: str, option_code: str, token: str, l
         if response.status_code == 200:
             data = response.json()
             labels = data.get("labels") or {}
-            label = labels.get(locale) or labels.get("pl_PL") or labels.get("en_US") or labels.get("default")
+            label = (
+                labels.get(locale)
+                or labels.get("pl_PL")
+                or labels.get("en_US")
+                or labels.get("en_GB")
+                or labels.get("default")
+                or next((value for value in labels.values() if value), "")
+            )
             if label:
                 return str(label).strip()
     except Exception:
@@ -1857,6 +1966,60 @@ def _value_from_values(
     return ""
 
 
+def _list_from_values(
+    values: Dict,
+    names: Sequence[str],
+    channel: str,
+    locale: str,
+    *,
+    token: str = "",
+    resolve_option: bool = False,
+) -> Tuple[List[str], str]:
+    """Zwraca wszystkie wartości z pierwszego dostępnego atrybutu oraz jego kod."""
+    unresolved_option_fallback: Tuple[List[str], str] = ([], "")
+    for name in names:
+        entries = values.get(name) or []
+        selected_entry = None
+        for entry in entries:
+            if entry.get("scope") in (None, channel) and entry.get("locale") in (None, locale):
+                selected_entry = entry
+                break
+        if selected_entry is None and entries:
+            selected_entry = entries[0]
+        if selected_entry is None:
+            continue
+
+        data = selected_entry.get("data", "")
+        raw_items = data if isinstance(data, list) else split_contributor_names(safe_string_value(data))
+        resolved: List[str] = []
+        has_unresolved_option = False
+        for raw_item in raw_items:
+            raw_value = safe_string_value(raw_item)
+            if not raw_value:
+                continue
+            value = (
+                akeneo_get_option_label(name, raw_value, token, locale)
+                if resolve_option and token and isinstance(data, list)
+                else raw_value
+            )
+            if value:
+                resolved.append(normalize_spaces(value))
+                if (
+                    resolve_option
+                    and isinstance(data, list)
+                    and normalize_for_compare(value) == normalize_for_compare(raw_value)
+                    and re.fullmatch(r"[a-z0-9]{6,}", raw_value)
+                ):
+                    has_unresolved_option = True
+        if has_unresolved_option:
+            # Gdy API opcji chwilowo nie zwróci etykiety, nie przepuszczamy kodu
+            # typu „albertoacerbis”. Preferujemy kolejne tekstowe pole autora.
+            unresolved_option_fallback = (list(dict.fromkeys(resolved)), name)
+            continue
+        return list(dict.fromkeys(resolved)), name
+    return unresolved_option_fallback
+
+
 def parse_akeneo_product(item: Dict, channel: str, locale: str, token: str = "") -> Dict:
     values = item.get("values", {})
     publisher = _value_from_values(values, ["publisher", "wydawnictwo", "brand", "marka"], channel, locale, token=token, resolve_option=True)
@@ -1868,12 +2031,27 @@ def parse_akeneo_product(item: Dict, channel: str, locale: str, token: str = "")
         for label, value in (("Wydawnictwo", publisher), ("Rok", year), ("Strony", pages), ("Oprawa", cover))
         if value
     )
-    author = _value_from_values(values, ["author", "autor"], channel, locale, join_lists=True, token=token, resolve_option=True)
+    contributors, contributor_source = _list_from_values(
+        values,
+        ["editor", "editors", "redaktor", "redaktorzy", "redakcja", "redakcja_naukowa", "author", "autor"],
+        channel,
+        locale,
+        token=token,
+        resolve_option=True,
+    )
+    author = format_contributor_names(contributors)
+    contributor_role = (
+        "redakcja naukowa"
+        if contributor_source in {"editor", "editors", "redaktor", "redaktorzy", "redakcja", "redakcja_naukowa"}
+        else ""
+    )
     return {
         "identifier": item.get("identifier", ""),
         "title": _value_from_values(values, ["name"], channel, locale) or item.get("identifier", ""),
         "description": _value_from_values(values, ["description"], channel, locale),
         "author": author,
+        "contributors": contributors,
+        "contributor_role": contributor_role,
         "publisher": publisher,
         "year": year,
         "pages": pages,
@@ -2099,17 +2277,243 @@ def akeneo_update_description(
     raise RuntimeError(f"Błąd Akeneo {response.status_code}: {response.text[:300]}")
 
 
+def _validated_metatag_texts(meta_title: str, meta_description: str) -> Tuple[str, str]:
+    title = normalize_generated_meta_title(meta_title)
+    description = normalize_spaces(strip_html(meta_description)).strip('"„”')
+    if not title or not description:
+        raise ValueError("meta title i meta description nie mogą być puste")
+    if len(title) > META_TITLE_HARD_MAX:
+        raise ValueError(f"meta title przekracza {META_TITLE_HARD_MAX} znaków")
+    if re.search(r"https?://|www\.", title, flags=re.IGNORECASE):
+        raise ValueError("meta title nie może zawierać URL")
+    if (
+        "..." in title
+        or title.endswith("…")
+        or title.endswith(("-", "–", "—", "|", ":", ",", ";", "/", "+"))
+    ):
+        raise ValueError("meta title wygląda na ucięty")
+    description_errors = meta_validation_errors(description)
+    if description_errors:
+        raise ValueError("; ".join(description_errors))
+    return title, description
+
+
+def save_akeneo_meta_deliveries(deliveries: Sequence[Tuple[str, str, str]]) -> None:
+    rows = [(job_key, status, error) for job_key, status, error in deliveries if job_key]
+    if not rows:
+        return
+    now = utcnow_iso()
+    with db_connect() as conn:
+        conn.executemany(
+            """
+            UPDATE meta_jobs
+            SET akeneo_status=?, akeneo_sent_at=?, akeneo_error=?, updated_at=?
+            WHERE job_key=?
+            """,
+            [
+                (status, now if status == "sent" else "", error[:2000], now, job_key)
+                for job_key, status, error in rows
+            ],
+        )
+
+
+def akeneo_existing_identifiers(token: str, identifiers: Sequence[str]) -> Set[str]:
+    """Sprawdza istnienie SKU przed zbiorczym PATCH-em, który w Akeneo jest operacją upsert."""
+    wanted = list(dict.fromkeys(str(identifier).strip() for identifier in identifiers if str(identifier).strip()))
+    if not wanted:
+        return set()
+    if len(wanted) > AKENEO_SKU_FILTER_CHUNK_SIZE:
+        raise ValueError(f"Jednorazowo można sprawdzić maksymalnie {AKENEO_SKU_FILTER_CHUNK_SIZE} SKU")
+    search = {"identifier": [{"operator": "IN", "value": wanted}]}
+    with AKENEO_REQUEST_SEMAPHORE:
+        response = request_with_retry(
+            "GET",
+            _akeneo_root() + "/api/rest/v1/products",
+            headers=akeneo_headers(token),
+            params={
+                "limit": 100,
+                "with_count": "false",
+                "attributes": "meta_title",
+                "search": json.dumps(search, ensure_ascii=False),
+            },
+        )
+    response.raise_for_status()
+    return {
+        str(item.get("identifier", "")).strip()
+        for item in response.json().get("_embedded", {}).get("items", [])
+        if item.get("identifier")
+    }
+
+
+def akeneo_update_metatag_chunk(
+    items: Sequence[Dict],
+    *,
+    token: str,
+    attribute_definitions: Dict[str, Dict],
+    default_channel: str,
+    default_locale: str,
+) -> List[Tuple[Dict, str]]:
+    """Wysyła do 100 istniejących produktów i zwraca błąd osobno dla każdej pozycji."""
+    prepared: List[Tuple[Dict, Dict]] = []
+    outcomes: List[Tuple[Dict, str]] = []
+    for item in items:
+        try:
+            title, description = _validated_metatag_texts(
+                item.get("meta_title", ""),
+                item.get("meta_description", ""),
+            )
+            update = build_metatag_product_update(
+                item.get("sku", ""),
+                title,
+                description,
+                title_attribute=attribute_definitions["meta_title"],
+                description_attribute=attribute_definitions["meta_description"],
+                channel=item.get("channel") or default_channel,
+                locale=item.get("locale") or default_locale,
+            )
+            prepared.append((item, update))
+        except Exception as exc:
+            outcomes.append((item, str(exc)))
+
+    if not prepared:
+        return outcomes
+
+    body = serialize_collection_updates(update for _, update in prepared)
+    with AKENEO_REQUEST_SEMAPHORE:
+        response = request_with_retry(
+            "PATCH",
+            _akeneo_root() + "/api/rest/v1/products",
+            headers=akeneo_headers(token, "application/vnd.akeneo.collection+json"),
+            data=body.encode("utf-8"),
+        )
+    if response.status_code != 200:
+        message = f"Błąd Akeneo {response.status_code}: {response.text[:300]}"
+        return [*outcomes, *((item, message) for item, _ in prepared)]
+
+    try:
+        by_line = {
+            int(result.get("line", 0)): result
+            for result in parse_collection_response(response.text)
+            if result.get("line")
+        }
+    except Exception as exc:
+        message = f"Niepoprawna odpowiedź Akeneo: {exc}"
+        return [*outcomes, *((item, message) for item, _ in prepared)]
+
+    for line_number, (item, _) in enumerate(prepared, start=1):
+        result = by_line.get(line_number)
+        if not result:
+            outcomes.append((item, "Akeneo nie zwróciło statusu dla produktu"))
+            continue
+        status_code = int(result.get("status_code", 0) or 0)
+        if 200 <= status_code < 300:
+            outcomes.append((item, ""))
+        else:
+            outcomes.append((item, str(result.get("message") or f"status {status_code}")))
+    return outcomes
+
+
+def send_metatags_to_akeneo(
+    items: Sequence[Dict],
+    channel: str,
+    locale: str,
+    *,
+    progress_callback=None,
+) -> Dict[str, object]:
+    """Wysyła poprawne metatagi równolegle, z jednym tokenem i jednym odczytem schematu."""
+    candidates = [
+        item for item in items
+        if item.get("sku")
+        and item.get("meta_title")
+        and item.get("meta_description")
+        and not item.get("error")
+        and not parse_validation_error_list(item.get("validation_errors"))
+    ]
+    stats: Dict[str, object] = {
+        "requested": len(candidates),
+        "skipped": len(items) - len(candidates),
+        "sent": 0,
+        "errors": [],
+    }
+    if not candidates:
+        return stats
+
+    token = akeneo_get_token()
+    attributes = {
+        "meta_title": akeneo_get_attribute("meta_title", token),
+        "meta_description": akeneo_get_attribute("meta_description", token),
+    }
+
+    identifier_chunks = list(chunks([item["sku"] for item in candidates], AKENEO_SKU_FILTER_CHUNK_SIZE))
+    existing: Set[str] = set()
+    with ThreadPoolExecutor(max_workers=AKENEO_MAX_WORKERS) as executor:
+        futures = [executor.submit(akeneo_existing_identifiers, token, sku_chunk) for sku_chunk in identifier_chunks]
+        for future in as_completed(futures):
+            existing.update(future.result())
+
+    existing_items: List[Dict] = []
+    missing_deliveries: List[Tuple[str, str, str]] = []
+    completed = 0
+    for item in candidates:
+        if item["sku"] in existing:
+            existing_items.append(item)
+            continue
+        error = "produkt nie istnieje w Akeneo - pominięto, aby nie utworzyć pustego produktu"
+        stats["errors"].append(f"{item['sku']}: {error}")
+        missing_deliveries.append((item.get("job_key", ""), "failed", error))
+        completed += 1
+    save_akeneo_meta_deliveries(missing_deliveries)
+
+    item_chunks = list(chunks(existing_items, AKENEO_META_UPDATE_CHUNK_SIZE))
+    with ThreadPoolExecutor(max_workers=AKENEO_MAX_WORKERS) as executor:
+        futures = [
+            executor.submit(
+                akeneo_update_metatag_chunk,
+                item_chunk,
+                token=token,
+                attribute_definitions=attributes,
+                default_channel=channel,
+                default_locale=locale,
+            )
+            for item_chunk in item_chunks
+        ]
+        for future in as_completed(futures):
+            outcomes = future.result()
+            delivery_updates: List[Tuple[str, str, str]] = []
+            for item, error in outcomes:
+                completed += 1
+                if error:
+                    stats["errors"].append(f"{item['sku']}: {error}")
+                    delivery_updates.append((item.get("job_key", ""), "failed", error))
+                else:
+                    stats["sent"] = int(stats["sent"]) + 1
+                    delivery_updates.append((item.get("job_key", ""), "sent", ""))
+            save_akeneo_meta_deliveries(delivery_updates)
+            if progress_callback:
+                progress_callback(completed, len(candidates))
+    if progress_callback and completed:
+        progress_callback(completed, len(candidates))
+    return stats
+
+
 # ═══════════════════════════════════════════════════════════════════
 # PRZETWARZANIE POJEDYNCZYCH PRODUKTÓW
 # ═══════════════════════════════════════════════════════════════════
 
 def _prepare_product_data(product_details: Dict) -> Dict:
+    contributors = product_details.get("contributors") or split_contributor_names(
+        safe_string_value(product_details.get("author"))
+    )
     return {
         "title": safe_string_value(product_details.get("title")),
-        "author": safe_string_value(product_details.get("author")),
+        "author": format_contributor_names(contributors),
+        "contributors": contributors,
+        "contributor_role": safe_string_value(product_details.get("contributor_role")),
         "publisher": safe_string_value(product_details.get("publisher")),
         "details": safe_string_value(product_details.get("details")),
         "description": safe_string_value(product_details.get("description")),
+        "isbn": safe_string_value(product_details.get("isbn")),
+        "ean": safe_string_value(product_details.get("ean")),
     }
 
 
@@ -2151,6 +2555,7 @@ def process_product_meta_only(
             error_message=generated["error"],
         )
         return {
+            "job_key": job_key,
             "sku": sku,
             "title": product_data["title"],
             "description_html": "",
@@ -2193,7 +2598,18 @@ def process_product_from_akeneo(
         quality = validate_description_quality(product_data["description"])
         research = None
         if use_research and not link_only:
-            research = research_book_with_perplexity(product_data["title"], product_data["author"])
+            research = research_book_with_perplexity(
+                product_data["title"],
+                product_data["author"],
+                product_data.get("isbn") or product_data.get("ean") or sku,
+            )
+
+        if not product_data.get("contributor_role"):
+            product_data["contributor_role"] = detect_contributor_role(
+                product_data.get("title", ""),
+                product_data.get("description", ""),
+                research or "",
+            )
 
         description_html = generate_description(
             product_data,
@@ -2224,6 +2640,9 @@ def process_product_from_akeneo(
             "meta_only": False,
             "validation_errors": [],
             "required_link": (internal_link or {}).get("url", ""),
+            "required_link_paragraph": 2 if internal_link and not link_only else 0,
+            "required_contributors": product_data.get("contributors", []),
+            "required_contributor_role": product_data.get("contributor_role", ""),
             "link_only": link_only,
         }
     except Exception as exc:
@@ -3091,7 +3510,7 @@ def locked_fields_from_job(job: Dict) -> Tuple[str, str]:
 # - statusy są odpytywane równolegle, a gotowe pliki pobierane osobną pulą,
 #   dzięki czemu szybki shard nie czeka na najwolniejszy.
 
-PROMPT_VERSION = "meta-v4.4.4-validator-driven-title-autorepair-2026-08"
+PROMPT_VERSION = "meta-v4.9.0-contributors-description-quality-akeneo-write-2026-09"
 BATCH_PRODUCTS_PER_FILE = 1000
 TURBO_BATCH_SHARD_SIZE = 1000
 BATCH_SUBMIT_WORKERS = 12
@@ -3395,7 +3814,7 @@ def akeneo_get_product_details(
     if response.status_code == 404:
         return None
     response.raise_for_status()
-    return parse_akeneo_product(response.json(), channel, locale)
+    return parse_akeneo_product(response.json(), channel, locale, token=token)
 
 
 def akeneo_fetch_products_by_identifiers(
@@ -3443,7 +3862,7 @@ def akeneo_fetch_products_by_identifiers(
     response.raise_for_status()
     products: Dict[str, Dict] = {}
     for item in response.json().get("_embedded", {}).get("items", []):
-        parsed = parse_akeneo_product(item, channel, locale)
+        parsed = parse_akeneo_product(item, channel, locale, token=token)
         if parsed.get("identifier"):
             products[parsed["identifier"]] = parsed
     return products
@@ -3780,7 +4199,8 @@ def save_meta_results_bulk(records: Sequence[Dict], failed_records: Sequence[Tup
                 """
                 UPDATE meta_jobs SET meta_title=?, meta_description=?, status=?, attempts=?,
                     opening_signature=?, short_opening_signature=?, normalized_hash=?,
-                    validation_errors=?, error_message=?, updated_at=?
+                    validation_errors=?, error_message=?, akeneo_status='',
+                    akeneo_sent_at='', akeneo_error='', updated_at=?
                 WHERE job_key=?
                 """,
                 update_rows,
@@ -3920,7 +4340,7 @@ def revalidate_meta_jobs_v44(run_id: Optional[str] = None) -> Dict[str, int]:
 # - kontekst opisu jest dynamicznie krótszy dla kodów/dostępów cyfrowych;
 # - maksymalny output Gemini zmniejszony, bo schema zawiera tylko 3 tytuły + opis.
 
-PROMPT_VERSION = "meta-v4.4.4-validator-driven-title-autorepair-2026-08"
+PROMPT_VERSION = "meta-v4.9.0-contributors-description-quality-akeneo-write-2026-09"
 META_RECENT_OPENINGS_HINT = 0
 GEMINI_META_MAX_OUTPUT_TOKENS = 320
 BATCH_REFRESH_WORKERS = 20
@@ -5202,6 +5622,9 @@ with interactive_tab:
                             final_html,
                             require_full_structure=not item.get("link_only", False),
                             required_link=item.get("required_link", ""),
+                            required_link_paragraph=int(item.get("required_link_paragraph", 0) or 0),
+                            required_contributors=item.get("required_contributors") or (),
+                            required_contributor_role=item.get("required_contributor_role", ""),
                         )
                         if validation_errors:
                             raise ValueError("opis nie przeszedł kontroli: " + "; ".join(validation_errors))
@@ -5214,6 +5637,52 @@ with interactive_tab:
                 st.success(f"Wysłano {sent} opisów.")
                 if send_errors:
                     st.error("\n".join(send_errors))
+
+        meta_ready = [
+            item for item in ok
+            if item.get("meta_only")
+            and item.get("meta_title")
+            and item.get("meta_description")
+            and not parse_validation_error_list(item.get("validation_errors"))
+        ]
+        if meta_ready:
+            st.subheader("Wysyłka metatagów do Akeneo")
+            st.caption(
+                "Aktualizacja zapisuje wyłącznie atrybuty meta_title i meta_description "
+                "dla wybranego kanału. Opis produktu i pozostałe pola nie są zmieniane."
+            )
+            meta_to_send: List[Dict] = []
+            for item in meta_ready:
+                checked = st.checkbox(
+                    f"{item['sku']} - {item.get('title', '')}",
+                    value=True,
+                    key=f"send_meta_{item['sku']}",
+                )
+                if checked:
+                    meta_to_send.append(item)
+            if st.button(
+                f"Wyślij metatagi do Akeneo ({len(meta_to_send)})",
+                type="primary",
+                disabled=not meta_to_send,
+                key="send_interactive_meta_to_akeneo",
+            ):
+                progress = st.progress(0, "Przygotowuję wysyłkę metatagów...")
+
+                def interactive_meta_progress(done: int, total: int) -> None:
+                    progress.progress(done / max(total, 1), f"Wysłano {done}/{total}")
+
+                try:
+                    stats = send_metatags_to_akeneo(
+                        meta_to_send,
+                        channel,
+                        locale,
+                        progress_callback=interactive_meta_progress,
+                    )
+                    st.success(f"Wysłano metatagi dla {stats['sent']} produktów.")
+                    if stats["errors"]:
+                        st.error("\n".join(stats["errors"]))
+                except Exception as exc:
+                    st.error(f"Nie udało się rozpocząć wysyłki do Akeneo: {exc}")
 
         st.subheader("Podgląd wyników")
         active_editor_sku = st.session_state.get("active_editor_sku", "")
@@ -5538,6 +6007,63 @@ with results_tab:
             "magento_metatagi.tsv",
             "text/tab-separated-values",
         )
+
+        with st.expander("Wyślij poprawne metatagi bezpośrednio do Akeneo"):
+            delivery_all = list_meta_delivery_jobs(run_id=result_run or None, include_sent=True)
+            delivered_count = sum(1 for job in delivery_all if job.get("akeneo_status") == "sent")
+            failed_delivery_count = sum(1 for job in delivery_all if job.get("akeneo_status") == "failed")
+            delivery_metrics = st.columns(3)
+            delivery_metrics[0].metric("Gotowe w Akeneo", delivered_count)
+            delivery_metrics[1].metric("Do wysłania", len(delivery_all) - delivered_count)
+            delivery_metrics[2].metric("Ostatnio błędne", failed_delivery_count)
+
+            resend_meta = st.checkbox(
+                "Wyślij ponownie także metatagi już oznaczone jako wysłane",
+                value=False,
+                key=f"resend_meta_{result_run or 'all'}",
+            )
+            delivery_jobs = [
+                job for job in delivery_all
+                if resend_meta or job.get("akeneo_status") != "sent"
+            ]
+            st.caption(
+                "PATCH obejmuje tylko meta_title i meta_description. Kanał i locale są brane z każdego zadania; "
+                "inne dane produktu pozostają bez zmian."
+            )
+            confirm_delivery = st.checkbox(
+                f"Potwierdzam aktualizację {len(delivery_jobs)} produktów w Akeneo",
+                value=False,
+                key=f"confirm_meta_delivery_{result_run or 'all'}",
+            )
+            if st.button(
+                f"Wyślij do Akeneo ({len(delivery_jobs)})",
+                type="primary",
+                disabled=not delivery_jobs or not confirm_delivery,
+                key=f"send_batch_meta_{result_run or 'all'}",
+            ):
+                delivery_progress = st.progress(0, "Przygotowuję wysyłkę do Akeneo...")
+
+                def batch_meta_progress(done: int, total: int) -> None:
+                    delivery_progress.progress(done / max(total, 1), f"Wysłano {done}/{total}")
+
+                try:
+                    delivery_stats = send_metatags_to_akeneo(
+                        delivery_jobs,
+                        channel,
+                        locale,
+                        progress_callback=batch_meta_progress,
+                    )
+                    st.success(f"Wysłano metatagi dla {delivery_stats['sent']} produktów.")
+                    if delivery_stats["errors"]:
+                        shown_errors = list(delivery_stats["errors"])[:50]
+                        st.error("\n".join(shown_errors))
+                        if len(delivery_stats["errors"]) > len(shown_errors):
+                            st.caption(
+                                f"Pokazano 50 z {len(delivery_stats['errors'])} błędów. "
+                                "Pełny status jest zapisany przy zadaniach."
+                            )
+                except Exception as exc:
+                    st.error(f"Nie udało się rozpocząć wysyłki do Akeneo: {exc}")
     st.download_button(
         "Pobierz raport jakości CSV",
         export_quality_report_csv(run_id=result_run or None),
@@ -5567,6 +6093,9 @@ with results_tab:
             "attempts",
             "validation_errors",
             "error_message",
+            "akeneo_status",
+            "akeneo_sent_at",
+            "akeneo_error",
         ]
         st.dataframe(preview_df[visible_columns], use_container_width=True, hide_index=True)
 

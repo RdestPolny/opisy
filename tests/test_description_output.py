@@ -6,7 +6,12 @@ from description_output import is_meta_only_result, is_reusable_result, sanitize
 class DescriptionOutputTests(unittest.TestCase):
     def test_accepts_required_structure(self):
         paragraph = "Konkretny opis produktu oparty wyłącznie na przekazanych informacjach. " * 5
-        html = f"<p><b>Wyróżnik</b> {paragraph}</p><h2>Pierwszy</h2><p><b>Temat</b> {paragraph}</p><h2>Drugi</h2><p><b>Korzyść</b> {paragraph}</p>"
+        html = (
+            f"<p><b>Pełny tytuł książki</b> {paragraph} <b>ważna perspektywa autora</b></p>"
+            f"<h2>Pierwszy</h2><p><b>główne zagadnienie publikacji</b> {paragraph} "
+            f"<b>rzetelne przykłady</b></p><h2>Drugi</h2>"
+            f"<p><b>praktyczna korzyść</b> {paragraph} <b>docelowa grupa odbiorców</b></p>"
+        )
         self.assertEqual(validate_description_html(html), [])
 
     def test_rejects_missing_heading_and_empty_output(self):
@@ -18,14 +23,23 @@ class DescriptionOutputTests(unittest.TestCase):
 
     def test_rejects_short_or_unbolded_paragraph_and_heading_punctuation(self):
         paragraph = "Długi konkretny opis produktu oparty na danych katalogowych. " * 6
-        html = (
-            f"<p><b>Wstęp</b> {paragraph}</p><h2>Nagłówek.</h2>"
-            f"<p>{paragraph}</p><h2>Drugi</h2><p><b>Za krótko</b></p>"
-        )
+        html = f"<p><b>Dobry wstęp</b> {paragraph}</p><h2>Nagłówek.</h2><p>{paragraph}</p><h2>Drugi</h2><p><b>Za krótko</b></p>"
         errors = validate_description_html(html)
         self.assertIn("każdy z głównych akapitów musi mieć co najmniej 180 znaków", errors)
-        self.assertIn("każdy akapit musi zawierać co najmniej jedno wyróżnienie <b>", errors)
+        self.assertIn("każdy akapit musi zawierać co najmniej dwa merytoryczne wyróżnienia <b>", errors)
         self.assertIn("nagłówki <h2> i <h3> nie mogą kończyć się znakiem interpunkcyjnym", errors)
+
+    def test_rejects_weak_generic_bold_phrase(self):
+        paragraph = "Konkretny opis produktu oparty wyłącznie na przekazanych informacjach. " * 5
+        html = (
+            f"<p><b>książka</b> {paragraph} <b>pełny tytuł publikacji</b></p>"
+            f"<h2>Pierwszy</h2><p><b>główne zagadnienie</b> {paragraph} <b>istotny kontekst</b></p>"
+            f"<h2>Drugi</h2><p><b>praktyczna korzyść</b> {paragraph} <b>grupa docelowa</b></p>"
+        )
+        self.assertIn(
+            "pogrubienia muszą obejmować konkretne frazy, a nie ogólne pojedyncze słowa",
+            validate_description_html(html),
+        )
 
     def test_sanitize_html_cleans_spans_and_styles(self):
         dirty = '<p>Książka <b>Tytuł</b> <span style="font-family: inherit; color: red;">tekst w spanie</span> dalszy tekst</p>'
@@ -50,6 +64,60 @@ class DescriptionOutputTests(unittest.TestCase):
         extra = correct.replace("</p>", '<a href="https://example.com">drugi</a></p>')
         self.assertTrue(validate_description_html(extra, require_full_structure=False, required_link=expected))
 
+    def test_requires_link_in_selected_paragraph(self):
+        expected = "https://bookland.com.pl/ksiazki/kryminal"
+        second = (
+            "<p>Pierwszy akapit.</p>"
+            f'<p>Drugi <a href="{expected}">kryminał</a>.</p>'
+            "<p>Trzeci akapit.</p>"
+        )
+        self.assertEqual(
+            validate_description_html(
+                second,
+                require_full_structure=False,
+                required_link=expected,
+                required_link_paragraph=2,
+            ),
+            [],
+        )
+        first = (
+            f'<p>Pierwszy <a href="{expected}">kryminał</a>.</p>'
+            "<p>Drugi akapit.</p>"
+            "<p>Trzeci akapit.</p>"
+        )
+        self.assertIn(
+            "link wewnętrzny musi znajdować się w akapicie 2",
+            validate_description_html(
+                first,
+                require_full_structure=False,
+                required_link=expected,
+                required_link_paragraph=2,
+            ),
+        )
+
+    def test_requires_all_contributors_and_editor_role(self):
+        contributors = ["Agnieszka Bień", "Grażyna Iwanowicz-Palus", "Artur Wdowiak"]
+        html = (
+            "<p>Redakcja naukowa: Agnieszka Bień, Grażyna Iwanowicz-Palus i Artur Wdowiak.</p>"
+        )
+        self.assertEqual(
+            validate_description_html(
+                html,
+                require_full_structure=False,
+                required_contributors=contributors,
+                required_contributor_role="redakcja naukowa",
+            ),
+            [],
+        )
+        errors = validate_description_html(
+            "<p>Autorzy: Agnieszka Bień i Artur Wdowiak.</p>",
+            require_full_structure=False,
+            required_contributors=contributors,
+            required_contributor_role="redakcja naukowa",
+        )
+        self.assertIn("opis pomija twórców: Grażyna Iwanowicz-Palus", errors)
+        self.assertIn("opis musi wskazywać, że wymienione osoby odpowiadają za redakcję naukową", errors)
+
     def test_description_wins_over_stale_meta_only_checkpoint_flag(self):
         result = {"description_html": "<p>Pełny opis</p>", "meta_only": True}
         self.assertFalse(is_meta_only_result(result))
@@ -66,4 +134,3 @@ class DescriptionOutputTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-
