@@ -6,6 +6,7 @@ from urllib.parse import urlsplit, urlunsplit
 
 
 ALLOWED_TAGS = {"p", "h2", "h3", "b", "a"}
+VALIDATOR_API_VERSION = 2
 
 BOLD_GENERIC_PHRASES = {
     "autor",
@@ -166,7 +167,15 @@ def validate_description_html(
     required_link_paragraph: int = 0,
     required_contributors: Sequence[str] = (),
     required_contributor_role: str = "",
+    **validation_options,
 ) -> List[str]:
+    """Waliduje opis i zachowuje kompatybilność z rozszerzeniami API walidatora.
+
+    Streamlit może rerunować app.py w tym samym interpreterze. Przy zmianie call-site
+    i modułu pomocniczego w jednym deploymencie stara wersja modułu mogła pozostać
+    w sys.modules i kończyć się TypeError dla nowego argumentu keyword. Od API v2
+    nieznane opcje są raportowane jako błąd walidacji zamiast wywracać cały workflow.
+    """
     cleaned_value = sanitize_html(value)
     plain_text = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", cleaned_value or "")).strip()
     if not plain_text:
@@ -175,6 +184,10 @@ def validate_description_html(
     parser = _DescriptionParser()
     parser.feed(cleaned_value)
     errors = list(parser.errors)
+    if validation_options:
+        errors.append(
+            "nieobsługiwane opcje walidatora: " + ", ".join(sorted(validation_options))
+        )
     if parser.stack:
         errors.append("opis zawiera niedomknięte tagi")
     if require_full_structure:
