@@ -29,16 +29,32 @@ class DescriptionOutputTests(unittest.TestCase):
         self.assertIn("każdy akapit musi zawierać co najmniej dwa merytoryczne wyróżnienia <b>", errors)
         self.assertIn("nagłówki <h2> i <h3> nie mogą kończyć się znakiem interpunkcyjnym", errors)
 
-    def test_rejects_weak_generic_bold_phrase(self):
+    def test_weak_generic_bold_phrase_is_soft_by_default(self):
         paragraph = "Konkretny opis produktu oparty wyłącznie na przekazanych informacjach. " * 5
         html = (
             f"<p><b>książka</b> {paragraph} <b>pełny tytuł publikacji</b></p>"
             f"<h2>Pierwszy</h2><p><b>główne zagadnienie</b> {paragraph} <b>istotny kontekst</b></p>"
             f"<h2>Drugi</h2><p><b>praktyczna korzyść</b> {paragraph} <b>grupa docelowa</b></p>"
         )
-        self.assertIn(
+        self.assertNotIn(
             "pogrubienia muszą obejmować konkretne frazy, a nie ogólne pojedyncze słowa",
             validate_description_html(html),
+        )
+        self.assertIn(
+            "pogrubienia muszą obejmować konkretne frazy, a nie ogólne pojedyncze słowa",
+            validate_description_html(html, strict_bold_quality=True),
+        )
+
+    def test_long_specific_bold_phrase_is_not_automatically_weak(self):
+        paragraph = "Konkretny opis produktu oparty wyłącznie na przekazanych informacjach. " * 5
+        html = (
+            f"<p><b>bardzo szczegółowy opis konkretnego problemu omawianego w tej publikacji</b> {paragraph} <b>pełny tytuł publikacji</b></p>"
+            f"<h2>Pierwszy</h2><p><b>główne zagadnienie</b> {paragraph} <b>istotny kontekst</b></p>"
+            f"<h2>Drugi</h2><p><b>praktyczna korzyść</b> {paragraph} <b>grupa docelowa</b></p>"
+        )
+        self.assertNotIn(
+            "pogrubienia muszą obejmować konkretne frazy, a nie ogólne pojedyncze słowa",
+            validate_description_html(html, strict_bold_quality=True),
         )
 
     def test_sanitize_html_cleans_spans_and_styles(self):
