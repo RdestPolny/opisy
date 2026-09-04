@@ -2,4 +2,4 @@ streamlit>=1.51
 pandas
 requests
 google-genai
-# runtime-refresh: validator-api-v2
+# runtime-refresh: validator-api-v3
