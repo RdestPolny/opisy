@@ -6,7 +6,7 @@ from urllib.parse import urlsplit, urlunsplit
 
 
 ALLOWED_TAGS = {"p", "h2", "h3", "b", "a"}
-VALIDATOR_API_VERSION = 2
+VALIDATOR_API_VERSION = 3
 
 BOLD_GENERIC_PHRASES = {
     "autor",
@@ -150,12 +150,15 @@ def _normalized_text(value: str) -> str:
 
 
 def _weak_bold_phrase(value: str) -> bool:
+    """Wskazuje wyłącznie ewidentnie ogólne pojedyncze słowo.
+
+    Dłuższa fraza nie jest automatycznie słaba tylko dlatego, że ma >7 słów.
+    To jest heurystyka jakościowa, a nie kryterium poprawności HTML.
+    """
     normalized = _normalized_text(value)
     if not normalized:
         return True
     words = normalized.split()
-    if len(words) > 7:
-        return True
     return len(words) == 1 and normalized in BOLD_GENERIC_PHRASES
 
 
@@ -167,14 +170,18 @@ def validate_description_html(
     required_link_paragraph: int = 0,
     required_contributors: Sequence[str] = (),
     required_contributor_role: str = "",
+    strict_bold_quality: bool = False,
     **validation_options,
 ) -> List[str]:
-    """Waliduje opis i zachowuje kompatybilność z rozszerzeniami API walidatora.
+    """Waliduje opis, rozdzielając błędy krytyczne od miękkiej jakości pogrubień.
 
-    Streamlit może rerunować app.py w tym samym interpreterze. Przy zmianie call-site
-    i modułu pomocniczego w jednym deploymencie stara wersja modułu mogła pozostać
-    w sys.modules i kończyć się TypeError dla nowego argumentu keyword. Od API v2
-    nieznane opcje są raportowane jako błąd walidacji zamiast wywracać cały workflow.
+    Domyślnie słabsze pojedyncze pogrubienie nie blokuje poprawnego opisu. Prompt nadal
+    wymusza 2-3 sensowne wyróżnienia, ale sporadyczne <b>książka</b> nie powinno
+    powodować odrzucenia całej generacji. `strict_bold_quality=True` pozostaje dostępne
+    do diagnostyki i testów jakości.
+
+    Streamlit może rerunować app.py w tym samym interpreterze. Nieznane opcje są
+    raportowane jako błąd walidacji zamiast wywracać cały workflow przez TypeError.
     """
     cleaned_value = sanitize_html(value)
     plain_text = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", cleaned_value or "")).strip()
@@ -203,7 +210,7 @@ def validate_description_html(
             errors.append("każdy z głównych akapitów musi mieć co najmniej 180 znaków")
         if parser.paragraphs and any(len(paragraph["bold_phrases"]) < 2 for paragraph in parser.paragraphs):
             errors.append("każdy akapit musi zawierać co najmniej dwa merytoryczne wyróżnienia <b>")
-        if any(
+        if strict_bold_quality and any(
             _weak_bold_phrase(phrase)
             for paragraph in parser.paragraphs
             for phrase in paragraph["bold_phrases"]
