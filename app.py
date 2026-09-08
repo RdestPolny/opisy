@@ -29,7 +29,12 @@ from akeneo_payloads import (
     parse_collection_response,
     serialize_collection_updates,
 )
-from description_output import is_meta_only_result, is_reusable_result, sanitize_html, validate_description_html
+from description_output import (
+    is_meta_only_result, is_reusable_result, sanitize_html,
+    refresh_description_result, preserve_description_on_failure, deliver_description_result,
+    current_description_value,
+)
+from description_generation import generate_description_result
 
 try:
     from product_input import ProductInputResolutionError, resolve_product_inputs
@@ -62,8 +67,9 @@ except ImportError:
 # STAŁE I KONFIGURACJA
 # ═══════════════════════════════════════════════════════════════════
 
-APP_VERSION = "4.9.0"
+APP_VERSION = "4.9.1"
 APP_NAME = "Generator opisów i metatagów produktów"
+DESCRIPTION_PROMPT_VERSION = "description-v4.9.1-warnings"
 PROMPT_VERSION = "meta-v4.9.0-contributors-description-quality-akeneo-write-2026-09"
 DEFAULT_GEMINI_MODEL = "gemini-3.5-flash-lite"
 PERPLEXITY_MODEL = "sonar"
@@ -1234,7 +1240,11 @@ Wpleć dokładnie jeden naturalny link do kategorii. Nie twórz żadnych innych 
 
     return f"""Jesteś doświadczonym copywriterem e-commerce i ekspertem SEO dla księgarni Bookland.
 
-Pisz angażujące, konkretne i semantycznie bogate opisy produktów, bez lania wody.
+Pisz angażujące, konkretne opisy produktów, bez lania wody.
+Priorytety: zgodność z danymi, poprawna polszczyzna, użyteczność, a następnie formatowanie.
+Przed zwróceniem tekstu sprawdź zgodność liczby, rodzaju i przypadka w zdaniach.
+Nieznane dane, w tym wydawcę, pomiń. Nie uzupełniaj ich domysłami.
+Dostosuj długość do ilości faktów: krótszy rzetelny opis jest lepszy niż dopowiadanie treści.
 
 ZASADY FORMATOWANIA I STRUKTURA
 - Używaj wyłącznie czystego HTML: <p>, <h2>, <h3>, <b>, <a>.
@@ -1242,26 +1252,26 @@ ZASADY FORMATOWANIA I STRUKTURA
 - Używaj zwykłego dywizu - zamiast półpauzy i pauzy.
 - Nie twórz list punktowanych (<ul>, <ol>, <li>).
 - Nie dopowiadaj zmyślonych faktów, których nie ma w danych ani researchu.
-- Każdy akapit musi zawierać 2-3 krótkie, merytoryczne pogrubienia. Pogrubiaj konkretne encje, zagadnienia, cechy i korzyści, nie pojedyncze ogólniki typu „książka”, „publikacja”, „wiedza” czy „czytelnik”.
+- Staraj się umieścić w każdym akapicie 2-3 krótkie, merytoryczne pogrubienia, jeśli uzasadnia to treść. Pogrubiaj konkretne encje, zagadnienia, cechy i korzyści, nie pojedyncze ogólniki typu „książka”, „publikacja”, „wiedza” czy „czytelnik”.
 - Nagłówki H2 i H3 nie mogą kończyć się kropką, przecinkiem, dwukropkiem ani innym znakiem interpunkcyjnym.
 - Nagłówek musi być zwięzłym śródtytułem (3-8 słów), nigdy całym długim zdaniem. ZAKAZ tworzenia nagłówka o treści „Krótkie podsumowanie” lub „Podsumowanie”.
 {link_block}
 UKŁAD TREŚCI
-1. Pierwszy akapit <p>: Wprowadzenie (4-6 zdań). Już w 1-2 zdaniu OBOWIĄZKOWO wymień i pogrub kluczowe encje:
+1. Pierwszy akapit <p>: Wprowadzenie (zwykle 4-6 zdań, mniej przy skąpych danych). Już w 1-2 zdaniu OBOWIĄZKOWO wymień i pogrub kluczowe encje:
    - pełny oficjalny tytuł: <b>Pełny Tytuł Książki</b>,
    - wszystkich twórców dokładnie w formie przekazanej w polu TWÓRCY KANONICZNI,
-   - wydawnictwo: <b>Wydawnictwo XYZ</b> (lub oficyna, wydawca).
+   - wydawnictwo: <b>Wydawnictwo XYZ</b> (lub oficyna, wydawca), wyłącznie jeśli podano je w danych.
 2. Śródtytuł <h2>: Zwięzły, merytoryczny nagłówek charakteryzujący główny temat, fabułę lub zawartość książki/produktu.
-3. Drugi akapit <p>: Rozwinięcie (5-8 zdań) przedstawiające treść, zagadnienia, strukturę publikacji lub walory edukacyjne. Wyróżnij 2-3 kluczowe pojęcia pogrubieniem <b>kluczowa fraza</b>.
+3. Drugi akapit <p>: Rozwinięcie (zwykle 5-8 zdań, mniej przy skąpych danych) przedstawiające treść, zagadnienia, strukturę publikacji lub walory edukacyjne. Wyróżnij 2-3 kluczowe pojęcia pogrubieniem <b>kluczowa fraza</b>.
 4. Śródtytuł <h2>: Drugi nagłówek akcentujący korzyści dla czytelnika, grupę docelową lub unikalne cechy wydania.
-5. Trzeci akapit <p>: Podsumowanie i rekomendacja (4-6 zdań) wskazujące, dla kogo ta publikacja jest idealnym wyborem i co zyskuje odbiorca. Wyróżnij 2-3 pojęcia pogrubieniem <b>fraza</b>. Opis kończy się tym akapitem.
+5. Trzeci akapit <p>: Podsumowanie i rekomendacja (zwykle 4-6 zdań, mniej przy skąpych danych) wskazujące, dla kogo ta publikacja jest idealnym wyborem i co zyskuje odbiorca. Wyróżnij 2-3 pojęcia pogrubieniem <b>fraza</b>. Opis kończy się tym akapitem.
 
 WIARYGODNOŚĆ DANYCH I JĘZYK POLSKI
 - Pola TYTUŁ, TWÓRCY KANONICZNI i WYDAWNICTWO z katalogu są nadrzędne wobec researchu i opisu źródłowego. Research może doprecyzować rolę twórców, ale nie może zmienić ani skrócić ich listy.
 - Wymień każdą osobę z pola TWÓRCY KANONICZNI dokładnie raz i zachowaj pełną pisownię, kolejność członów, łączniki oraz polskie znaki. Najbezpieczniej użyj mianownika w konstrukcji „Autorzy: ...” albo „Redakcja naukowa: ...”.
-- Jeśli ROLA TWÓRCÓW to „redakcja naukowa”, nie nazywaj tych osób autorami. Użyj sformułowania „pod redakcją naukową” lub „Redakcja naukowa: ...”.
-- Gdy jest jeden autor: użyj formy pojedynczej (np. „autorem jest <b>...</b>”, „napisana przez <b>...</b>”).
-- Gdy jest kilku autorów: użyj formy mnogiej (np. „autorami publikacji są <b>...</b>”, „stworzona przez zespół autorów: <b>...</b>”).
+- Jeśli ROLA TWÓRCÓW to „redakcja naukowa”, nie nazywaj tych osób autorami. Użyj „Redakcja naukowa: ...”, aby zachować katalogową formę nazwisk.
+- Gdy jest jeden autor: użyj „Autor: <b>...</b>”. Nie łącz nieodmienionego nazwiska z konstrukcją wymagającą innego przypadka, np. „napisana przez”.
+- Gdy jest kilku autorów: użyj „Autorzy: <b>...</b>”. Zachowaj poprawną liczbę mnogą w zdaniach o zespole.
 - „Praca zbiorowa” oznacza publikację wielu autorów: sformułuj to naturalnie (np. „<b>praca zbiorowa</b>”, „publikacja przygotowana przez zespół specjalistów”), nie pisz „autorem jest praca zbiorowa”.
 - Wydawcę wprowadzaj w naturalnej formie (np. „ukazała się nakładem <b>Wydawnictwa PWN</b>”, „przygotowana przez <b>Wydawnictwo Muza</b>”).
 - Nie wymyślaj ani nie zniekształcaj nazwisk.
@@ -1462,7 +1472,7 @@ def generate_description(
     internal_link: Optional[Dict] = None,
     link_only: bool = False,
     research: Optional[str] = None,
-) -> str:
+) -> Dict:
     link_only = bool(link_only and internal_link)
     product_data = dict(product_data)
     contributors = product_data.get("contributors") or split_contributor_names(product_data.get("author", ""))
@@ -1481,39 +1491,29 @@ def generate_description(
         else build_system_prompt_full(internal_link)
     )
     user_message = build_description_user_message(product_data, internal_link, research)
-    last_errors: List[str] = []
-    for attempt in range(3):
-        try:
-            response = call_gemini_with_retry(
-                model=GEMINI_MODEL,
-                contents=user_message + (
-                    "\nPoprzedni wynik był niepoprawny: " + "; ".join(last_errors) +
-                    ". Wygeneruj cały opis ponownie zgodnie ze strukturą."
-                    if last_errors else ""
-                ),
-                config=types.GenerateContentConfig(
-                    system_instruction=system_prompt,
-                    temperature=0.55,
-                    max_output_tokens=2400,
-                ),
-            )
-            raw_text = clean_ai_fingerprints(strip_code_fences(response.text or ""))
-            description = sanitize_html(raw_text)
-            last_errors = validate_description_html(
-                description,
-                require_full_structure=not link_only,
-                required_link=(internal_link or {}).get("url", ""),
-                required_link_paragraph=2 if internal_link and not link_only else 0,
-                required_contributors=contributors if not link_only else (),
-                required_contributor_role=product_data.get("contributor_role", "") if not link_only else "",
-            )
-            if not last_errors:
-                return description
-        except Exception as exc:
-            last_errors = [str(exc)]
-            if attempt == 0:
-                continue
-    return "BŁĄD GEMINI: niepoprawny opis: " + "; ".join(last_errors)
+    context = {
+        "require_full_structure": not link_only,
+        "required_link": (internal_link or {}).get("url", ""),
+        "required_link_paragraph": 2 if internal_link and not link_only else 0,
+        "required_contributors": contributors if not link_only else (),
+        "required_contributor_role": product_data.get("contributor_role", "") if not link_only else "",
+    }
+    return generate_description_result(
+        lambda prompt: get_gemini_client().models.generate_content(
+            model=GEMINI_MODEL,
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                system_instruction=system_prompt,
+                temperature=0.55,
+                max_output_tokens=2400,
+                # The description workflow owns the complete retry budget.
+                http_options=types.HttpOptions(retry_options=types.HttpRetryOptions(attempts=1)),
+            ),
+        ),
+        contents=user_message,
+        context=context,
+        normalize_response=lambda text: clean_ai_fingerprints(strip_code_fences(text)),
+    )
 
 
 
@@ -2611,38 +2611,31 @@ def process_product_from_akeneo(
                 research or "",
             )
 
-        description_html = generate_description(
+        generated = generate_description(
             product_data,
             internal_link=internal_link,
             link_only=link_only,
             research=research,
         )
-        if "BŁĄD GEMINI" in description_html:
-            return {
-                "sku": sku,
-                "title": product_data["title"],
-                "description_html": description_html,
-                "error": description_html,
-                "description_quality": quality,
-            }
-
         return {
             "sku": sku,
             "title": product_data["title"],
-            "description_html": description_html,
+            **generated,
             "url": generate_product_url(product_data["title"]),
             "old_description": product_data["description"],
             "research": research,
             "meta_title": "",
             "meta_description": "",
-            "error": None,
             "description_quality": quality,
             "meta_only": False,
-            "validation_errors": [],
             "required_link": (internal_link or {}).get("url", ""),
             "required_link_paragraph": 2 if internal_link and not link_only else 0,
-            "required_contributors": product_data.get("contributors", []),
-            "required_contributor_role": product_data.get("contributor_role", ""),
+            "required_contributors": [] if link_only else product_data.get("contributors", []),
+            "required_contributor_role": "" if link_only else product_data.get("contributor_role", ""),
+            "channel": channel,
+            "locale": locale,
+            "model": GEMINI_MODEL,
+            "description_prompt_version": DESCRIPTION_PROMPT_VERSION,
             "link_only": link_only,
         }
     except Exception as exc:
@@ -4971,7 +4964,7 @@ def render_result_preview(result: Dict) -> None:
     sku = result["sku"]
     edit_key = f"edit_{sku}"
     description_html = result.get("description_html", "")
-    is_meta_only = is_meta_only_result(result)
+    is_meta_only = is_meta_only_result(result) and result.get("meta_only", True)
 
     if not is_meta_only:
         editor_seed = result.setdefault(
@@ -4988,11 +4981,13 @@ def render_result_preview(result: Dict) -> None:
             )
             st.session_state[edit_key] = edited_html
             if edited_html != description_html:
-                result["description_html"] = edited_html
+                refresh_description_result(result, edited_html)
                 save_description_workspace(
                     list(st.session_state.bulk_selected_products),
                     st.session_state.bulk_results,
                 )
+        if result.get("validation_warnings"):
+            st.warning("\n\n".join(issue["message"] for issue in result["validation_warnings"]))
         with tabs[1]:
             st.markdown(st.session_state.get(edit_key, description_html), unsafe_allow_html=True)
         with tabs[2]:
@@ -5010,8 +5005,8 @@ def render_result_preview(result: Dict) -> None:
                         internal_link = get_internal_link()
                         link_only = st.session_state.get("link_only", False)
                         use_research = st.session_state.get("use_research", True)
-                        channel = st.session_state.get("channel", DEFAULT_CHANNEL)
-                        locale = st.session_state.get("locale", DEFAULT_LOCALE)
+                        channel = result.get("channel") or st.session_state.get("channel", DEFAULT_CHANNEL)
+                        locale = result.get("locale") or st.session_state.get("locale", DEFAULT_LOCALE)
                         new_res = process_product_from_akeneo(
                             sku,
                             token,
@@ -5021,6 +5016,7 @@ def render_result_preview(result: Dict) -> None:
                             link_only=link_only,
                             use_research=use_research,
                         )
+                        new_res = preserve_description_on_failure(result, new_res)
                         for idx, item in enumerate(st.session_state.bulk_results):
                             if item["sku"] == sku:
                                 st.session_state.bulk_results[idx] = new_res
@@ -5570,13 +5566,25 @@ with interactive_tab:
                 "Wyniki i zmiany w edytorze zapisują się automatycznie w obszarze roboczym. "
                 "Aby opublikować je w Akeneo, nadal kliknij „Wyślij zaznaczone”."
             )
+        if not st.session_state.meta_only:
+            for item in results:
+                current_html = current_description_value(item, st.session_state)
+                if not item.get("error") or current_html != item.get("description_html", ""):
+                    refresh_description_result(item, current_html)
+                    st.session_state[f"edit_{item['sku']}"] = item["description_html"]
         ok = [item for item in results if not item.get("error")]
         errors = [item for item in results if item.get("error")]
-        col_ok, col_err = st.columns(2)
-        col_ok.metric("Poprawne", len(ok))
-        col_err.metric("Błędy / do kontroli", len(errors))
+        warning_count = sum(bool(item.get("validation_warnings")) for item in ok)
+        col_ok, col_warn, col_err = st.columns(3)
+        col_ok.metric("Gotowe", len(ok) - warning_count)
+        col_warn.metric("Gotowe z ostrzeżeniami", warning_count)
+        col_err.metric("Błędy", len(errors))
 
-        data_frame = pd.DataFrame(results)
+        export_rows = [dict(item) for item in results]
+        for row in export_rows:
+            if "validation_warnings" in row:
+                row["validation_warnings"] = json.dumps(row["validation_warnings"], ensure_ascii=False)
+        data_frame = pd.DataFrame(export_rows)
         st.download_button(
             "Pobierz opisy CSV" if not st.session_state.meta_only else "Pobierz metatagi CSV",
             data_frame.to_csv(index=False).encode("utf-8-sig"),
@@ -5618,17 +5626,10 @@ with interactive_tab:
                 for index, item in enumerate(to_send, start=1):
                     try:
                         final_html = st.session_state.get(f"edit_{item['sku']}", item["description_html"])
-                        validation_errors = validate_description_html(
-                            final_html,
-                            require_full_structure=not item.get("link_only", False),
-                            required_link=item.get("required_link", ""),
-                            required_link_paragraph=int(item.get("required_link_paragraph", 0) or 0),
-                            required_contributors=item.get("required_contributors") or (),
-                            required_contributor_role=item.get("required_contributor_role", ""),
+                        deliver_description_result(
+                            item, final_html, akeneo_update_description,
+                            channel=channel, locale=locale,
                         )
-                        if validation_errors:
-                            raise ValueError("opis nie przeszedł kontroli: " + "; ".join(validation_errors))
-                        akeneo_update_description(item["sku"], final_html, channel, locale)
                         add_optimized_product(item["sku"], item["title"], item["url"])
                         sent += 1
                     except Exception as exc:
@@ -5686,8 +5687,15 @@ with interactive_tab:
 
         st.subheader("Podgląd wyników")
         active_editor_sku = st.session_state.get("active_editor_sku", "")
-        for result in results[:RESULT_PREVIEW_LIMIT]:
-            label = "✅" if not result.get("error") else "⚠️"
+        preview_results = results
+        if not st.session_state.meta_only:
+            warning_codes = sorted({issue["code"] for item in results for issue in item.get("validation_warnings", [])})
+            selected_warning = st.selectbox("Filtr ostrzeżeń w podglądzie", ["Wszystkie", *warning_codes])
+            if selected_warning != "Wszystkie":
+                preview_results = [item for item in results if any(issue["code"] == selected_warning for issue in item.get("validation_warnings", []))]
+                st.caption(f"Produkty z tym ostrzeżeniem: {len(preview_results)}")
+        for result in preview_results[:RESULT_PREVIEW_LIMIT]:
+            label = "❌" if result.get("error") else ("⚠️" if result.get("validation_warnings") else "✅")
             is_active = (result["sku"] == active_editor_sku) or (bool(result.get("error")) and not active_editor_sku)
             with st.expander(
                 f"{label} {result['sku']} - {result.get('title', '')}",
@@ -5696,7 +5704,7 @@ with interactive_tab:
                 if result.get("error"):
                     st.error(result["error"])
                 render_result_preview(result)
-        if len(results) > RESULT_PREVIEW_LIMIT:
+        if len(preview_results) > RESULT_PREVIEW_LIMIT:
             st.caption(f"Wyświetlono pierwsze {RESULT_PREVIEW_LIMIT} wyników, aby nie przeciążać Streamlita.")
 
 with scale_tab:

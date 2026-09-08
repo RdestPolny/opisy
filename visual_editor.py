@@ -54,27 +54,34 @@ if hasattr(st.components, "v2") and hasattr(st.components.v2, "component"):
           let savedRange = null;
 
           const cleanHtml = (raw) => {
-            let h = raw || '';
-            h = h.replaceAll(/<strong>/gi, '<b>').replaceAll(/<[/]strong>/gi, '</b>');
-            h = h.replaceAll(/<em>/gi, '<i>').replaceAll(/<[/]em>/gi, '</i>');
-            for (let i = 0; i < 5; i++) {
-              if (!h.toLowerCase().includes('<span')) break;
-              h = h.replaceAll(/<span[^>]*>/gi, '').replaceAll(/<[/]span>/gi, '');
-            }
-            for (let i = 0; i < 3; i++) {
-              if (!h.toLowerCase().includes('<div') && !h.toLowerCase().includes('<font')) break;
-              h = h.replaceAll(/<div[^>]*>/gi, '<p>').replaceAll(/<[/]div>/gi, '</p>');
-              h = h.replaceAll(/<font[^>]*>/gi, '').replaceAll(/<[/]font>/gi, '');
-            }
-            h = h.replace(/<([a-zA-Z0-9]+)\s+[^>]*>/gi, (match, tag) => {
-              const low = tag.toLowerCase();
-              if (low === 'a') {
-                const hrefMatch = match.match(/href=(["'])(.*?)\1/i);
-                return hrefMatch ? `<a href="${hrefMatch[2]}">` : '<a>';
+            // Never put raw source HTML into the live editor. Rebuild a small
+            // allowlist from an inert document; the server sanitizes again.
+            const parsed = new DOMParser().parseFromString(raw || '', 'text/html');
+            const container = document.createElement('div');
+            const blocked = new Set(['script', 'style', 'iframe', 'object', 'template', 'svg', 'math']);
+            const allowed = new Set(['p', 'h2', 'h3', 'b', 'a']);
+            const appendSafe = (node, parent) => {
+              if (node.nodeType === 3) {
+                parent.appendChild(document.createTextNode(node.textContent));
+                return;
               }
-              return `<${low}>`;
-            });
-            return h.trim();
+              if (node.nodeType !== 1) return;
+              let tag = node.localName.toLowerCase();
+              if (blocked.has(tag)) return;
+              if (tag === 'strong') tag = 'b';
+              if (tag === 'div') tag = 'p';
+              const target = allowed.has(tag) ? document.createElement(tag) : parent;
+              if (tag === 'a') {
+                try {
+                  const url = new URL(node.getAttribute('href') || '');
+                  if (['http:', 'https:'].includes(url.protocol)) target.setAttribute('href', url.href);
+                } catch { /* Keep the anchor text without an invalid URL. */ }
+              }
+              for (const child of node.childNodes) appendSafe(child, target);
+              if (target !== parent) parent.appendChild(target);
+            };
+            for (const child of parsed.body.childNodes) appendSafe(child, container);
+            return container.innerHTML.trim();
           };
 
           const publish = (html) => {
@@ -82,7 +89,7 @@ if hasattr(st.components, "v2") and hasattr(st.components.v2, "component"):
             setStateValue('html', cleaned);
           };
 
-          const current = data.html ?? '';
+          const current = cleanHtml(data.html ?? '');
           if (!editor.matches(':focus') && !source.matches(':focus') && editor.innerHTML !== current) {
             editor.innerHTML = current;
             source.value = current;
@@ -176,6 +183,7 @@ if hasattr(st.components, "v2") and hasattr(st.components.v2, "component"):
                 } else {
                   try {
                     const u = new URL(trimmed);
+                    if (!['http:', 'https:'].includes(u.protocol)) throw new Error();
                     link.setAttribute('href', u.href);
                   } catch {
                     window.alert('Podaj poprawny adres zaczynający się od http:// lub https://');
@@ -266,7 +274,7 @@ def _visual_editor(data=None, default=None, key=None, on_html_change=None):
 def visual_html_editor(value: str, *, key: str, on_change=None) -> str:
     cleaned_start = sanitize_html(value)
     state = st.session_state.get(key, {})
-    current = state.get("html", cleaned_start)
+    current = sanitize_html(state.get("html", cleaned_start))
     result = _visual_editor(
         data={"html": current},
         default={"html": current},
