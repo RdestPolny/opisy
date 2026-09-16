@@ -1,3 +1,7 @@
+# 4.9.2
+
+Generator opisów obsługuje teraz niezależne kolejki robocze. Każda kolejka ma własną listę SKU, wyniki i edycje; wyczyszczenie jednej kolejki nie wpływa na pozostałe. Dotychczasowy wspólny workspace jest zachowany jako „Wspólna (legacy)”.
+
 # 4.9.1
 
 Opisy niespełniające zaleceń redakcyjnych są teraz zwracane z ostrzeżeniami.

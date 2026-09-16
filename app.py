@@ -10,6 +10,16 @@ import sqlite3
 import threading
 import time
 import unicodedata
+
+from workspace_storage import (
+    LEGACY_WORKSPACE_ID,
+    create_workspace as storage_create_workspace,
+    clear_workspace as storage_clear_workspace,
+    ensure_workspace_schema,
+    list_workspaces as storage_list_workspaces,
+    load_workspace as storage_load_workspace,
+    save_workspace as storage_save_workspace,
+)
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
@@ -67,7 +77,7 @@ except ImportError:
 # STAŁE I KONFIGURACJA
 # ═══════════════════════════════════════════════════════════════════
 
-APP_VERSION = "4.9.1"
+APP_VERSION = "4.9.2"
 APP_NAME = "Generator opisów i metatagów produktów"
 DESCRIPTION_PROMPT_VERSION = "description-v4.9.1-warnings"
 PROMPT_VERSION = "meta-v4.9.0-contributors-description-quality-akeneo-write-2026-09"
@@ -430,50 +440,48 @@ def init_db() -> None:
         ensure_column("meta_jobs", "akeneo_error", "TEXT NOT NULL DEFAULT ''")
         ensure_column("batch_jobs", "run_id", "TEXT NOT NULL DEFAULT ''")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_meta_jobs_run ON meta_jobs(run_id)")
+        ensure_workspace_schema(conn)
 
 
 init_db()
 
 
-def load_description_workspace() -> Dict:
-    with db_connect() as conn:
-        row = conn.execute(
-            "SELECT selected_skus, results, updated_at FROM description_workspace WHERE id=1"
-        ).fetchone()
-    if not row:
-        return {"selected_skus": [], "results": [], "updated_at": ""}
-    try:
-        return {
-            "selected_skus": json.loads(row["selected_skus"]),
-            "results": json.loads(row["results"]),
-            "updated_at": row["updated_at"],
-        }
-    except (TypeError, ValueError):
-        return {"selected_skus": [], "results": [], "updated_at": ""}
+def active_description_workspace_id() -> str:
+    return st.session_state.get("description_workspace_id", LEGACY_WORKSPACE_ID)
 
 
-def save_description_workspace(selected_skus: Sequence[str], results: Sequence[Dict]) -> None:
+def load_description_workspace(workspace_id: Optional[str] = None) -> Dict:
     with db_connect() as conn:
-        conn.execute(
-            """
-            INSERT INTO description_workspace(id, selected_skus, results, updated_at)
-            VALUES (1, ?, ?, ?)
-            ON CONFLICT(id) DO UPDATE SET
-                selected_skus=excluded.selected_skus,
-                results=excluded.results,
-                updated_at=excluded.updated_at
-            """,
-            (
-                json.dumps(list(selected_skus), ensure_ascii=False),
-                json.dumps(list(results), ensure_ascii=False, default=str),
-                utcnow_iso(),
-            ),
+        return storage_load_workspace(conn, workspace_id or active_description_workspace_id())
+
+
+def save_description_workspace(
+    selected_skus: Sequence[str],
+    results: Sequence[Dict],
+    workspace_id: Optional[str] = None,
+) -> None:
+    with db_connect() as conn:
+        storage_save_workspace(
+            conn,
+            workspace_id or active_description_workspace_id(),
+            selected_skus,
+            results,
         )
 
 
-def clear_description_workspace() -> None:
+def clear_description_workspace(workspace_id: Optional[str] = None) -> None:
     with db_connect() as conn:
-        conn.execute("DELETE FROM description_workspace WHERE id=1")
+        storage_clear_workspace(conn, workspace_id or active_description_workspace_id())
+
+
+def list_description_workspaces() -> List[Dict]:
+    with db_connect() as conn:
+        return storage_list_workspaces(conn)
+
+
+def create_description_workspace(name: str) -> Dict:
+    with db_connect() as conn:
+        return storage_create_workspace(conn, name)
 
 
 def add_optimized_product(sku: str, title: str, url: str) -> None:
@@ -4878,7 +4886,8 @@ def refresh_and_ingest_batch_jobs(run_id: Optional[str] = None) -> List[Dict]:
 # ═══════════════════════════════════════════════════════════════════
 
 def init_session_state() -> None:
-    workspace = load_description_workspace()
+    workspace_id = st.session_state.get("description_workspace_id", LEGACY_WORKSPACE_ID)
+    workspace = load_description_workspace(workspace_id)
     restored_results = workspace["results"]
     restored_products = {sku: {"title": sku} for sku in workspace["selected_skus"]}
     for result in restored_results:
@@ -4886,6 +4895,7 @@ def init_session_state() -> None:
             restored_products[result["sku"]]["title"] = result.get("title", result["sku"])
     defaults = {
         "bulk_results": restored_results,
+        "description_workspace_id": workspace_id,
         "generator_mode": "Generator opisów",
         "bulk_selected_products": restored_products,
         "products_to_send": {},
@@ -4913,6 +4923,29 @@ def init_session_state() -> None:
 
 
 init_session_state()
+
+
+def switch_description_workspace(workspace_id: str) -> None:
+    workspace = load_description_workspace(workspace_id)
+    restored_results = workspace["results"]
+    restored_products = {sku: {"title": sku} for sku in workspace["selected_skus"]}
+    for result in restored_results:
+        sku = result.get("sku")
+        if sku in restored_products:
+            restored_products[sku]["title"] = result.get("title", sku)
+
+    st.session_state.description_workspace_id = workspace_id
+    st.session_state.bulk_results = restored_results
+    st.session_state.bulk_selected_products = restored_products
+    st.session_state.products_to_send = {}
+    st.session_state.interactive_seed_results = {}
+    st.session_state.last_interactive_checkpoint_path = ""
+    st.session_state.search_res = []
+    st.session_state.manual_product_input = ""
+    st.session_state.active_editor_sku = ""
+    for key in list(st.session_state):
+        if key.startswith(("edit_", "visual_editor_", "send_", "search_")):
+            st.session_state.pop(key, None)
 
 
 def clear_product_queue() -> None:
@@ -5213,6 +5246,51 @@ with st.sidebar:
         if not st.session_state.meta_only
         else "Tworzy wyłącznie meta title i meta description. Opisy produktów pozostają bez zmian."
     )
+
+    if not st.session_state.meta_only:
+        st.markdown("---")
+        st.subheader("Kolejka robocza")
+        workspace_rows = list_description_workspaces()
+        workspace_names = {item["workspace_id"]: item["workspace_name"] for item in workspace_rows}
+        workspace_ids = list(workspace_names)
+        current_workspace_id = st.session_state.get("description_workspace_id", LEGACY_WORKSPACE_ID)
+        if current_workspace_id not in workspace_names and workspace_ids:
+            current_workspace_id = workspace_ids[0]
+            switch_description_workspace(current_workspace_id)
+
+        selected_workspace_id = st.selectbox(
+            "Wybierz kolejkę",
+            workspace_ids,
+            index=workspace_ids.index(current_workspace_id) if current_workspace_id in workspace_ids else 0,
+            format_func=lambda item: workspace_names[item],
+            help="Każda kolejka ma własną listę produktów, wyniki i wersje robocze opisów.",
+        )
+        if selected_workspace_id != st.session_state.get("description_workspace_id"):
+            switch_description_workspace(selected_workspace_id)
+            st.rerun()
+
+        with st.expander("Dodaj nową kolejkę"):
+            new_workspace_name = st.text_input(
+                "Nazwa kolejki",
+                placeholder="np. Bartek, Marcin, BOK 1",
+                key="new_description_workspace_name",
+            )
+            if st.button("Utwórz i przełącz", key="create_description_workspace"):
+                try:
+                    created_workspace = create_description_workspace(new_workspace_name)
+                    st.session_state.new_description_workspace_name = ""
+                    switch_description_workspace(created_workspace["workspace_id"])
+                    st.rerun()
+                except ValueError as exc:
+                    st.error(str(exc))
+
+        active_workspace_name = workspace_names.get(
+            st.session_state.get("description_workspace_id"),
+            st.session_state.get("description_workspace_id", ""),
+        )
+        st.caption(
+            f"Aktywna kolejka: {active_workspace_name}. Wyczyść kolejkę usuwa tylko jej wersję roboczą."
+        )
 
     st.markdown("---")
     st.subheader("Ustawienia wspólne")
