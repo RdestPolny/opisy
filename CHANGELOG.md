@@ -1,3 +1,7 @@
+# 4.9.3
+
+Naprawiono błąd Streamlit przy tworzeniu nowej kolejki. Pole nazwy jest teraz czyszczone dopiero w kolejnym rerunie, zanim widget zostanie utworzony.
+
 # 4.9.2
 
 Generator opisów obsługuje teraz niezależne kolejki robocze. Każda kolejka ma własną listę SKU, wyniki i edycje; wyczyszczenie jednej kolejki nie wpływa na pozostałe. Dotychczasowy wspólny workspace jest zachowany jako „Wspólna (legacy)”.

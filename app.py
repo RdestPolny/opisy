@@ -77,7 +77,7 @@ except ImportError:
 # STAŁE I KONFIGURACJA
 # ═══════════════════════════════════════════════════════════════════
 
-APP_VERSION = "4.9.2"
+APP_VERSION = "4.9.3"
 APP_NAME = "Generator opisów i metatagów produktów"
 DESCRIPTION_PROMPT_VERSION = "description-v4.9.1-warnings"
 PROMPT_VERSION = "meta-v4.9.0-contributors-description-quality-akeneo-write-2026-09"
@@ -5270,6 +5270,8 @@ with st.sidebar:
             st.rerun()
 
         with st.expander("Dodaj nową kolejkę"):
+            if st.session_state.pop("clear_new_description_workspace_name", False):
+                st.session_state["new_description_workspace_name"] = ""
             new_workspace_name = st.text_input(
                 "Nazwa kolejki",
                 placeholder="np. Bartek, Marcin, BOK 1",
@@ -5278,7 +5280,7 @@ with st.sidebar:
             if st.button("Utwórz i przełącz", key="create_description_workspace"):
                 try:
                     created_workspace = create_description_workspace(new_workspace_name)
-                    st.session_state.new_description_workspace_name = ""
+                    st.session_state.clear_new_description_workspace_name = True
                     switch_description_workspace(created_workspace["workspace_id"])
                     st.rerun()
                 except ValueError as exc:
