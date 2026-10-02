@@ -14,8 +14,26 @@ w naturalne zdania. Brak dobrego celu oznacza brak nowego linku.
 4. Wczytaj CSV do tabeli lub wpisz cele ręcznie i kliknij **Zapisz katalog celów**.
 5. Włącz linkowanie. Zacznij od małej kolejki i sprawdź wyniki w **Dobór linków**.
 
-Tryb ręczny nadal działa. Domyślny tryb nie zmienia się przy aktualizacji.
-Nie dodano nowych zależności.
+Tryb ręczny nadal działa. W trybie **Automatyczne (Jev)** źródło sitemap Booklandu jest
+domyślnie włączone. Nie dodano nowych zależności.
+
+## Sitemap Booklandu i wydajność
+
+Stałym źródłem retrieval jest `https://bookland.com.pl/pub/sitemap_index.xml`. Aplikacja nie
+przekazuje całej sitemap Jevowi i nie pobiera jej ponownie dla każdego SKU.
+
+- Przy pierwszym użyciu lub po ręcznym kliknięciu **Odśwież cache sitemap Booklandu**
+  sitemap index i jego pliki potomne są pobierane równolegle, maksymalnie 4 requesty naraz.
+- Adresy są zapisywane do `.streamlit/bookland_sitemap.sqlite3` i indeksowane przez SQLite FTS5.
+- Dla każdego produktu lokalny retrieval wykorzystuje tytuł, serię, przedmiot, szkołę, klasę
+  i edycję. Z dużego katalogu wybierana jest mała pula semantycznie zbliżonych URL-i.
+- Do jednego requestu Jev trafia nadal najwyżej 8 kandydatów łącznie z ręcznym rejestrem.
+  Jeżeli sitemap zwróci kandydatów, połowa budżetu jest rezerwowana dla ręcznego katalogu,
+  a połowa dla lokalnego retrieval.
+- URL pochodzący bezpośrednio z sitemap nie jest ponownie odpytywany HTTP dla każdego SKU.
+  Ręcznie wpisane cele zachowują dotychczasowy live-check 200/canonical/noindex.
+- Cache nie odświeża się automatycznie przy każdym przebiegu. Istniejący indeks jest używany
+  natychmiast; operator może odświeżyć go przyciskiem w ustawieniach linkowania.
 
 ## Katalog celów
 
@@ -57,8 +75,9 @@ dysku zależy od hostingu, tak jak istniejące lokalne dane aplikacji.
 
 ## Kontrola i zachowanie
 
-- Reguły zawężają listę do maksymalnie ośmiu kandydatów. Kolejność katalogu ma
-  znaczenie przy większej liczbie dopuszczonych celów; umieszczaj preferowane wcześniej.
+- Reguły zawężają listę do maksymalnie ośmiu kandydatów. Przy samym katalogu ręcznym
+  zachowana jest dotychczasowa kolejność. Gdy włączona jest sitemap, Jev dostaje maksymalnie
+  4 kandydatów z ręcznego rejestru i pozostałe miejsca z lokalnego retrieval sitemap.
 - Jedno wywołanie `jev-1.13.0` ocenia przydatność (`Score`, skala 0–3) i zgodność
   semantyczną (`Noul`). Wybór wymaga Score co najmniej 2.5 oraz Noul co najmniej
   wartości suwaka, domyślnie 0.8. Są to progi pilotażu do oceny na własnych danych.
