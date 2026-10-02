@@ -85,9 +85,39 @@ class DescriptionOutputTests(unittest.TestCase):
         self.assertIn("BOLD_QUALITY", self.codes(report))
 
     def test_unknown_validator_options_and_bad_config_fail_before_generation(self):
-        for options in [{"typo": True}, {"required_link": "javascript:void(0)"}, {"required_link": "https://["}, {"required_link_paragraph": -1}]:
+        for options in [{"typo": True}, {"required_link": "javascript:void(0)"}, {"required_link": "https://["}, {"required_link_paragraph": -1}, {"allowed_links": [1]}, {"allowed_links": "https://example.com"}, {"allowed_links": [LINK] * 3}]:
             with self.subTest(options=options), self.assertRaises(ValueError):
                 analyze_description_html("<p>Opis.</p>", **options)
+
+    def test_selected_targets_allow_two_unique_links_and_preserve_text(self):
+        second = "https://bookland.com.pl/cwiczenia"
+        value = f'<p><a href="{LINK}">Kategoria</a>, <a href="{second}">ćwiczenia</a>, <a href="{LINK}">duplikat</a>, <a href="https://example.com">obcy</a>.</p>'
+        report = analyze_description_html(value, require_full_structure=False, allowed_links=[LINK, second])
+        self.assertEqual(report.errors, [])
+        self.assertEqual(report.clean_html.count("href="), 2)
+        self.assertIn("duplikat", report.clean_html)
+        self.assertIn("obcy", report.clean_html)
+        self.assertNotIn("example.com", report.clean_html)
+        self.assertIn("LINK_TARGET_REMOVED", self.codes(report))
+
+    def test_zero_selected_targets_removes_links_not_text(self):
+        report = analyze_description_html(f'<p><a href="{LINK}">Opis</a>.</p>', require_full_structure=False, allowed_links=[])
+        self.assertEqual(report.clean_html, "<p>Opis.</p>")
+
+    def test_manual_removal_of_selected_target_is_only_warning(self):
+        report = analyze_description_html("<p>Opis.</p>", require_full_structure=False, allowed_links=[LINK])
+        self.assertEqual(report.errors, [])
+        self.assertIn("LINK_MISSING", self.codes(report))
+
+    def test_no_match_snapshot_preserves_old_links_but_does_not_allow_new_ones(self):
+        old = f'<p><a href="{LINK}">Jeden</a> <a href="{LINK}">Dwa</a> <a href="{LINK}">Trzy</a>.</p>'
+        report = analyze_description_html(old, require_full_structure=False, allowed_links=[], preserved_links=[LINK] * 3)
+        self.assertEqual(report.clean_html, old)
+        edited = old + f'<p><a href="{LINK}">Czwarty</a> <a href="https://outside.example">Obcy</a></p>'
+        report = analyze_description_html(edited, require_full_structure=False, allowed_links=[], preserved_links=[LINK] * 3)
+        self.assertEqual(report.clean_html.count("href="), 3)
+        self.assertNotIn("outside.example", report.clean_html)
+        self.assertIn("Czwarty", report.clean_html)
 
     def test_empty_or_only_active_content_is_not_deliverable(self):
         for value in ["", "<p>&nbsp;</p>", "<script>void(0)</script>", "<p><img src=x onerror='void(0)'></p>"]:
