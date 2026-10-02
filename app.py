@@ -5140,9 +5140,9 @@ def render_link_catalog(locale: str) -> None:
                         index_url=BOOKLAND_SITEMAP_INDEX_URL,
                         db_path=DEFAULT_SITEMAP_DB_PATH,
                     )
+                indexed_urls = f"{int(stats['url_count']):,}".replace(",", " ")
                 st.success(
-                    f"Zindeksowano {int(stats['url_count']):,} URL-i z "
-                    f"{int(stats['sitemap_count'])} sitemap.".replace(",", " ")
+                    f"Zindeksowano {indexed_urls} URL-i z {int(stats['sitemap_count'])} sitemap."
                 )
                 st.rerun()
             except Exception as exc:
