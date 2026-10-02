@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "source": "https://bookland.com.pl/pub/sitemap_index.xml",
+  "refreshed_at": "2026-10-02T11:26:14Z",
+  "url_count": 89366,
+  "sitemap_count": 10,
+  "failed_sitemaps": 0,
+  "sqlite_bytes": 52379648,
+  "gzip_bytes": 11752863,
+  "sqlite_sha256": "2dcae204f63e302b9d6fe6aa1b6342c4b96279f8e802df8bd8ec897cc258bb0c",
+  "gzip_sha256": "0782eb47517b515db8ab17d1390ae819c36a2f93b0ffe9abb7b6aba10bef68a2",
+  "parts": [
+    "bookland_sitemap.sqlite3.gz.part-000"
+  ]
+}
