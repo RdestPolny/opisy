@@ -5,6 +5,7 @@ from unittest.mock import patch
 
 from sitemap_retrieval import (
     BOOKLAND_SITEMAP_INDEX_URL,
+    _normalize_text,
     refresh_sitemap_cache,
     search_sitemap_candidates,
     sitemap_cache_status,
@@ -18,6 +19,9 @@ class SitemapRetrievalTests(unittest.TestCase):
 
     def tearDown(self):
         self.tempdir.cleanup()
+
+    def test_polish_normalization_keeps_l_stroke_semantics(self):
+        self.assertEqual(_normalize_text("Szkoła podstawowa"), "szkola podstawowa")
 
     def test_refresh_builds_fts_once_and_search_excludes_same_product(self):
         child_a = "https://bookland.com.pl/pub/product-sitemap.xml"
