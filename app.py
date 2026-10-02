@@ -49,7 +49,8 @@ from internal_linking import select_internal_links, validate_targets, verify_tar
 from sitemap_retrieval import (
     BOOKLAND_SITEMAP_INDEX_URL,
     DEFAULT_SITEMAP_DB_PATH,
-    refresh_sitemap_cache,
+    bundled_snapshot_status,
+    restore_bundled_snapshot,
     sitemap_cache_status,
 )
 
@@ -84,7 +85,7 @@ except ImportError:
 # STAŁE I KONFIGURACJA
 # ═══════════════════════════════════════════════════════════════════
 
-APP_VERSION = "4.11.0"
+APP_VERSION = "4.11.1"
 APP_NAME = "Generator opisów i metatagów produktów"
 DESCRIPTION_PROMPT_VERSION = "description-v4.10-contextual-links"
 PROMPT_VERSION = "meta-v4.9.0-contributors-description-quality-akeneo-write-2026-09"
@@ -5116,37 +5117,48 @@ def render_link_catalog(locale: str) -> None:
         "Uwzględniaj sitemapę Booklandu w doborze Jev",
         value=st.session_state.get("link_sitemap_enabled", True),
         help=(
-            "Sitemap index jest pobierany tylko przy budowie cache. Dla każdego SKU aplikacja "
-            "przeszukuje lokalny indeks SQLite FTS i przekazuje Jevowi najwyżej 8 kandydatów."
+            "Aplikacja korzysta ze statycznego snapshotu sitemap zapisanego w repozytorium. "
+            "Przy pierwszym użyciu odtwarza z niego lokalny SQLite FTS; nie pobiera sitemap Booklandu per SKU."
         ),
     )
     if st.session_state.link_sitemap_enabled:
         sitemap_status = sitemap_cache_status(DEFAULT_SITEMAP_DB_PATH)
+        snapshot_status = bundled_snapshot_status()
+        if int(sitemap_status.get("url_count", 0)) <= 0 and snapshot_status.get("available"):
+            try:
+                sitemap_status = restore_bundled_snapshot(db_path=DEFAULT_SITEMAP_DB_PATH)
+            except Exception:
+                pass
+
         sitemap_cols = st.columns(3)
         sitemap_cols[0].metric("URL-e w cache sitemap", f"{int(sitemap_status['url_count']):,}".replace(",", " "))
         sitemap_cols[1].metric("Przetworzone sitemapy", int(sitemap_status["sitemap_count"]))
         sitemap_cols[2].metric("Błędy sitemap", int(sitemap_status["failed_sitemaps"]))
-        if sitemap_status.get("refreshed_at"):
-            st.caption(f"Ostatnia synchronizacja sitemap: {sitemap_status['refreshed_at']}.")
-        else:
+
+        if snapshot_status.get("available"):
+            snapshot_urls = f"{int(snapshot_status['url_count']):,}".replace(",", " ")
             st.caption(
-                "Cache sitemap jest pusty. Przy pierwszym użyciu Jev zostanie zbudowany raz; "
-                "kolejne setki SKU korzystają już wyłącznie z lokalnego indeksu."
+                f"Źródło: snapshot z repo ({snapshot_urls} URL-i"
+                + (f", stan {snapshot_status['refreshed_at']}" if snapshot_status.get("refreshed_at") else "")
+                + "). Runtime nie pobiera sitemap z Booklandu."
             )
-        if st.button("Odśwież cache sitemap Booklandu", key="refresh_bookland_sitemap"):
-            try:
-                with st.spinner("Synchronizuję sitemap index Booklandu i przebudowuję lokalny indeks FTS..."):
-                    stats = refresh_sitemap_cache(
-                        index_url=BOOKLAND_SITEMAP_INDEX_URL,
-                        db_path=DEFAULT_SITEMAP_DB_PATH,
-                    )
-                indexed_urls = f"{int(stats['url_count']):,}".replace(",", " ")
-                st.success(
-                    f"Zindeksowano {indexed_urls} URL-i z {int(stats['sitemap_count'])} sitemap."
-                )
-                st.rerun()
-            except Exception as exc:
-                st.error(f"Nie udało się odświeżyć cache sitemap: {exc}")
+            if st.button("Przywróć cache ze snapshotu", key="restore_bookland_sitemap_snapshot"):
+                try:
+                    with st.spinner("Odtwarzam lokalny indeks FTS ze snapshotu w repo..."):
+                        stats = restore_bundled_snapshot(
+                            db_path=DEFAULT_SITEMAP_DB_PATH,
+                            force=True,
+                        )
+                    indexed_urls = f"{int(stats['url_count']):,}".replace(",", " ")
+                    st.success(f"Przywrócono {indexed_urls} URL-i ze snapshotu.")
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"Nie udało się odtworzyć snapshotu sitemap: {exc}")
+        else:
+            st.warning(
+                "Snapshot sitemap nie jest jeszcze dostępny w repozytorium. "
+                "Po zakończeniu workflow GitHub Actions pojawi się automatycznie."
+            )
 
     with st.expander("Katalog celów linkowania", expanded=not st.session_state.link_targets):
         st.caption("Dla kategorii wpisz kod Akeneo i rzeczywisty adres Booklandu. Opcjonalne pola ograniczają dobór; brak zgodnych danych oznacza pominięcie celu.")
