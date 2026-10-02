@@ -23,7 +23,7 @@ Stałym źródłem retrieval jest `https://bookland.com.pl/pub/sitemap_index.xml
 przekazuje całej sitemap Jevowi i nie pobiera jej ponownie dla każdego SKU.
 
 - Przy pierwszym użyciu lub po ręcznym kliknięciu **Odśwież cache sitemap Booklandu**
-  sitemap index i jego pliki potomne są pobierane równolegle, maksymalnie 4 requesty naraz.
+  sitemap index i jego pliki potomne są pobierane równolegle, maksymalnie 3 requesty naraz.
 - Adresy są zapisywane do `.streamlit/bookland_sitemap.sqlite3` i indeksowane przez SQLite FTS5.
 - Dla każdego produktu lokalny retrieval wykorzystuje tytuł, serię, przedmiot, szkołę, klasę
   i edycję. Z dużego katalogu wybierana jest mała pula semantycznie zbliżonych URL-i.
@@ -81,9 +81,10 @@ dysku zależy od hostingu, tak jak istniejące lokalne dane aplikacji.
 - Jedno wywołanie `jev-1.13.0` ocenia przydatność (`Score`, skala 0–3) i zgodność
   semantyczną (`Noul`). Wybór wymaga Score co najmniej 2.5 oraz Noul co najmniej
   wartości suwaka, domyślnie 0.8. Są to progi pilotażu do oceny na własnych danych.
-- Wybrany URL musi zwrócić HTTP 200 i HTML. Odrzucamy przekierowania, `noindex`
+- Ręcznie wpisany URL musi zwrócić HTTP 200 i HTML; odrzucamy przekierowania, `noindex`
   i canonical wskazujący inny adres. Wynik tej kontroli jest cache'owany na godzinę.
-  Nie jest to pełny audyt indeksacji ani potwierdzenie widoczności w Google.
+  URL z sitemap przechodzi walidację domeny i formatu przy indeksowaniu, ale nie jest
+  ponownie pobierany per SKU. Nie jest to pełny audyt indeksacji ani potwierdzenie widoczności w Google.
 - Przed edycją, eksportem i wysyłką linki poza wybraną listą oraz duplikaty są
   usuwane z zachowaniem tekstu. Usunięcie proponowanego linku przez użytkownika
   pozostaje ostrzeżeniem, bez blokowania opisu.
