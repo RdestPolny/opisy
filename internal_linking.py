@@ -7,6 +7,12 @@ from urllib.parse import unquote, urljoin, urlsplit
 
 import requests
 
+from sitemap_retrieval import (
+    BOOKLAND_SITEMAP_INDEX_URL,
+    DEFAULT_SITEMAP_DB_PATH,
+    search_sitemap_candidates,
+)
+
 FIELDS = ("school", "grade", "subject", "series", "edition")
 HOSTS = {"bookland.com.pl", "www.bookland.com.pl"}
 
@@ -142,17 +148,69 @@ def select_internal_links(product, config) -> dict:
     if threshold < 0.5:
         raise ValueError("Próg Noul musi być w zakresie 0.5–1.")
     result = {"links": [], "warnings": [], "candidates": []}
+    registry_candidates = []
     for target in targets:
         reason = _rejection(product, target)
-        result["candidates"].append({**target, "category": target["label"], "score": None, "noul": None,
-                                     "eligible": not reason, "selected": False, "reason": reason,
-                                     "source_constraints": {field: target[field] for field in FIELDS if target[field]}})
-    eligible = [c for c in result["candidates"] if c["eligible"]]
-    # ponytail: registry order bounds the shortlist; add retrieval when catalogs outgrow eight candidates.
+        registry_candidates.append({
+            **target,
+            "origin": "registry",
+            "category": target["label"],
+            "score": None,
+            "noul": None,
+            "eligible": not reason,
+            "selected": False,
+            "reason": reason,
+            "source_constraints": {field: target[field] for field in FIELDS if target[field]},
+        })
+    result["candidates"].extend(registry_candidates)
+
+    sitemap_candidates = []
+    if config.get("use_sitemap"):
+        sitemap_db_path = config.get("sitemap_db_path") or DEFAULT_SITEMAP_DB_PATH
+        sitemap_index_url = config.get("sitemap_index_url") or BOOKLAND_SITEMAP_INDEX_URL
+        try:
+            retrieved = search_sitemap_candidates(
+                product,
+                limit=config.get("sitemap_limit", 8),
+                db_path=sitemap_db_path,
+                index_url=sitemap_index_url,
+            )
+        except (OSError, ValueError, TypeError):
+            retrieved = []
+        for target in retrieved:
+            sitemap_candidates.append({
+                **target,
+                "origin": "sitemap",
+                "category": target["label"],
+                "score": None,
+                "noul": None,
+                "eligible": True,
+                "selected": False,
+                "reason": "",
+                "source_constraints": {},
+            })
+        result["candidates"].extend(sitemap_candidates)
+        if not sitemap_candidates:
+            result["warnings"].append(
+                "Indeks sitemap Booklandu nie zwrócił kandydatów; Jev użyje tylko katalogu ręcznego."
+            )
+
+    eligible_registry = [candidate for candidate in registry_candidates if candidate["eligible"]]
+    eligible_sitemap = [candidate for candidate in sitemap_candidates if candidate["eligible"]]
     shortlisted = []
-    for kind in ("category", "product"):
-        shortlisted.extend([c for c in eligible if c["kind"] == kind][:4])
-    shortlisted.extend([c for c in eligible if c not in shortlisted][:8 - len(shortlisted)])
+    if eligible_sitemap:
+        # Curated registry keeps half the budget, while the cached sitemap retrieval
+        # always gets room in the single bounded Jev request.
+        for kind in ("category", "product"):
+            shortlisted.extend([c for c in eligible_registry if c["kind"] == kind][:2])
+        shortlisted.extend([c for c in eligible_registry if c not in shortlisted][:4 - len(shortlisted)])
+        shortlisted.extend(eligible_sitemap[:8 - len(shortlisted)])
+    else:
+        for kind in ("category", "product"):
+            shortlisted.extend([c for c in eligible_registry if c["kind"] == kind][:4])
+        shortlisted.extend([c for c in eligible_registry if c not in shortlisted][:8 - len(shortlisted)])
+
+    eligible = eligible_registry + eligible_sitemap
     for candidate in eligible:
         if candidate not in shortlisted:
             candidate["reason"] = "Poza limitem ośmiu kandydatów."
@@ -167,9 +225,16 @@ def select_internal_links(product, config) -> dict:
     categories = product.get("categories")
     state["source"]["categories"] = list(categories) if isinstance(categories, (list, tuple)) else []
     state["source"]["description"] = _text(product.get("description"))[:6000]
-    state["candidates"] = [{key: c[key] for key in ("kind", "code", "label", *FIELDS, "source_skus")} for c in shortlisted]
+    state["candidates"] = [
+        {
+            **{key: c[key] for key in ("kind", "code", "label", *FIELDS, "source_skus")},
+            "origin": c.get("origin", "registry"),
+            "path": c.get("path", ""),
+        }
+        for c in shortlisted
+    ]
     for candidate in state["candidates"]:
-        if candidate["kind"] == "product":
+        if candidate["kind"] == "product" and candidate["origin"] == "registry":
             candidate["source_association_confirmed"] = True
     questions = {}
     for index, candidate in enumerate(shortlisted):
@@ -183,10 +248,14 @@ def select_internal_links(product, config) -> dict:
             support = {"type": "noul", "instructions": f"Does the category name in {pointer} accurately describe the subject and audience of the product in `source`? Judge only this semantic relationship.",
                        "criteria": {"true": "The explicit source description and attributes support the subject and audience named by the category.",
                                     "false": "The category describes a different subject or audience, or the source lacks evidence for the named subject or audience."}}
-        else:
+        elif candidate["kind"] == "product":
             support = {"type": "noul", "instructions": f"Does {pointer} describe relevant companion material for the product in `source`, consistent with its explicit subject and course/series facts? Judge only this semantic relationship.",
                        "criteria": {"true": "The supplied source and target facts support relevant companion material for the same subject and course or series.",
                                     "false": "The target concerns a different subject or course, or the source lacks evidence that the named material is relevant."}}
+        else:
+            support = {"type": "noul", "instructions": f"Does the Bookland sitemap destination named by {pointer} represent a useful internal destination for the product in `source`? Use the supplied label and path only; do not infer facts absent from them.",
+                       "criteria": {"true": "The destination label/path and source facts clearly support a useful topical or product relationship.",
+                                    "false": "The relationship is weak, ambiguous, generic, or unsupported by the supplied source and destination data."}}
         questions[f"support_{index}"] = support
     try:
         response = requests.post("https://api.typesafe.ai/v1/systemone", headers={"Authorization": f"Bearer {api_key}"},
@@ -205,10 +274,31 @@ def select_internal_links(product, config) -> dict:
         return result
     for candidate, (score, noul) in zip(shortlisted, scores):
         candidate.update(score=score, noul=noul, reason="Poniżej progu trafności lub wsparcia faktów." if score < 2.5 or noul < threshold else "")
+    winners = []
     for kind in ("category", "product"):
-        accepted = [c for c in shortlisted if c["kind"] == kind and c["score"] >= 2.5 and c["noul"] >= threshold]
+        accepted = [
+            c for c in shortlisted
+            if c["kind"] == kind and c["score"] >= 2.5 and c["noul"] >= threshold
+        ]
         if accepted:
-            winner = max(accepted, key=lambda c: (c["score"], c["noul"]))
-            winner["selected"] = True
-            result["links"].append({key: winner[key] for key in ("kind", "code", "label", "url", "category")})
+            winners.append(max(accepted, key=lambda c: (c["score"], c["noul"])))
+
+    generic = sorted(
+        [
+            c for c in shortlisted
+            if c["kind"] == "sitemap" and c["score"] >= 2.5 and c["noul"] >= threshold
+        ],
+        key=lambda c: (c["score"], c["noul"], c.get("retrieval_score", 0)),
+        reverse=True,
+    )
+    for candidate in generic:
+        if len(winners) >= 2:
+            break
+        winners.append(candidate)
+
+    for winner in winners[:2]:
+        winner["selected"] = True
+        result["links"].append({
+            key: winner[key] for key in ("kind", "code", "label", "url", "category", "origin")
+        })
     return result
