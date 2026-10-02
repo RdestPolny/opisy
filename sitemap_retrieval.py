@@ -23,7 +23,7 @@ BOOKLAND_HOSTS = {"bookland.com.pl", "www.bookland.com.pl"}
 CACHE_SCHEMA_VERSION = "1"
 MAX_SITEMAPS = 256
 MAX_URLS = 750_000
-DEFAULT_WORKERS = 4
+DEFAULT_WORKERS = 3
 _REQUEST_TIMEOUT = (8, 45)
 _REFRESH_LOCK = threading.RLock()
 
@@ -44,7 +44,10 @@ def _local_name(tag: str) -> str:
 
 
 def _normalize_text(value: str) -> str:
-    text = unicodedata.normalize("NFKD", value or "")
+    # NFKD nie rozkłada polskiego ł/Ł, więc transliterujemy je jawnie przed
+    # usuwaniem znaków diakrytycznych. Dzięki temu szkoła -> szkola zamiast szko a.
+    text = (value or "").translate(str.maketrans({"ł": "l", "Ł": "L"}))
+    text = unicodedata.normalize("NFKD", text)
     text = "".join(ch for ch in text if not unicodedata.combining(ch))
     return " ".join(re.findall(r"[a-z0-9]+", text.casefold()))
 
@@ -239,7 +242,7 @@ def refresh_sitemap_cache(
 ) -> Dict[str, object]:
     _validate_bookland_url(index_url, xml=True)
     path = Path(db_path)
-    workers = max(1, min(int(workers), 8))
+    workers = max(1, min(int(workers), 4))
 
     with _REFRESH_LOCK:
         started = time.monotonic()
@@ -255,7 +258,10 @@ def refresh_sitemap_cache(
 
                 while pending and len(seen_sitemaps) < MAX_SITEMAPS:
                     batch: List[str] = []
-                    while pending and len(batch) < max(workers * 4, 8):
+                    # Każdy gotowy parser może zwrócić dziesiątki tysięcy rekordów.
+                    # Trzymamy więc w locie najwyżej tyle dużych list, ilu workerów,
+                    # zamiast kolejkować kilkanaście ogromnych sitemap jednocześnie.
+                    while pending and len(batch) < workers:
                         candidate = pending.pop(0)
                         if candidate not in seen_sitemaps:
                             seen_sitemaps.add(candidate)
