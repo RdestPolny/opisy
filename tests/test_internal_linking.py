@@ -114,6 +114,37 @@ class InternalLinkingTests(unittest.TestCase):
         self.assertTrue(body["state"]["candidates"][4]["source_association_confirmed"])
         self.assertEqual(len(body["questions"]["relevance_0"]["criteria"]), 4)
 
+    def test_cached_sitemap_candidates_use_the_same_bounded_jev_request(self):
+        sitemap_candidate = {
+            "origin": "sitemap",
+            "kind": "sitemap",
+            "code": "sitemap-123",
+            "label": "Matematyka klasa 4 - materiały dodatkowe",
+            "url": "https://bookland.com.pl/matematyka-klasa-4-materialy",
+            "path": "/matematyka-klasa-4-materialy",
+            "source_sitemap": "https://bookland.com.pl/pub/product-sitemap.xml",
+            "source_skus": "",
+            "school": "",
+            "grade": "",
+            "subject": "",
+            "series": "",
+            "edition": "",
+            "retrieval_score": 0.82,
+        }
+        with patch("internal_linking.search_sitemap_candidates", return_value=[sitemap_candidate]) as retrieve, \
+             patch("internal_linking.requests.post") as post:
+            post.return_value.json.return_value = typed_response([(2.9, .92)])
+            result = select_internal_links(
+                source(),
+                {"targets": [], "api_key": "secret", "use_sitemap": True},
+            )
+
+        retrieve.assert_called_once()
+        post.assert_called_once()
+        self.assertEqual(len(post.call_args.kwargs["json"]["state"]["candidates"]), 1)
+        self.assertEqual(result["links"][0]["origin"], "sitemap")
+        self.assertEqual(result["links"][0]["url"], sitemap_candidate["url"])
+
     def test_missing_key_invalid_threshold_and_runtime_failures_fail_closed(self):
         result, post = self.select([target()], api_key="")
         self.assertEqual(result["links"], [])
