@@ -46,6 +46,12 @@ from description_output import (
 )
 from description_generation import generate_description_result
 from internal_linking import select_internal_links, validate_targets, verify_target_url
+from sitemap_retrieval import (
+    BOOKLAND_SITEMAP_INDEX_URL,
+    DEFAULT_SITEMAP_DB_PATH,
+    refresh_sitemap_cache,
+    sitemap_cache_status,
+)
 
 try:
     from product_input import ProductInputResolutionError, resolve_product_inputs
@@ -78,7 +84,7 @@ except ImportError:
 # STAŁE I KONFIGURACJA
 # ═══════════════════════════════════════════════════════════════════
 
-APP_VERSION = "4.10.0"
+APP_VERSION = "4.11.0"
 APP_NAME = "Generator opisów i metatagów produktów"
 DESCRIPTION_PROMPT_VERSION = "description-v4.10-contextual-links"
 PROMPT_VERSION = "meta-v4.9.0-contributors-description-quality-akeneo-write-2026-09"
@@ -2660,7 +2666,11 @@ def process_product_from_akeneo(
             selected = []
             for target in link_report["links"]:
                 try:
-                    check_internal_link_url(target["url"])
+                    # URL pobrany z sitemap został już zwalidowany jako kanoniczny
+                    # Bookland HTTPS podczas budowy lokalnego indeksu. Nie robimy
+                    # kolejnego requestu per SKU; ręczne cele nadal przechodzą live-check.
+                    if target.get("origin") != "sitemap":
+                        check_internal_link_url(target["url"])
                     selected.append(target)
                 except ValueError as exc:
                     link_report["warnings"].append(str(exc))
@@ -4966,6 +4976,7 @@ def init_session_state() -> None:
         "products_to_send": {},
         "link_active": False,
         "link_only": False,
+        "link_sitemap_enabled": True,
         "link_url": "",
         "link_category": "",
         "search_res": [],
@@ -5048,9 +5059,15 @@ def reset_interactive_results() -> None:
 def get_internal_link() -> Optional[Dict]:
     if st.session_state.get("link_active") and st.session_state.get("link_mode") == "Automatyczne (Jev)":
         return {
-            "mode": "automatic", "targets": st.session_state.get("link_targets", []),
+            "mode": "automatic",
+            "targets": st.session_state.get("link_targets", []),
             "api_key": st.secrets.get("TYPESAFE_API_KEY", ""),
-            "model": "jev-1.13.0", "threshold": st.session_state.get("link_threshold", 0.8),
+            "model": "jev-1.13.0",
+            "threshold": st.session_state.get("link_threshold", 0.8),
+            "use_sitemap": st.session_state.get("link_sitemap_enabled", True),
+            "sitemap_index_url": BOOKLAND_SITEMAP_INDEX_URL,
+            "sitemap_db_path": str(DEFAULT_SITEMAP_DB_PATH),
+            "sitemap_limit": 8,
         }
     if (
         st.session_state.get("link_active")
@@ -5094,6 +5111,43 @@ def render_link_catalog(locale: str) -> None:
         except (ValueError, OSError) as exc:
             st.error(f"Nie udało się odczytać katalogu celów: {exc}")
             st.session_state.link_targets = []
+
+    st.session_state.link_sitemap_enabled = st.checkbox(
+        "Uwzględniaj sitemapę Booklandu w doborze Jev",
+        value=st.session_state.get("link_sitemap_enabled", True),
+        help=(
+            "Sitemap index jest pobierany tylko przy budowie cache. Dla każdego SKU aplikacja "
+            "przeszukuje lokalny indeks SQLite FTS i przekazuje Jevowi najwyżej 8 kandydatów."
+        ),
+    )
+    if st.session_state.link_sitemap_enabled:
+        sitemap_status = sitemap_cache_status(DEFAULT_SITEMAP_DB_PATH)
+        sitemap_cols = st.columns(3)
+        sitemap_cols[0].metric("URL-e w cache sitemap", f"{int(sitemap_status['url_count']):,}".replace(",", " "))
+        sitemap_cols[1].metric("Przetworzone sitemapy", int(sitemap_status["sitemap_count"]))
+        sitemap_cols[2].metric("Błędy sitemap", int(sitemap_status["failed_sitemaps"]))
+        if sitemap_status.get("refreshed_at"):
+            st.caption(f"Ostatnia synchronizacja sitemap: {sitemap_status['refreshed_at']}.")
+        else:
+            st.caption(
+                "Cache sitemap jest pusty. Przy pierwszym użyciu Jev zostanie zbudowany raz; "
+                "kolejne setki SKU korzystają już wyłącznie z lokalnego indeksu."
+            )
+        if st.button("Odśwież cache sitemap Booklandu", key="refresh_bookland_sitemap"):
+            try:
+                with st.spinner("Synchronizuję sitemap index Booklandu i przebudowuję lokalny indeks FTS..."):
+                    stats = refresh_sitemap_cache(
+                        index_url=BOOKLAND_SITEMAP_INDEX_URL,
+                        db_path=DEFAULT_SITEMAP_DB_PATH,
+                    )
+                st.success(
+                    f"Zindeksowano {int(stats['url_count']):,} URL-i z "
+                    f"{int(stats['sitemap_count'])} sitemap.".replace(",", " ")
+                )
+                st.rerun()
+            except Exception as exc:
+                st.error(f"Nie udało się odświeżyć cache sitemap: {exc}")
+
     with st.expander("Katalog celów linkowania", expanded=not st.session_state.link_targets):
         st.caption("Dla kategorii wpisz kod Akeneo i rzeczywisty adres Booklandu. Opcjonalne pola ograniczają dobór; brak zgodnych danych oznacza pominięcie celu.")
         columns = ["kind", "code", "label", "url", "school", "grade", "subject", "series", "edition", "source_skus"]
@@ -5468,7 +5522,7 @@ with st.sidebar:
         if st.session_state.link_mode == "Automatyczne (Jev)":
             st.session_state.link_threshold = st.slider("Minimalne potwierdzenie dopasowania", 0.5, 1.0,
                                                         st.session_state.get("link_threshold", 0.8), 0.05)
-            st.caption("Maksymalnie jedna kategoria i jeden potwierdzony produkt uzupełniający. Próg należy sprawdzić na własnych produktach.")
+            st.caption("Jev ocenia maksymalnie 8 kandydatów i wybiera do 2 linków. Sitemap jest najpierw filtrowana lokalnie, więc jej rozmiar nie zwiększa liczby requestów do Jev.")
             if not st.secrets.get("TYPESAFE_API_KEY"):
                 st.warning("Dodaj TYPESAFE_API_KEY w sekretach Streamlit. Bez klucza opis powstanie bez automatycznych linków.")
             render_link_catalog(locale)
