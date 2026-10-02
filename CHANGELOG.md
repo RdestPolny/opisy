@@ -1,3 +1,14 @@
+# 4.11.0
+
+Automatyczne linkowanie Jev może stale korzystać z sitemap Booklandu bez skanowania ich dla każdego SKU.
+
+- Dodano cache `.streamlit/bookland_sitemap.sqlite3` z indeksem SQLite FTS5 dla
+  `https://bookland.com.pl/pub/sitemap_index.xml` i sitemap potomnych.
+- Pierwsze użycie buduje indeks jednokrotnie; kolejne produkty wykonują tylko lokalny retrieval.
+- Do Jev nadal trafia najwyżej 8 kandydatów w jednym requestcie, a wynik nadal zawiera maksymalnie 2 linki.
+- URL-e z sitemap nie są ponownie odpytywane HTTP per SKU; cele ręczne zachowują live-check.
+- Dodano status i ręczne odświeżanie cache w UI oraz testy retrieval i integracji z Jev.
+
 # 4.9.3
 
 Naprawiono błąd Streamlit przy tworzeniu nowej kolejki. Pole nazwy jest teraz czyszczone dopiero w kolejnym rerunie, zanim widget zostanie utworzony.
