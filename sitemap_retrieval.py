@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import gzip
 import hashlib
+import json
 import os
 import re
 import sqlite3
@@ -19,6 +20,8 @@ import requests
 
 BOOKLAND_SITEMAP_INDEX_URL = "https://bookland.com.pl/pub/sitemap_index.xml"
 DEFAULT_SITEMAP_DB_PATH = Path(".streamlit/bookland_sitemap.sqlite3")
+BUNDLED_SNAPSHOT_DIR = Path("data/bookland_sitemap_snapshot")
+BUNDLED_SNAPSHOT_MANIFEST = BUNDLED_SNAPSHOT_DIR / "manifest.json"
 BOOKLAND_HOSTS = {"bookland.com.pl", "www.bookland.com.pl"}
 CACHE_SCHEMA_VERSION = "1"
 MAX_SITEMAPS = 256
@@ -328,6 +331,116 @@ def refresh_sitemap_cache(
             temporary.unlink(missing_ok=True)
 
 
+
+def bundled_snapshot_status(
+    snapshot_dir: Path | str = BUNDLED_SNAPSHOT_DIR,
+) -> Dict[str, object]:
+    directory = Path(snapshot_dir)
+    manifest_path = directory / "manifest.json"
+    if not manifest_path.exists():
+        return {
+            "available": False,
+            "url_count": 0,
+            "refreshed_at": "",
+            "sitemap_count": 0,
+            "failed_sitemaps": 0,
+            "parts": 0,
+        }
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        parts = manifest.get("parts") or []
+        available = bool(parts) and all((directory / str(name)).is_file() for name in parts)
+        return {
+            "available": available,
+            "url_count": int(manifest.get("url_count", 0) or 0),
+            "refreshed_at": str(manifest.get("refreshed_at") or ""),
+            "sitemap_count": int(manifest.get("sitemap_count", 0) or 0),
+            "failed_sitemaps": int(manifest.get("failed_sitemaps", 0) or 0),
+            "parts": len(parts),
+        }
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        return {
+            "available": False,
+            "url_count": 0,
+            "refreshed_at": "",
+            "sitemap_count": 0,
+            "failed_sitemaps": 0,
+            "parts": 0,
+        }
+
+
+def restore_bundled_snapshot(
+    *,
+    db_path: Path | str = DEFAULT_SITEMAP_DB_PATH,
+    snapshot_dir: Path | str = BUNDLED_SNAPSHOT_DIR,
+    force: bool = False,
+) -> Dict[str, object]:
+    target = Path(db_path)
+    directory = Path(snapshot_dir)
+    manifest_path = directory / "manifest.json"
+    if not force:
+        current = sitemap_cache_status(target)
+        if int(current.get("url_count", 0)) > 0:
+            return current
+    if not manifest_path.exists():
+        raise FileNotFoundError("Brak snapshotu sitemap w repozytorium.")
+
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    part_names = manifest.get("parts") or []
+    if not isinstance(part_names, list) or not part_names:
+        raise RuntimeError("Manifest snapshotu sitemap nie zawiera części archiwum.")
+
+    target.parent.mkdir(parents=True, exist_ok=True)
+    stamp = f"{os.getpid()}.{time.time_ns()}"
+    packed_tmp = target.with_suffix(target.suffix + f".{stamp}.snapshot.gz")
+    db_tmp = target.with_suffix(target.suffix + f".{stamp}.snapshot.tmp")
+    packed_hash = hashlib.sha256()
+    db_hash = hashlib.sha256()
+
+    try:
+        with packed_tmp.open("wb") as packed_out:
+            for raw_name in part_names:
+                name = str(raw_name)
+                if Path(name).name != name:
+                    raise RuntimeError("Nieprawidłowa nazwa części snapshotu.")
+                part = directory / name
+                if not part.is_file():
+                    raise FileNotFoundError(f"Brak części snapshotu: {name}")
+                with part.open("rb") as src:
+                    while True:
+                        chunk = src.read(1024 * 1024)
+                        if not chunk:
+                            break
+                        packed_hash.update(chunk)
+                        packed_out.write(chunk)
+
+        expected_packed = str(manifest.get("gzip_sha256") or "")
+        if expected_packed and packed_hash.hexdigest() != expected_packed:
+            raise RuntimeError("Snapshot sitemap ma nieprawidłową sumę kontrolną archiwum.")
+
+        with gzip.open(packed_tmp, "rb") as src, db_tmp.open("wb") as dst:
+            while True:
+                chunk = src.read(1024 * 1024)
+                if not chunk:
+                    break
+                db_hash.update(chunk)
+                dst.write(chunk)
+
+        expected_db = str(manifest.get("sqlite_sha256") or "")
+        if expected_db and db_hash.hexdigest() != expected_db:
+            raise RuntimeError("Snapshot sitemap ma nieprawidłową sumę kontrolną bazy.")
+
+        restored = sitemap_cache_status(db_tmp)
+        if int(restored.get("url_count", 0)) <= 0:
+            raise RuntimeError("Snapshot sitemap nie zawiera indeksowalnych adresów.")
+
+        os.replace(db_tmp, target)
+        return sitemap_cache_status(target)
+    finally:
+        packed_tmp.unlink(missing_ok=True)
+        db_tmp.unlink(missing_ok=True)
+
+
 def ensure_sitemap_cache(
     *,
     index_url: str = BOOKLAND_SITEMAP_INDEX_URL,
@@ -340,6 +453,12 @@ def ensure_sitemap_cache(
         status = sitemap_cache_status(db_path)
         if int(status.get("url_count", 0)) > 0:
             return status
+        try:
+            restored = restore_bundled_snapshot(db_path=db_path)
+            if int(restored.get("url_count", 0)) > 0:
+                return restored
+        except (OSError, RuntimeError, ValueError, TypeError, json.JSONDecodeError, sqlite3.Error):
+            pass
         return refresh_sitemap_cache(index_url=index_url, db_path=db_path)
 
 
