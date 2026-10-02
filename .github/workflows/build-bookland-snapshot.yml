@@ -1,0 +1,50 @@
+name: Build Bookland sitemap snapshot
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/build-bookland-snapshot.yml"
+      - "scripts/build_bookland_snapshot.py"
+      - "sitemap_retrieval.py"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: bookland-sitemap-snapshot
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependency
+        run: python -m pip install --disable-pip-version-check requests
+
+      - name: Build snapshot
+        run: python scripts/build_bookland_snapshot.py
+
+      - name: Commit refreshed snapshot
+        shell: bash
+        run: |
+          if git diff --quiet -- data/bookland_sitemap_snapshot; then
+            echo "Snapshot bez zmian."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data/bookland_sitemap_snapshot
+          git commit -m "Refresh Bookland sitemap snapshot [skip ci]"
+          git push
