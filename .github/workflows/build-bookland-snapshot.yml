@@ -39,7 +39,7 @@ jobs:
       - name: Commit refreshed snapshot
         shell: bash
         run: |
-          if git diff --quiet -- data/bookland_sitemap_snapshot; then
+          if [ -z "$(git status --porcelain -- data/bookland_sitemap_snapshot)" ]; then
             echo "Snapshot bez zmian."
             exit 0
           fi
