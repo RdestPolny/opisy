@@ -1,16 +1,17 @@
 import re
 import unicodedata
+from collections import Counter
 from dataclasses import dataclass, field
 from html import unescape
 
 import nh3
 from html.parser import HTMLParser
-from typing import List, Sequence
+from typing import List, Optional, Sequence
 from urllib.parse import urlsplit, urlunsplit
 
 
 ALLOWED_TAGS = {"p", "h2", "h3", "b", "a"}
-VALIDATOR_API_VERSION = 4
+VALIDATOR_API_VERSION = 5
 
 BOLD_GENERIC_PHRASES = {
     "autor",
@@ -140,6 +141,12 @@ def _normalized_url(value: str) -> str:
     return urlunsplit((parts.scheme.lower(), parts.netloc.lower(), parts.path.rstrip("/") or "/", parts.query, ""))
 
 
+def description_link_snapshot(value: str) -> List[str]:
+    parser = _DescriptionParser()
+    parser.feed(sanitize_html(value))
+    return [href for href in parser.hrefs if href]
+
+
 def _normalized_text(value: str) -> str:
     text = unicodedata.normalize("NFKD", (value or "").replace("ł", "l").replace("Ł", "L"))
     text = "".join(char for char in text if not unicodedata.combining(char))
@@ -179,6 +186,8 @@ def analyze_description_html(
     require_full_structure: bool = True,
     required_link: str = "",
     required_link_paragraph: int = 0,
+    allowed_links: Optional[Sequence[str]] = None,
+    preserved_links: Sequence[str] = (),
     required_contributors: Sequence[str] = (),
     required_contributor_role: str = "",
     strict_bold_quality: bool = False,
@@ -197,8 +206,40 @@ def analyze_description_html(
             raise ValueError("Link kategorii musi być poprawnym adresem http:// lub https://")
     if not isinstance(required_link_paragraph, int) or required_link_paragraph < 0:
         raise ValueError("Numer akapitu linku musi być nieujemną liczbą całkowitą")
+    if allowed_links is not None:
+        if (not isinstance(allowed_links, (list, tuple)) or len(allowed_links) > 2
+                or any(not isinstance(url, str) or not _safe_href("a", "href", url) for url in allowed_links)):
+            raise ValueError("Dozwolone cele muszą być listą maksymalnie dwóch adresów HTTP(S)")
+        if (not isinstance(preserved_links, (list, tuple))
+                or any(not isinstance(url, str) or not _safe_href("a", "href", url) for url in preserved_links)):
+            raise ValueError("Zachowane cele muszą być listą adresów HTTP(S)")
     cleaned = sanitize_html(value)
     report = ValidationReport(clean_html=cleaned)
+    if allowed_links is not None:
+        allowed = {_normalized_url(url): url for url in allowed_links}
+        limits = Counter(_normalized_url(url) for url in preserved_links)
+        for url in allowed:
+            limits[url] = max(limits[url], 1)
+        seen = Counter()
+        removed = []
+
+        def selected_href(tag, attribute, url):
+            normalized = _normalized_url(url)
+            if seen[normalized] >= limits[normalized]:
+                removed.append(url)
+                return None
+            seen[normalized] += 1
+            return allowed.get(normalized, url)
+
+        cleaned = nh3.clean(cleaned, tags=ALLOWED_TAGS, attributes={"a": {"href"}},
+                            attribute_filter=selected_href, url_schemes={"http", "https"}, link_rel=None)
+        # Strip only anchors without an approved href, preserving their text.
+        cleaned = re.sub(r"<a>(.*?)</a>", r"\1", cleaned, flags=re.DOTALL)
+        report.clean_html = cleaned
+        if removed:
+            report.warn("LINK_TARGET_REMOVED", "Usunięto niezatwierdzone lub powtórzone linki; zachowano tekst.")
+        if set(allowed) - set(seen):
+            report.warn("LINK_MISSING", "Pominięto część proponowanych linków. Sprawdź, czy pasują do treści opisu.")
     plain_text = re.sub(r"\s+", " ", unescape(re.sub(r"<[^>]+>", " ", cleaned))).strip()
     if not plain_text:
         report.errors.append("opis jest pusty po oczyszczeniu HTML")
@@ -262,6 +303,8 @@ def description_validation_context(result: dict) -> dict:
         "require_full_structure": not link_only,
         "required_link": result.get("required_link", ""),
         "required_link_paragraph": 0 if link_only else int(result.get("required_link_paragraph", 0) or 0),
+        "allowed_links": result.get("allowed_links"),
+        "preserved_links": result.get("preserved_links") or (),
         "required_contributors": () if link_only else (result.get("required_contributors") or ()),
         "required_contributor_role": "" if link_only else result.get("required_contributor_role", ""),
     }
