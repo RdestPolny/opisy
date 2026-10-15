@@ -92,6 +92,7 @@ class InternalLinkingTests(unittest.TestCase):
                 result, post = self.select(rows, values)
                 self.assertEqual(len(result["links"]), count)
                 self.assertEqual(sum(c["selected"] for c in result["candidates"]), count)
+                self.assertEqual(result["thresholds"], {"score": 2.5, "noul": 0.8})
                 self.assertNotIn("secret", json.dumps(result))
                 post.assert_called_once()
                 self.assertEqual(post.call_args.kwargs["timeout"], 15)

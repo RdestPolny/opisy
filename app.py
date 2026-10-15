@@ -45,7 +45,7 @@ from description_output import (
     current_description_value, analyze_description_html, description_link_snapshot,
 )
 from description_generation import generate_description_result
-from internal_linking import TRUSTED_ORIGINS, select_internal_links, validate_targets, verify_target_url
+from internal_linking import SCORE_THRESHOLD, TRUSTED_ORIGINS, select_internal_links, validate_targets, verify_target_url
 from sitemap_retrieval import (
     BOOKLAND_SITEMAP_INDEX_URL,
     DEFAULT_SITEMAP_DB_PATH,
@@ -5243,12 +5243,34 @@ def render_result_preview(result: Dict) -> None:
                 for warning in report["warnings"]:
                     st.warning(warning)
                 if report["candidates"]:
+                    # Starsze raporty nie zapisywały progów; wtedy pokazujemy bieżące ustawienia.
+                    thresholds = report.get("thresholds") or {}
+                    score_min = thresholds.get("score", SCORE_THRESHOLD)
+                    noul_min = thresholds.get("noul", st.session_state.get("link_threshold", 0.8))
+                    st.caption(
+                        f"Link jest wybierany, gdy trafność ≥ {score_min:.2f} (skala 0–3) "
+                        f"i noul ≥ {noul_min:.2f} (skala 0–1, suwak „Minimalne potwierdzenie dopasowania”)."
+                    )
                     frame = pd.DataFrame(report["candidates"])
-                    preferred = ["selected", "kind", "origin", "label", "score", "noul", "relation",
-                                 "url", "reason", "details"]
+                    preferred = ["selected", "reason", "kind", "origin", "label", "score", "noul", "relation",
+                                 "url", "details"]
                     ordered = [c for c in preferred if c in frame.columns]
                     ordered += [c for c in frame.columns if c not in ordered and c != "source_constraints"]
-                    st.dataframe(frame[ordered], hide_index=True)
+                    st.dataframe(
+                        frame[ordered],
+                        hide_index=True,
+                        column_config={
+                            "reason": st.column_config.TextColumn("Powód odrzucenia"),
+                            "score": st.column_config.NumberColumn(
+                                f"Trafność (0–3, próg {score_min:.2f})", format="%.2f",
+                                help="Ocena Jev, jak przydatny jest cel dla czytelnika opisu.",
+                            ),
+                            "noul": st.column_config.NumberColumn(
+                                f"Noul (0–1, próg {noul_min:.2f})", format="%.2f",
+                                help="Prawdopodobieństwo, że fakty potwierdzają powiązanie; próg z suwaka.",
+                            ),
+                        },
+                    )
                 if not report["links"]:
                     st.caption("Nie wybrano trafnego, potwierdzonego celu linkowania.")
         editor_seed = result.setdefault(

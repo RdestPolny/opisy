@@ -23,6 +23,8 @@ HOSTS = {"bookland.com.pl", "www.bookland.com.pl"}
 TRUSTED_ORIGINS = {"sitemap", "luigisbox"}
 RELATED_ORIGINS = {"luigisbox", "firecrawl"}
 MAX_JEV_CANDIDATES = 8
+# Minimalna trafność Jev (skala 0–3); próg noul (0–1) ustawia operator suwakiem.
+SCORE_THRESHOLD = 2.5
 
 
 def _text(value):
@@ -155,7 +157,8 @@ def select_internal_links(product, config) -> dict:
     threshold = _number(config.get("threshold", 0.8), 1)
     if threshold < 0.5:
         raise ValueError("Próg Noul musi być w zakresie 0.5–1.")
-    result = {"links": [], "warnings": [], "candidates": []}
+    result = {"links": [], "warnings": [], "candidates": [],
+              "thresholds": {"score": SCORE_THRESHOLD, "noul": threshold}}
     registry_candidates = []
     for target in targets:
         reason = _rejection(product, target)
@@ -306,12 +309,12 @@ def select_internal_links(product, config) -> dict:
         result["warnings"].append("Nie udało się zweryfikować linków w TypeSafe: opis powstanie bez linków.")
         return result
     for candidate, (score, noul) in zip(shortlisted, scores):
-        candidate.update(score=score, noul=noul, reason="Poniżej progu trafności lub wsparcia faktów." if score < 2.5 or noul < threshold else "")
+        candidate.update(score=score, noul=noul, reason="Poniżej progu trafności lub wsparcia faktów." if score < SCORE_THRESHOLD or noul < threshold else "")
     winners = []
     for kind in ("category", "product"):
         accepted = [
             c for c in shortlisted
-            if c["kind"] == kind and c["score"] >= 2.5 and c["noul"] >= threshold
+            if c["kind"] == kind and c["score"] >= SCORE_THRESHOLD and c["noul"] >= threshold
         ]
         if accepted:
             # Remis rozstrzygamy na korzyść głębszej kategorii / mocniejszego powiązania.
@@ -320,7 +323,7 @@ def select_internal_links(product, config) -> dict:
     generic = sorted(
         [
             c for c in shortlisted
-            if c["kind"] == "sitemap" and c["score"] >= 2.5 and c["noul"] >= threshold
+            if c["kind"] == "sitemap" and c["score"] >= SCORE_THRESHOLD and c["noul"] >= threshold
         ],
         key=lambda c: (c["score"], c["noul"], c.get("retrieval_score", 0)),
         reverse=True,

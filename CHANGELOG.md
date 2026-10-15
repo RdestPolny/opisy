@@ -1,3 +1,9 @@
+# 4.12.1
+
+- Tabela „Dobór linków” pokazuje skale i progi: trafność 0–3 (próg 2,5) oraz noul 0–1 (próg z suwaka).
+  Progi użyte przy wyborze są zapisywane w raporcie (`thresholds`).
+- Kolumna z powodem odrzucenia jest zaraz po „selected”, więc od razu widać, czemu kandydat odpadł.
+
 # 4.12.0
 
 Linkowanie kontekstowe korzysta z rekomendacji spod karty produktu zamiast dopasowania slugów z sitemap.
