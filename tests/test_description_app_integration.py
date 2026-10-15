@@ -12,6 +12,7 @@ from unittest.mock import Mock
 from google.genai import types
 from description_generation import generate_description_result
 from description_output import analyze_description_html, description_link_snapshot, deliver_description_result, sanitize_html
+from internal_linking import TRUSTED_ORIGINS
 from test_description_output import LINK, full_description
 
 
@@ -49,6 +50,7 @@ class DescriptionAppIntegrationTests(unittest.TestCase):
             "description_link_snapshot": description_link_snapshot,
             "select_internal_links": Mock(return_value={"links": [], "warnings": [], "candidates": []}),
             "check_internal_link_url": Mock(),
+            "TRUSTED_ORIGINS": TRUSTED_ORIGINS,
             "akeneo_get_option_label": lambda code, value, *args: {"sp": "szkoła podstawowa", "ang": "język angielski"}.get(value, value),
         }
         exec(compile(module, str(Path(__file__).parents[1] / "app.py"), "exec"), self.app)
@@ -154,6 +156,22 @@ class DescriptionAppIntegrationTests(unittest.TestCase):
         self.assertNotIn("example.com", send.call_args.args[1])
         self.assertIn("Obcy link", send.call_args.args[1])
         self.assertIn("LINK_TARGET_REMOVED", {issue["code"] for issue in report.warnings})
+
+    def test_luigis_targets_skip_live_check_and_pass_relation_to_prompt(self):
+        targets = [{"url": "https://bookland.com.pl/podreczniki-ogolne/szkolne/szkola-podstawowa-klasa-5/matematyka",
+                    "label": "Podręczniki szkolne > Szkolne > Szkoła Podstawowa Klasa 5 > Matematyka",
+                    "kind": "category", "origin": "luigisbox"},
+                   {"url": "https://bookland.com.pl/wrog", "label": "Wróg", "kind": "product", "origin": "luigisbox",
+                    "relation": "ten sam autor: Łukasz Orbitowski"}]
+        self.app["select_internal_links"].return_value = {"links": targets, "warnings": [], "candidates": []}
+        self.sdk.return_value.text = '<p>Opis z <a href="https://bookland.com.pl/wrog">powieścią Wróg</a>.</p>'
+        result = self.app["process_product_from_akeneo"]("SKU1", "fake", "Bookland", "pl_PL",
+                    internal_link={"mode": "automatic"}, use_research=False)
+        self.app["check_internal_link_url"].assert_not_called()
+        self.assertEqual(result["allowed_links"], [target["url"] for target in targets])
+        prompt = self.sdk.call_args.kwargs["config"].system_instruction
+        self.assertIn("ten sam autor: Łukasz Orbitowski", prompt)
+        self.assertIn('"kind": "product"', prompt)
 
     def test_invalid_storefront_target_is_skipped_without_losing_description(self):
         target = {"url": LINK, "label": "Kryminały", "kind": "category"}

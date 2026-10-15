@@ -564,3 +564,28 @@ def search_sitemap_candidates(
         ))
     ranked.sort(key=lambda item: (-item[0], item[1], item[2]["url"]))
     return [item[2] for item in ranked[:limit]]
+
+
+def find_url_by_title(
+    title: str,
+    *,
+    db_path: Path | str = DEFAULT_SITEMAP_DB_PATH,
+) -> str:
+    """Szuka adresu karty produktu, którego slug odpowiada tytułowi (bez ponownego pobierania sitemap)."""
+    wanted = _normalize_text(title or "")
+    terms = _tokens(title or "")[:10]
+    path = Path(db_path)
+    if not wanted or not terms or not path.exists():
+        return ""
+    try:
+        with _connect(path) as conn:
+            rows = conn.execute(
+                "SELECT url, label FROM sitemap_fts WHERE sitemap_fts MATCH ? ORDER BY bm25(sitemap_fts) LIMIT 30",
+                (" AND ".join(f'"{term}"' for term in terms),),
+            ).fetchall()
+    except sqlite3.Error:
+        return ""
+    for row in rows:
+        if _normalize_text(str(row["label"] or "")) == wanted:
+            return str(row["url"])
+    return ""

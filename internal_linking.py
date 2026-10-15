@@ -1,4 +1,5 @@
 """Registered Bookland targets, strict source matching, and one bounded Jev judgment."""
+import hashlib
 import math
 import re
 import unicodedata
@@ -7,14 +8,21 @@ from urllib.parse import unquote, urljoin, urlsplit
 
 import requests
 
+from related_products import fetch_related_products, product_item_ids, rank_related_products
 from sitemap_retrieval import (
     BOOKLAND_SITEMAP_INDEX_URL,
     DEFAULT_SITEMAP_DB_PATH,
+    find_url_by_title,
     search_sitemap_candidates,
 )
 
 FIELDS = ("school", "grade", "subject", "series", "edition")
 HOSTS = {"bookland.com.pl", "www.bookland.com.pl"}
+# Źródła, których URL-e pochodzą z indeksu sklepu (Luigi's Box / sitemap), więc nie
+# wymagają ponownego live-checku per SKU.
+TRUSTED_ORIGINS = {"sitemap", "luigisbox"}
+RELATED_ORIGINS = {"luigisbox", "firecrawl"}
+MAX_JEV_CANDIDATES = 8
 
 
 def _text(value):
@@ -164,8 +172,14 @@ def select_internal_links(product, config) -> dict:
         })
     result["candidates"].extend(registry_candidates)
 
+    related_candidates = []
+    if config.get("use_related"):
+        related_candidates = _related_candidates(product, config, result)
+        result["candidates"].extend(related_candidates)
+
     sitemap_candidates = []
-    if config.get("use_sitemap"):
+    # Sitemap (dopasowanie po slugach) jest tylko zapasem, gdy rekomendacje spod karty nic nie dały.
+    if config.get("use_sitemap") and not related_candidates:
         sitemap_db_path = config.get("sitemap_db_path") or DEFAULT_SITEMAP_DB_PATH
         sitemap_index_url = config.get("sitemap_index_url") or BOOKLAND_SITEMAP_INDEX_URL
         try:
@@ -197,8 +211,19 @@ def select_internal_links(product, config) -> dict:
 
     eligible_registry = [candidate for candidate in registry_candidates if candidate["eligible"]]
     eligible_sitemap = [candidate for candidate in sitemap_candidates if candidate["eligible"]]
+    eligible_related = [candidate for candidate in related_candidates if candidate["eligible"]]
     shortlisted = []
-    if eligible_sitemap:
+    if eligible_related:
+        # Ręczny katalog (potwierdzony przez operatora) dostaje najwyżej po jednym miejscu na typ,
+        # potem 2 kategorie ze ścieżki produktu, a resztę budżetu produkty spod karty.
+        for kind in ("category", "product"):
+            shortlisted.extend([c for c in eligible_registry if c["kind"] == kind][:1])
+        related_categories = [c for c in eligible_related if c["kind"] == "category"]
+        related_products = [c for c in eligible_related if c["kind"] == "product"]
+        shortlisted.extend(related_categories[:2])
+        shortlisted.extend(related_products[:MAX_JEV_CANDIDATES - len(shortlisted)])
+        shortlisted.extend([c for c in related_categories[2:]][:MAX_JEV_CANDIDATES - len(shortlisted)])
+    elif eligible_sitemap:
         # Curated registry keeps half the budget, while the cached sitemap retrieval
         # always gets room in the single bounded Jev request.
         for kind in ("category", "product"):
@@ -210,7 +235,7 @@ def select_internal_links(product, config) -> dict:
             shortlisted.extend([c for c in eligible_registry if c["kind"] == kind][:4])
         shortlisted.extend([c for c in eligible_registry if c not in shortlisted][:8 - len(shortlisted)])
 
-    eligible = eligible_registry + eligible_sitemap
+    eligible = eligible_registry + eligible_related + eligible_sitemap
     for candidate in eligible:
         if candidate not in shortlisted:
             candidate["reason"] = "Poza limitem ośmiu kandydatów."
@@ -225,11 +250,15 @@ def select_internal_links(product, config) -> dict:
     categories = product.get("categories")
     state["source"]["categories"] = list(categories) if isinstance(categories, (list, tuple)) else []
     state["source"]["description"] = _text(product.get("description"))[:6000]
+    if result.get("related_source"):
+        state["source"]["bookland_facts"] = result["related_source"].get("facts", "")
     state["candidates"] = [
         {
             **{key: c[key] for key in ("kind", "code", "label", *FIELDS, "source_skus")},
             "origin": c.get("origin", "registry"),
             "path": c.get("path", ""),
+            **({"details": c["details"]} if c.get("details") else {}),
+            **({"relation_to_source": c["relation"]} if c.get("relation") else {}),
         }
         for c in shortlisted
     ]
@@ -248,6 +277,10 @@ def select_internal_links(product, config) -> dict:
             support = {"type": "noul", "instructions": f"Does the category name in {pointer} accurately describe the subject and audience of the product in `source`? Judge only this semantic relationship.",
                        "criteria": {"true": "The explicit source description and attributes support the subject and audience named by the category.",
                                     "false": "The category describes a different subject or audience, or the source lacks evidence for the named subject or audience."}}
+        elif candidate["kind"] == "product" and candidate.get("origin") in RELATED_ORIGINS:
+            support = {"type": "noul", "instructions": f"Bookland's own recommender shows the product named by {pointer} under the product card of `source`. Using `source` and `candidates[{index}].details`/`relation_to_source`, would a link to it be a natural, useful suggestion for a reader of the `source` description: companion material for the same subject, level or series, another book by the same author, or a close match in the same narrow genre? Another edition or format of the very same title is not useful. Judge only this relationship.",
+                       "criteria": {"true": "The supplied facts show a specific, reader-useful relationship (same series/course, same subject and level, same author, or the same narrow genre) and the target is a different title.",
+                                    "false": "The relationship is only generic bestseller/popularity overlap, a different subject, level or audience, another edition of the same title, or the facts are insufficient."}}
         elif candidate["kind"] == "product":
             support = {"type": "noul", "instructions": f"Does {pointer} describe relevant companion material for the product in `source`, consistent with its explicit subject and course/series facts? Judge only this semantic relationship.",
                        "criteria": {"true": "The supplied source and target facts support relevant companion material for the same subject and course or series.",
@@ -281,7 +314,8 @@ def select_internal_links(product, config) -> dict:
             if c["kind"] == kind and c["score"] >= 2.5 and c["noul"] >= threshold
         ]
         if accepted:
-            winners.append(max(accepted, key=lambda c: (c["score"], c["noul"])))
+            # Remis rozstrzygamy na korzyść głębszej kategorii / mocniejszego powiązania.
+            winners.append(max(accepted, key=lambda c: (c["score"], c["noul"], c.get("rank_hint", 0))))
 
     generic = sorted(
         [
@@ -298,7 +332,111 @@ def select_internal_links(product, config) -> dict:
 
     for winner in winners[:2]:
         winner["selected"] = True
-        result["links"].append({
-            key: winner[key] for key in ("kind", "code", "label", "url", "category", "origin")
-        })
+        link = {key: winner[key] for key in ("kind", "code", "label", "url", "category", "origin")}
+        if winner.get("relation"):
+            # Do promptu Gemini trafiają dwa najmocniejsze fakty (seria/autor/przedmiot).
+            link["relation"] = "; ".join(winner["relation"].split("; ")[:2])
+        result["links"].append(link)
     return result
+
+
+def _facts_text(item: dict) -> str:
+    parts = []
+    if item.get("categories"):
+        parts.append("kategorie: " + " | ".join(item["categories"][:3]))
+    for key, label in (("subject", "przedmiot"), ("level", "poziom"), ("series", "seria"),
+                       ("publisher", "wydawnictwo"), ("binding", "oprawa"), ("publication_year", "rok")):
+        if item.get(key):
+            parts.append(f"{label}: {item[key]}")
+    if item.get("authors"):
+        parts.append("autor: " + ", ".join(item["authors"][:3]))
+    if "available" in item and not item["available"]:
+        parts.append("chwilowo niedostępny")
+    return "; ".join(parts)[:600]
+
+
+def _related_candidates(product: dict, config: dict, result: dict) -> list[dict]:
+    """Kandydaci z rekomendacji spod karty produktu (Luigi's Box, zapasowo Firecrawl)."""
+    db_path = config.get("sitemap_db_path") or DEFAULT_SITEMAP_DB_PATH
+    firecrawl_key = _text(config.get("firecrawl_api_key"))
+    fetcher = config.get("related_fetcher") or fetch_related_products
+    try:
+        related = fetcher(
+            product,
+            size=int(config.get("related_size", 16)),
+            firecrawl_api_key=firecrawl_key,
+            product_url=_safe_title_url(product.get("title"), db_path) if firecrawl_key else "",
+        )
+    except Exception:  # Źródło pomocnicze nie może zatrzymać generowania opisu.
+        result["warnings"].append("Nie udało się pobrać produktów powiązanych spod karty produktu.")
+        return []
+    result["warnings"].extend(related.get("warnings") or [])
+    provider = related.get("provider") or "luigisbox"
+    source = related.get("source") or {}
+    if source:
+        result["related_source"] = {
+            "provider": provider, "title": source.get("title", ""), "url": source.get("url", ""),
+            "facts": _facts_text(source),
+        }
+
+    candidates = []
+    for rank, category in enumerate((related.get("categories") or [])[:4]):
+        try:
+            _validate_url(category["url"])
+        except (ValueError, KeyError):
+            continue
+        candidates.append(_related_candidate(
+            kind="category", origin=provider, url=category["url"], label=category["label"],
+            details=f"Kategoria Bookland, w której jest produkt źródłowy: {category['label']}",
+            relation="", rank_hint=category.get("depth", 0) - (5 if category.get("publisher") else 0) - rank * 0.01,
+        ))
+
+    ranked = rank_related_products(
+        source, related.get("products") or [], exclude_ids=product_item_ids(product),
+        source_title=_text(product.get("title")), limit=int(config.get("related_product_limit", 6)),
+    )
+    for rank, item in enumerate(ranked):
+        url = item["url"]
+        if provider == "firecrawl":
+            # Linki z karuzeli bywają starymi adresami z kategorią; preferuj adres kanoniczny z sitemap.
+            url = _safe_title_url(item["title"], db_path) or url
+        try:
+            _validate_url(url)
+        except ValueError:
+            continue
+        relation = "; ".join(item.get("relation") or [])
+        candidates.append(_related_candidate(
+            kind="product", origin=provider, url=url, label=item["title"],
+            details=_facts_text(item), relation=relation, rank_hint=len(item.get("relation") or []) - rank * 0.01,
+            code=item.get("id") or "",
+        ))
+    return candidates
+
+
+def _safe_title_url(title, db_path) -> str:
+    try:
+        return find_url_by_title(_text(title), db_path=db_path)
+    except Exception:
+        return ""
+
+
+def _related_candidate(*, kind, origin, url, label, details, relation, rank_hint, code="") -> dict:
+    return {
+        "kind": kind,
+        "code": code or f"{kind}-" + hashlib.sha1(url.encode("utf-8")).hexdigest()[:12],
+        "label": label,
+        "url": url,
+        **{field: "" for field in FIELDS},
+        "source_skus": "",
+        "origin": origin,
+        "category": label,
+        "details": details,
+        "relation": relation,
+        "rank_hint": rank_hint,
+        "score": None,
+        "noul": None,
+        "eligible": True,
+        "selected": False,
+        "reason": "",
+        "source_constraints": {},
+    }

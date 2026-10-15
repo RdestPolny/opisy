@@ -17,6 +17,33 @@ w naturalne zdania. Brak dobrego celu oznacza brak nowego linku.
 Tryb ręczny nadal działa. W trybie **Automatyczne (Jev)** źródło sitemap Booklandu jest
 domyślnie włączone. Nie dodano nowych zależności.
 
+## Rekomendacje spod karty produktu (domyślne źródło kandydatów)
+
+Od wersji 4.12 kandydaci na linki pochodzą przede wszystkim z tego, co Bookland sam poleca pod kartą
+produktu (karuzela „Inni kupili również”, Luigi's Box, rekomender `item_detail_alternatives`).
+
+1. Produkt jest wyszukiwany w Luigi's Box po SKU/EAN (`f[]=lb_id:<SKU>`), a gdy to się nie uda — po niemal
+   identycznym tytule.
+2. Z jego atrybutów bierzemy ścieżkę kategorii (`category` + `category_urls`) → kandydaci-kategorie.
+3. `POST /v1/recommend` zwraca 16 produktów spod karty wraz z atrybutami (seria, przedmiot, poziom, autor,
+   kategorie). Ranking deterministyczny wybiera 6: premiuje tę samą serię i autora, pomija sam produkt,
+   produkty ukryte (`widoczne_bookland=0`, `use_in_crosslinking=0`) i inne wydania tego samego tytułu.
+4. Jev dostaje maksymalnie 8 kandydatów (1 kategoria + 1 produkt z ręcznego katalogu, jeśli są, potem
+   2 kategorie i produkty spod karty) i wybiera najwyżej jedną kategorię i jeden produkt.
+5. Gemini dostaje przy produkcie pole „powiazanie” (np. „ta sama seria: Matematyka z plusem”) i może
+   opisać relację tylko na jego podstawie.
+
+API Luigi's Box jest publiczne (to samo, którego używa przeglądarka klienta), nie wymaga klucza i odpowiada
+w ~100–300 ms. Adres produktu jest budowany z `url_key` (atrybut `url`), bo `web_url` bywa starym adresem
+z kategorią, który przekierowuje.
+
+**Firecrawl (opcjonalnie).** Gdy Luigi's Box nie zwróci rekomendacji (np. zmiana API, blokada z hostingu),
+a w sekretach jest `FIRECRAWL_API_KEY`, aplikacja renderuje kartę produktu przez Firecrawl
+(`/v2/scrape`, `rawHtml`, przewinięcie strony) i odczytuje z HTML karuzelę rekomendacji oraz breadcrumbs.
+Adres karty jest wtedy szukany w snapshocie sitemap po slugu tytułu. Linki z Firecrawl przechodzą live-check.
+
+**Sitemap** jest używana już tylko wtedy, gdy rekomendacje spod karty nie dały żadnego kandydata.
+
 ## Sitemap Booklandu i wydajność
 
 Stałym źródłem retrieval jest `https://bookland.com.pl/pub/sitemap_index.xml`. Aplikacja nie

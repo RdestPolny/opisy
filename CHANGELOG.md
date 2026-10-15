@@ -1,3 +1,21 @@
+# 4.12.0
+
+Linkowanie kontekstowe korzysta z rekomendacji spod karty produktu zamiast dopasowania slugów z sitemap.
+
+- Nowy moduł `related_products.py`: dla SKU (EAN) pobiera z publicznego API Luigi's Box te same produkty,
+  które Bookland pokazuje w karuzeli „Inni kupili również” (`item_detail_alternatives`, 16 pozycji),
+  razem z atrybutami: kategorie, przedmiot, poziom nauczania, seria, autor.
+- Kategorie-kandydaci pochodzą ze ścieżki kategorii samego produktu (np. „Podręczniki szkolne > Szkolne >
+  Szkoła Podstawowa Klasa 5 > Matematyka”), z pominięciem zbyt ogólnych poziomów.
+- Wstępny ranking przed Jev premiuje tę samą serię i autora, odrzuca self-link oraz inne wydania tego samego tytułu.
+- Jev dostaje opis każdego kandydata (`details`) i twarde powiązanie ze źródłem (`relation_to_source`),
+  a Gemini dostaje pole „powiazanie”, żeby nie dopowiadał relacji między książkami.
+- Adres produktu bierzemy z `url_key` (atrybut `url`), nie z `web_url`, który bywa starym adresem z przekierowaniem.
+  URL-e z Luigi's Box nie są ponownie odpytywane per SKU.
+- Zapas: gdy Luigi's Box nic nie zwróci, a w sekretach jest `FIRECRAWL_API_KEY`, karta produktu jest renderowana
+  przez Firecrawl i parsowana (karuzela + breadcrumbs). Sitemap jest już tylko ostatnim zapasem.
+- UI: nowy przełącznik „Dobieraj cele z rekomendacji pod kartą produktu”, czytelniejsza tabela „Dobór linków”.
+
 # 4.11.0
 
 Automatyczne linkowanie Jev może stale korzystać z sitemap Booklandu bez skanowania ich dla każdego SKU.
