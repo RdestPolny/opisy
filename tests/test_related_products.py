@@ -202,7 +202,7 @@ class JevIntegrationTests(unittest.TestCase):
         with patch("internal_linking.requests.post") as post:
             post.return_value.json.return_value = typed_response(values)
             result = select_internal_links(product, {
-                "targets": [], "api_key": "secret", "use_related": True,
+                "api_key": "secret",
                 "related_fetcher": fetcher, **config,
             })
         return result, post
@@ -242,7 +242,7 @@ class JevIntegrationTests(unittest.TestCase):
     def test_no_related_candidates_means_no_sitemap_fallback(self):
         with patch("internal_linking.requests.post") as post:
             result = select_internal_links({"identifier": "000", "title": "Nieznany"}, {
-                "targets": [], "api_key": "secret", "use_related": True,
+                "api_key": "secret",
                 "related_fetcher": lambda product, **kwargs: {"source": None, "products": [], "categories": [],
                                                               "warnings": ["brak"], "provider": "luigisbox"},
             })
@@ -257,8 +257,8 @@ class JevIntegrationTests(unittest.TestCase):
 
         with patch("internal_linking.requests.post") as post:
             post.return_value.json.return_value = typed_response([])
-            result = select_internal_links({"identifier": "1"}, {"targets": [], "api_key": "secret",
-                                                                  "use_related": True, "related_fetcher": boom})
+            result = select_internal_links({"identifier": "1"}, {"api_key": "secret",
+                                                                  "related_fetcher": boom})
         self.assertEqual(result["links"], [])
         self.assertNotIn("secret", json.dumps(result))
 

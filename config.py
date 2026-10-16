@@ -6,7 +6,7 @@ from pathlib import Path
 import streamlit as st
 
 
-APP_VERSION = "4.14.0"
+APP_VERSION = "4.15.0"
 APP_NAME = "Generator opisów i metatagów produktów"
 DESCRIPTION_PROMPT_VERSION = "description-v4.10-contextual-links"
 PROMPT_VERSION = "meta-v4.9.0-contributors-description-quality-akeneo-write-2026-09"
@@ -38,7 +38,6 @@ DB_PATH = Path(".streamlit/product_workflow.sqlite3")
 BATCH_DIR = Path(".streamlit/gemini_batches")
 IMPORT_REPORT_DIR = Path(".streamlit/import_reports")
 INTERACTIVE_CHECKPOINT_DIR = Path(".streamlit/interactive_checkpoints")
-LINK_TARGETS_PATH = Path(".streamlit/internal_link_targets.json")
 LINK_FIELDS = {
     "school": ["school_type", "typ_szkoly", "szkola"],
     "grade": ["grade", "klasa"],

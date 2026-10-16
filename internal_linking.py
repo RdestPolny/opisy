@@ -1,4 +1,4 @@
-"""Registered Bookland targets, strict source matching, and one bounded Jev judgment."""
+"""Linki wewnętrzne z rekomendacji spod karty produktu Bookland, oceniane jednym requestem Jev."""
 import hashlib
 import math
 import re
@@ -16,14 +16,12 @@ from related_products import (
     title_slug_url,
 )
 
+# Fakty o produkcie źródłowym z Akeneo przekazywane Jev.
 FIELDS = ("school", "grade", "subject", "series", "edition")
 HOSTS = {"bookland.com.pl", "www.bookland.com.pl"}
 # Źródło, którego URL-e pochodzą z indeksu sklepu (Luigi's Box), więc nie
 # wymagają ponownego live-checku per SKU.
 TRUSTED_ORIGINS = {"luigisbox"}
-RELATED_ORIGINS = {"luigisbox", "firecrawl"}
-# Limit dotyczy tylko ręcznego katalogu; kandydaci spod karty produktu trafiają do Jev wszyscy.
-MAX_REGISTRY_CANDIDATES = 8
 JEV_MODEL = "jev-1.13.0"
 JEV_TIMEOUT = 30
 # Minimalna trafność Jev (skala 0–3); próg noul (0–1) ustawia operator suwakiem.
@@ -32,10 +30,6 @@ SCORE_THRESHOLD = 2.5
 
 def _text(value):
     return value.strip() if isinstance(value, str) else ""
-
-
-def _normalized(value):
-    return " ".join(unicodedata.normalize("NFC", _text(value)).casefold().split())
 
 
 def _validate_url(url):
@@ -54,33 +48,6 @@ def _validate_url(url):
             raise ValueError
     except (ValueError, TypeError):
         raise ValueError("Wymagany kanoniczny adres HTTP(S) w domenie bookland.com.pl, bez parametrów i przekierowań.") from None
-
-
-def validate_targets(rows) -> list[dict]:
-    """Validate the entire registry before any model or website request."""
-    if not isinstance(rows, (list, tuple)):
-        raise ValueError("Rejestr linków musi być listą wierszy.")
-    targets, identities, urls = [], set(), set()
-    for index, row in enumerate(rows):
-        if not isinstance(row, dict):
-            raise ValueError(f"Wiersz {index + 1}: wymagany obiekt.")
-        if any(row.get(key) is not None and not isinstance(row[key], str) for key in ("kind", "code", "label", "url", *FIELDS, "source_skus")):
-            raise ValueError(f"Wiersz {index + 1}: pola rejestru muszą być tekstem.")
-        target = {key: _text(row.get(key)) for key in ("code", "label", "url", *FIELDS, "source_skus")}
-        target["kind"] = _text(row.get("kind")) or "category"
-        if target["kind"] not in {"category", "product"} or not all(target[key] for key in ("code", "label", "url")):
-            raise ValueError(f"Wiersz {index + 1}: wymagane kind category/product, code, label i url.")
-        # URL whitespace is rejected, not silently repaired at the trust boundary.
-        if row.get("url") != target["url"]:
-            raise ValueError(f"Wiersz {index + 1}: URL zawiera białe znaki.")
-        _validate_url(target["url"])
-        identity = (target["kind"], target["code"])
-        if identity in identities or target["url"].rstrip("/") in urls:
-            raise ValueError(f"Wiersz {index + 1}: powtórzony kod lub URL.")
-        identities.add(identity)
-        urls.add(target["url"].rstrip("/"))
-        targets.append(target)
-    return targets
 
 
 class _HeadMetadata(HTMLParser):
@@ -105,7 +72,7 @@ class _HeadMetadata(HTMLParser):
 
 
 def verify_target_url(url, *, session=None):
-    """Check the registered canonical URL without following a redirect."""
+    """Sprawdza adres spoza indeksu sklepu (np. z Firecrawl) bez podążania za przekierowaniem."""
     _validate_url(url)
     try:
         response = (session or requests).get(url, timeout=10, allow_redirects=False)
@@ -124,26 +91,7 @@ def verify_target_url(url, *, session=None):
         actual = urljoin(url, canonical)
         _validate_url(actual)
         if not canonical or actual.rstrip("/") != url.rstrip("/"):
-            raise ValueError("Canonical strony wskazuje inny adres; popraw URL w rejestrze.")
-
-
-def _rejection(product, target):
-    sku = _text(product.get("identifier")) or _text(product.get("sku"))
-    if target["kind"] == "category":
-        categories = product.get("categories")
-        if not isinstance(categories, (list, tuple)) or target["code"] not in categories:
-            return "Brak dokładnej kategorii w danych źródłowych."
-    else:
-        if target["code"] == sku:
-            return "Link do tego samego SKU."
-        if not sku or sku not in [part.strip() for part in target["source_skus"].split("|")]:
-            return "Brak potwierdzonego mapowania source_skus."
-        if not target["edition"] or not _text(product.get("edition")):
-            return "Brak wydania po obu stronach powiązania."
-    for field in FIELDS:
-        if target[field] and _normalized(product.get(field)) != _normalized(target[field]):
-            return f"Brak zgodności lub danych: {field}."
-    return ""
+            raise ValueError("Canonical strony wskazuje inny adres.")
 
 
 def _number(value, maximum):
@@ -153,54 +101,18 @@ def _number(value, maximum):
 
 
 def select_internal_links(product, config) -> dict:
-    """Return at most one category and one confirmed compatible product."""
+    """Najwyżej jedna kategoria i jeden produkt spośród rekomendacji spod karty produktu."""
     if not isinstance(product, dict) or not isinstance(config, dict):
         raise ValueError("Produkt i konfiguracja linków muszą być obiektami.")
-    targets = validate_targets(config.get("targets", []))
     threshold = _number(config.get("threshold", 0.8), 1)
     if threshold < 0.5:
         raise ValueError("Próg Noul musi być w zakresie 0.5–1.")
     result = {"links": [], "warnings": [], "candidates": [],
               "thresholds": {"score": SCORE_THRESHOLD, "noul": threshold}}
-    registry_candidates = []
-    for target in targets:
-        reason = _rejection(product, target)
-        registry_candidates.append({
-            **target,
-            "origin": "registry",
-            "category": target["label"],
-            "score": None,
-            "noul": None,
-            "eligible": not reason,
-            "selected": False,
-            "reason": reason,
-            "source_constraints": {field: target[field] for field in FIELDS if target[field]},
-        })
-    result["candidates"].extend(registry_candidates)
-
-    related_candidates = []
-    if config.get("use_related"):
-        related_candidates = _related_candidates(product, config, result)
-        result["candidates"].extend(related_candidates)
-
-    eligible_registry = [candidate for candidate in registry_candidates if candidate["eligible"]]
-    eligible_related = [candidate for candidate in related_candidates if candidate["eligible"]]
-    shortlisted = []
-    if eligible_related:
-        # Ręczny katalog (potwierdzony przez operatora) dostaje najwyżej po jednym miejscu na typ,
-        # a Jev ocenia wszystkie kategorie ze ścieżki produktu i wszystkie produkty spod karty.
-        for kind in ("category", "product"):
-            shortlisted.extend([c for c in eligible_registry if c["kind"] == kind][:1])
-        shortlisted.extend(c for c in eligible_related if c["kind"] == "category")
-        shortlisted.extend(c for c in eligible_related if c["kind"] == "product")
-    else:
-        for kind in ("category", "product"):
-            shortlisted.extend([c for c in eligible_registry if c["kind"] == kind][:4])
-        shortlisted.extend([c for c in eligible_registry if c not in shortlisted][:MAX_REGISTRY_CANDIDATES - len(shortlisted)])
-
-    for candidate in eligible_registry:
-        if candidate not in shortlisted:
-            candidate["reason"] = "Poza limitem kandydatów z katalogu ręcznego."
+    candidates = _related_candidates(product, config, result)
+    result["candidates"].extend(candidates)
+    # Jev ocenia wszystkie kategorie ze ścieżki produktu i wszystkie produkty spod karty.
+    shortlisted = [c for c in candidates if c["kind"] == "category"] + [c for c in candidates if c["kind"] == "product"]
     api_key = _text(config.get("api_key"))
     if not api_key:
         result["warnings"].append("Brak klucza TypeSafe: opis powstanie bez linków.")
@@ -216,17 +128,12 @@ def select_internal_links(product, config) -> dict:
         state["source"]["bookland_facts"] = result["related_source"].get("facts", "")
     state["candidates"] = [
         {
-            **{key: c[key] for key in ("kind", "code", "label", *FIELDS, "source_skus")},
-            "origin": c.get("origin", "registry"),
-            "path": c.get("path", ""),
+            **{key: c[key] for key in ("kind", "code", "label", "origin")},
             **({"details": c["details"]} if c.get("details") else {}),
             **({"relation_to_source": c["relation"]} if c.get("relation") else {}),
         }
         for c in shortlisted
     ]
-    for candidate in state["candidates"]:
-        if candidate["kind"] == "product" and candidate["origin"] == "registry":
-            candidate["source_association_confirmed"] = True
     questions = {}
     for index, candidate in enumerate(shortlisted):
         pointer = f"`candidates[{index}].label`"
@@ -239,14 +146,10 @@ def select_internal_links(product, config) -> dict:
             support = {"type": "noul", "instructions": f"Does the category name in {pointer} accurately describe the subject and audience of the product in `source`? Judge only this semantic relationship.",
                        "criteria": {"true": "The explicit source description and attributes support the subject and audience named by the category.",
                                     "false": "The category describes a different subject or audience, or the source lacks evidence for the named subject or audience."}}
-        elif candidate["kind"] == "product" and candidate.get("origin") in RELATED_ORIGINS:
+        else:
             support = {"type": "noul", "instructions": f"Bookland's own recommender shows the product named by {pointer} under the product card of `source`. Using `source` and `candidates[{index}].details`/`relation_to_source`, would a link to it be a natural, useful suggestion for a reader of the `source` description: companion material for the same subject, level or series, another book by the same author, or a close match in the same narrow genre? Another edition or format of the very same title is not useful. Judge only this relationship.",
                        "criteria": {"true": "The supplied facts show a specific, reader-useful relationship (same series/course, same subject and level, same author, or the same narrow genre) and the target is a different title.",
                                     "false": "The relationship is only generic bestseller/popularity overlap, a different subject, level or audience, another edition of the same title, or the facts are insufficient."}}
-        else:
-            support = {"type": "noul", "instructions": f"Does {pointer} describe relevant companion material for the product in `source`, consistent with its explicit subject and course/series facts? Judge only this semantic relationship.",
-                       "criteria": {"true": "The supplied source and target facts support relevant companion material for the same subject and course or series.",
-                                    "false": "The target concerns a different subject or course, or the source lacks evidence that the named material is relevant."}}
         questions[f"support_{index}"] = support
     try:
         response = requests.post("https://api.typesafe.ai/v1/systemone", headers={"Authorization": f"Bearer {api_key}"},
@@ -367,8 +270,6 @@ def _related_candidate(*, kind, origin, url, label, details, relation, rank_hint
         "code": code or f"{kind}-" + hashlib.sha1(url.encode("utf-8")).hexdigest()[:12],
         "label": label,
         "url": url,
-        **{field: "" for field in FIELDS},
-        "source_skus": "",
         "origin": origin,
         "category": label,
         "details": details,
@@ -379,5 +280,4 @@ def _related_candidate(*, kind, origin, url, label, details, relation, rank_hint
         "eligible": True,
         "selected": False,
         "reason": "",
-        "source_constraints": {},
     }

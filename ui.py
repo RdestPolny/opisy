@@ -1,10 +1,8 @@
 """Stan sesji Streamlit i komponenty interfejsu wielokrotnego użytku."""
 from __future__ import annotations
 
-import csv
 import hashlib
 import io
-import json
 import sqlite3
 import time
 import zipfile
@@ -16,7 +14,7 @@ from typing import Dict, List, Optional, Sequence
 import pandas as pd
 import streamlit as st
 
-from akeneo import akeneo_fetch_categories, akeneo_get_token
+from akeneo import akeneo_get_token
 from checkpoints import (
     cached_meta_results_for_skus,
     load_interactive_checkpoint,
@@ -28,7 +26,6 @@ from config import (
     DEFAULT_LOCALE,
     GEMINI_INTERACTIVE_WORKERS,
     INTERACTIVE_CHUNK_SIZE,
-    LINK_TARGETS_PATH,
     META_TITLE_HARD_MAX,
     META_TITLE_TARGET_MAX,
     META_TITLE_TARGET_MIN,
@@ -40,7 +37,7 @@ from description_output import (
     refresh_description_result,
 )
 from descriptions import process_product_from_akeneo
-from internal_linking import SCORE_THRESHOLD, validate_targets
+from internal_linking import SCORE_THRESHOLD
 from job_store import (
     clear_description_workspace,
     db_connect,
@@ -152,10 +149,8 @@ def get_internal_link() -> Optional[Dict]:
     if st.session_state.get("link_active") and st.session_state.get("link_mode") == "Automatyczne (Jev)":
         return {
             "mode": "automatic",
-            "targets": st.session_state.get("link_targets", []),
             "api_key": st.secrets.get("TYPESAFE_API_KEY", ""),
             "threshold": st.session_state.get("link_threshold", 0.8),
-            "use_related": st.session_state.get("link_related_enabled", True),
             "firecrawl_api_key": st.secrets.get("FIRECRAWL_API_KEY", ""),
             "related_size": 16,
         }
@@ -171,93 +166,9 @@ def get_internal_link() -> Optional[Dict]:
     return None
 
 
-def load_link_targets() -> List[Dict]:
-    if not LINK_TARGETS_PATH.exists():
-        return []
-    return validate_targets(json.loads(LINK_TARGETS_PATH.read_text(encoding="utf-8")))
-
-
-def save_link_targets(rows: List[Dict]) -> List[Dict]:
-    targets = validate_targets(rows)
-    LINK_TARGETS_PATH.parent.mkdir(parents=True, exist_ok=True)
-    temporary = LINK_TARGETS_PATH.with_suffix(f".{time.time_ns()}.tmp")
-    try:
-        temporary.write_text(json.dumps(targets, ensure_ascii=False, indent=2), encoding="utf-8")
-        temporary.replace(LINK_TARGETS_PATH)
-    finally:
-        temporary.unlink(missing_ok=True)
-    return targets
-
-
-def render_link_catalog(locale: str) -> None:
-    if "link_targets" not in st.session_state:
-        try:
-            st.session_state.link_targets = load_link_targets()
-        except (ValueError, OSError) as exc:
-            st.error(f"Nie udało się odczytać katalogu celów: {exc}")
-            st.session_state.link_targets = []
-
-    st.session_state.link_related_enabled = st.checkbox(
-        "Dobieraj cele z rekomendacji pod kartą produktu (Luigi's Box)",
-        value=st.session_state.get("link_related_enabled", True),
-        help=(
-            "Dla każdego SKU pobieramy produkty z karuzeli „Inni kupili również” (API Luigi's Box, "
-            "z którego korzysta karta produktu) oraz kategorie ze ścieżki produktu. Jev ocenia, który "
-            "produkt i która kategoria najlepiej pasują. Gdy Luigi's Box nic nie zwróci, a w sekretach jest "
-            "FIRECRAWL_API_KEY, karta produktu jest renderowana przez Firecrawl."
-        ),
-    )
-    if st.session_state.link_related_enabled and not st.secrets.get("FIRECRAWL_API_KEY"):
-        st.caption("Brak FIRECRAWL_API_KEY – zapasowe scrapowanie karty produktu jest wyłączone.")
-
-    with st.expander("Katalog celów linkowania", expanded=not st.session_state.link_targets):
-        st.caption("Dla kategorii wpisz kod Akeneo i rzeczywisty adres Booklandu. Opcjonalne pola ograniczają dobór; brak zgodnych danych oznacza pominięcie celu.")
-        columns = ["kind", "code", "label", "url", "school", "grade", "subject", "series", "edition", "source_skus"]
-        st.download_button("Pobierz szablon CSV", ";".join(columns) + "\n", "cele_linkowania.csv", "text/csv")
-        if st.button("Pobierz listę kategorii Akeneo"):
-            try:
-                categories = akeneo_fetch_categories(akeneo_get_token(), locale)
-                st.session_state.link_category_template = pd.DataFrame([
-                    {"kind": "category", "code": item["code"], "label": item["label"], "url": ""}
-                    for item in categories
-                ], columns=columns).fillna("").to_csv(index=False, sep=";")
-            except Exception:
-                st.error("Nie udało się pobrać kategorii Akeneo. Spróbuj ponownie.")
-        if st.session_state.get("link_category_template"):
-            st.download_button("Pobierz kategorie do uzupełnienia URL", st.session_state.link_category_template,
-                               "kategorie_akeneo.csv", "text/csv")
-        upload = st.file_uploader("Wczytaj cele z CSV", type=["csv"], key="link_targets_upload")
-        if st.button("Wczytaj CSV do tabeli", disabled=upload is None):
-            try:
-                text = upload.getvalue().decode("utf-8-sig")
-                dialect = csv.Sniffer().sniff(text[:4096], delimiters=";,\t")
-                st.session_state.link_targets = validate_targets(list(csv.DictReader(io.StringIO(text), dialect=dialect)))
-                st.session_state.link_catalog_revision = st.session_state.get("link_catalog_revision", 0) + 1
-            except (UnicodeError, csv.Error, ValueError) as exc:
-                st.error(f"Nieprawidłowy CSV: {exc}")
-        rows = pd.DataFrame(st.session_state.link_targets, columns=columns).fillna("")
-        edited = st.data_editor(rows, num_rows="dynamic", hide_index=True,
-                                key=f"link_catalog_{st.session_state.get('link_catalog_revision', 0)}",
-                                column_config={"kind": st.column_config.SelectboxColumn("Typ", options=["category", "product"]),
-                                               "code": "Kod kategorii / SKU celu", "label": "Nazwa celu", "url": "URL",
-                                               "source_skus": "Potwierdzone SKU źródłowe (separator |)"})
-        st.caption("Link do produktu wymaga wpisania źródłowego SKU w source_skus i zgodnej edycji. Nie wpisuj relacji odgadniętych z tytułu. Katalog jest wspólny dla kolejek.")
-        if st.button("Zapisz katalog celów"):
-            try:
-                st.session_state.link_targets = save_link_targets(edited.fillna("").to_dict("records"))
-                st.success(f"Zapisano {len(st.session_state.link_targets)} celów. Wybrane URL będą sprawdzane przed generowaniem.")
-            except (ValueError, OSError) as exc:
-                st.error(str(exc))
-        if st.session_state.link_targets:
-            st.download_button("Pobierz zapisany katalog CSV", pd.DataFrame(st.session_state.link_targets, columns=columns).to_csv(index=False, sep=";"), "katalog_linkowania.csv", "text/csv")
-
-
 BACKUP_DB_NAME = "product_workflow.sqlite3"
-BACKUP_LINKS_NAME = "internal_link_targets.json"
-
-
 def build_app_backup() -> bytes:
-    """ZIP ze spójną kopią SQLite (kolejki, wyniki, kolejki opisów) i katalogiem celów linkowania."""
+    """ZIP ze spójną kopią SQLite (kolejka metatagów, wyniki, kolejki opisów)."""
     snapshot = DB_PATH.with_name(f"backup-{time.time_ns()}.sqlite3")
     buffer = io.BytesIO()
     try:
@@ -269,8 +180,6 @@ def build_app_backup() -> bytes:
             target.close()
         with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
             archive.write(snapshot, BACKUP_DB_NAME)
-            if LINK_TARGETS_PATH.exists():
-                archive.write(LINK_TARGETS_PATH, BACKUP_LINKS_NAME)
     finally:
         snapshot.unlink(missing_ok=True)
     return buffer.getvalue()
@@ -283,9 +192,6 @@ def restore_app_backup(raw: bytes) -> List[str]:
         names = set(archive.namelist())
         if BACKUP_DB_NAME not in names:
             raise ValueError("To nie jest kopia tej aplikacji (brak bazy w archiwum).")
-        targets = None
-        if BACKUP_LINKS_NAME in names:
-            targets = validate_targets(json.loads(archive.read(BACKUP_LINKS_NAME).decode("utf-8")))
         incoming = DB_PATH.with_name(f"restore-{time.time_ns()}.sqlite3")
         incoming.write_bytes(archive.read(BACKUP_DB_NAME))
     try:
@@ -302,18 +208,14 @@ def restore_app_backup(raw: bytes) -> List[str]:
         incoming.unlink(missing_ok=True)
     init_db()  # migracje, gdy kopia pochodzi ze starszej wersji
     restored.append("baza zadań i kolejek")
-    if targets is not None:
-        save_link_targets(targets)
-        st.session_state.pop("link_targets", None)
-        restored.append(f"katalog celów linkowania ({len(targets)})")
     return restored
 
 
 def render_backup_panel() -> None:
     with st.expander("Kopia zapasowa danych"):
         st.caption(
-            "Streamlit Cloud nie gwarantuje trwałości dysku: restart lub redeploy może wyczyścić kolejki, "
-            "wyniki i katalog celów linkowania. Pobieraj kopię przed aktualizacją aplikacji."
+            "Streamlit Cloud nie gwarantuje trwałości dysku: restart lub redeploy może wyczyścić kolejki "
+            "i wyniki. Pobieraj kopię przed aktualizacją aplikacji."
         )
         lazy_download_button(
             "kopię danych (ZIP)", "app_backup", build_app_backup,

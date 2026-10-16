@@ -129,22 +129,14 @@ class AkeneoDeliveryTests(QueueTestCase):
 
 
 class BackupTests(QueueTestCase):
-    def test_backup_roundtrip_restores_queue_and_link_catalog(self):
-        links = Path(self.tmp.name) / "links.json"
-        targets = [{"kind": "category", "code": "c", "label": "Kategoria", "url": "https://bookland.com.pl/c"}]
-        links.write_text(json.dumps(targets), encoding="utf-8")
+    def test_backup_roundtrip_restores_queue(self):
         job_store.bulk_upsert_meta_jobs([entry("A")])
-        with patch.object(ui, "LINK_TARGETS_PATH", links):
-            archive = ui.build_app_backup()
-            self.assertEqual(set(zipfile.ZipFile(io.BytesIO(archive)).namelist()),
-                             {"product_workflow.sqlite3", "internal_link_targets.json"})
-            with job_store.db_connect() as conn:
-                conn.execute("DELETE FROM meta_jobs")
-            links.unlink()
-            restored = ui.restore_app_backup(archive)
-        self.assertEqual(len(restored), 2)
+        archive = ui.build_app_backup()
+        self.assertEqual(zipfile.ZipFile(io.BytesIO(archive)).namelist(), ["product_workflow.sqlite3"])
+        with job_store.db_connect() as conn:
+            conn.execute("DELETE FROM meta_jobs")
+        self.assertEqual(ui.restore_app_backup(archive), ["baza zadań i kolejek"])
         self.assertIsNotNone(self.status("A"))
-        self.assertEqual(json.loads(links.read_text(encoding="utf-8"))[0]["code"], "c")
 
     def test_restore_rejects_foreign_archive(self):
         buffer = io.BytesIO()

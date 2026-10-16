@@ -1,3 +1,11 @@
+# 4.15.0
+
+Linkowanie wewnętrzne nie wymaga już niczego ręcznie.
+
+- Usunięty „Katalog celów linkowania” (CSV, tabela, source_skus) i przełącznik źródła rekomendacji:
+  kandydaci pochodzą wyłącznie spod karty produktu (Luigi's Box, zapasowo Firecrawl).
+- Kopia zapasowa zawiera tylko bazę SQLite.
+
 # 4.14.0
 
 Porządki po audycie: poprawki błędów kolejki i Akeneo, szybsze reruny, podział app.py na moduły.

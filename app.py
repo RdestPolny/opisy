@@ -83,7 +83,6 @@ from ui import (
     process_selected_products,
     queue_checkbox,
     render_backup_panel,
-    render_link_catalog,
     render_result_preview,
     reset_interactive_results,
     switch_description_workspace,
@@ -213,7 +212,8 @@ with st.sidebar:
             st.caption("Jev ocenia w jednym requeście wszystkie kategorie ze ścieżki produktu i wszystkie produkty spod karty (Luigi's Box) i wybiera do 2 linków.")
             if not st.secrets.get("TYPESAFE_API_KEY"):
                 st.warning("Dodaj TYPESAFE_API_KEY w sekretach Streamlit. Bez klucza opis powstanie bez automatycznych linków.")
-            render_link_catalog(locale)
+            if not st.secrets.get("FIRECRAWL_API_KEY"):
+                st.caption("Brak FIRECRAWL_API_KEY – gdy Luigi's Box nic nie zwróci, produkt dostanie opis bez linków.")
         else:
             st.session_state.link_url = st.text_input("URL linku", value=st.session_state.link_url)
             st.session_state.link_category = st.text_input("Kategoria / anchor hint", value=st.session_state.link_category)

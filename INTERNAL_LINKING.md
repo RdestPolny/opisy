@@ -1,21 +1,18 @@
 # Linkowanie kontekstowe
 
 Moduł wybiera osobno dla każdego SKU maksymalnie jedną kategorię i jeden
-potwierdzony produkt uzupełniający. Jev ocenia trafność; Gemini wplata linki
-w naturalne zdania. Brak dobrego celu oznacza brak nowego linku.
+produkt uzupełniający spośród tego, co Bookland poleca pod kartą produktu.
+Jev ocenia trafność; Gemini wplata linki w naturalne zdania. Brak dobrego celu
+oznacza brak nowego linku. Nie trzeba niczego przygotowywać ani wgrywać ręcznie.
 
 ## Uruchomienie
 
 1. Dodaj do sekretów Streamlit `TYPESAFE_API_KEY = "twój-klucz"`.
    Nie wpisuj klucza do kodu ani CSV. Pozostałe sekrety aplikacji pozostają wymagane.
-2. W opcjach opisów zostaw domyślny tryb **Automatyczne (Jev)**.
-3. Rozwiń **Katalog celów linkowania**. Pobierz szablon CSV albo listę kategorii
-   Akeneo i uzupełnij rzeczywiste adresy docelowe Booklandu.
-4. Wczytaj CSV do tabeli lub wpisz cele ręcznie i kliknij **Zapisz katalog celów**.
-5. Włącz linkowanie. Zacznij od małej kolejki i sprawdź wyniki w **Dobór linków**.
+2. W opcjach opisów włącz linkowanie i zostaw domyślny tryb **Automatyczne (Jev)**.
+3. Zacznij od małej kolejki i sprawdź wyniki w **Dobór linków**.
 
-Tryb ręczny nadal działa, ale domyślnym trybem jest **Automatyczne (Jev)**.
-Od wersji 4.13 sitemap Booklandu nie jest już źródłem kandydatów do linkowania.
+Tryb **Ręczne** pozwala wpisać jeden stały URL i anchor dla całej kolejki.
 
 ## Rekomendacje spod karty produktu (źródło kandydatów)
 
@@ -29,8 +26,7 @@ produktu (karuzela „Inni kupili również”, Luigi's Box, rekomender `item_de
    kategorie). Ranking deterministyczny ustala kolejność (premiuje tę samą serię i autora) i pomija tylko
    sam produkt, produkty ukryte (`widoczne_bookland=0`, `use_in_crosslinking=0`) i inne wydania tego samego tytułu.
 4. Jev dostaje w jednym requeście wszystkich tych kandydatów: każdą kategorię ze ścieżki produktu i każdy
-   pozostały produkt spod karty (zwykle 15–20), plus najwyżej 1 kategorię i 1 produkt z ręcznego katalogu.
-   Wybiera najwyżej jedną kategorię i jeden produkt. Limit `jev-1.13.0` to 64k tokenów na request,
+   pozostały produkt spod karty (zwykle 15–20). Wybiera najwyżej jedną kategorię i jeden produkt. Limit `jev-1.13.0` to 64k tokenów na request,
    więc taka liczba kandydatów mieści się z dużym zapasem; timeout requestu to 30 s.
 5. Gemini dostaje przy produkcie pole „powiazanie” (np. „ta sama seria: Matematyka z plusem”) i może
    opisać relację tylko na jego podstawie.
@@ -45,32 +41,11 @@ a w sekretach jest `FIRECRAWL_API_KEY`, aplikacja renderuje kartę produktu prze
 Adres karty bierzemy z Luigi's Box, a gdy go nie ma, budujemy ze slugu tytułu (tak Bookland tworzy `url_key`).
 Linki z karuzeli skracamy do ostatniego segmentu ścieżki; linki z Firecrawl przechodzą live-check.
 
-Gdy rekomendacje spod karty nie dadzą żadnego kandydata, Jev ocenia tylko ręczny katalog celów,
-a bez niego opis powstaje bez nowego linku. Aplikacja nie korzysta z sitemap Booklandu.
+Gdy rekomendacje spod karty nie dadzą żadnego kandydata, opis powstaje bez nowego linku.
 
-## Katalog celów
+## Fakty o produkcie źródłowym
 
-CSV obsługuje UTF-8 z BOM lub bez, separator `;`, przecinek albo tabulator.
-Wymagane kolumny: `code`, `label`, `url`. `kind` domyślnie wynosi `category`.
-
-| Kolumna | Znaczenie |
-| --- | --- |
-| `kind` | `category` albo `product` |
-| `code` | Dokładny kod kategorii Akeneo albo SKU docelowego produktu |
-| `label` | Rzetelna nazwa celu, określająca jego zakres |
-| `url` | Rzeczywisty adres HTTP(S) w domenie Booklandu, bez parametrów i fragmentu |
-| `school`, `grade`, `subject`, `series`, `edition` | Opcjonalne ograniczenia zgodne z wartościami produktu w Akeneo |
-| `source_skus` | Dla produktu: potwierdzone źródłowe SKU rozdzielone `\|` |
-
-Kategoria musi należeć do kategorii źródłowego produktu. Każde podane ograniczenie
-musi mieć zgodną wartość w danych źródłowych. Brak wartości nie oznacza zgodności.
-Numer tomu lub poziomu kursu nie jest używany jako klasa szkolna.
-
-Link do produktu wymaga jawnego `source_skus` oraz znanej, zgodnej `edition`
-po obu stronach. Wpisanie mapowania oznacza potwierdzenie relacji przez operatora;
-sam podobny tytuł ani ogólna asocjacja cross-sell nie wystarcza. Nie linkujemy SKU do siebie.
-
-Obsługiwane nazwy atrybutów Akeneo są określone w `LINK_FIELDS` w `config.py`:
+Jev dostaje fakty o produkcie z Akeneo. Obsługiwane nazwy atrybutów Akeneo są określone w `LINK_FIELDS` w `config.py`:
 
 - szkoła: `school_type`, `typ_szkoly`, `szkola`;
 - klasa: `grade`, `klasa`;
@@ -81,20 +56,13 @@ Obsługiwane nazwy atrybutów Akeneo są określone w `LINK_FIELDS` w `config.py
 Opcje select są rozwiązywane do etykiet. Jeśli Twoja instalacja używa innych
 kodów, uzupełnij tę mapę. Nie wykorzystujemy roku wydania jako domyślnej edycji.
 
-Katalog jest wspólny dla kolejek i zapisywany atomowo w
-`.streamlit/internal_link_targets.json`. Nie jest commitowany. Przy przenoszeniu
-aplikacji zachowaj ten plik lub wyeksportuj i ponownie wczytaj CSV; trwałość
-dysku zależy od hostingu, tak jak istniejące lokalne dane aplikacji.
-
 ## Kontrola i zachowanie
 
-- Kandydaci spod karty produktu trafiają do Jev wszyscy. Ręczny katalog jest ograniczony:
-  obok rekomendacji dostaje 1 kategorię i 1 produkt, a bez nich maksymalnie 8 kandydatów
-  w dotychczasowej kolejności.
+- Kandydaci spod karty produktu trafiają do Jev wszyscy.
 - Jedno wywołanie `jev-1.13.0` ocenia przydatność (`Score`, skala 0–3) i zgodność
   semantyczną (`Noul`). Wybór wymaga Score co najmniej 2.5 oraz Noul co najmniej
   wartości suwaka, domyślnie 0.8. Są to progi pilotażu do oceny na własnych danych.
-- Ręcznie wpisany URL musi zwrócić HTTP 200 i HTML; odrzucamy przekierowania, `noindex`
+- URL z Firecrawl musi zwrócić HTTP 200 i HTML; odrzucamy przekierowania, `noindex`
   i canonical wskazujący inny adres. Wynik tej kontroli jest cache'owany na godzinę.
   URL z Luigi's Box (`url_key`) przechodzi walidację domeny i formatu, ale nie jest
   ponownie pobierany per SKU. Nie jest to pełny audyt indeksacji ani potwierdzenie widoczności w Google.
@@ -109,7 +77,7 @@ dysku zależy od hostingu, tak jak istniejące lokalne dane aplikacji.
 
 Podczas lokalnej próby publiczna strona Booklandu zwróciła HTTP 403. Zweryfikuj
 dostęp z hostingu aplikacji: taki status powoduje pominięcie linku, a nie uznanie
-adresu za potwierdzony. Nie testowano rzeczywistego katalogu Akeneo bez jego konfiguracji.
+adresu za potwierdzony.
 
 ## Sprawdzenie
 
@@ -117,5 +85,4 @@ adresu za potwierdzony. Nie testowano rzeczywistego katalogu Akeneo bez jego kon
 python -m unittest discover -s tests
 ```
 
-Testy korzystają z atrap API. Pilotaż na rzeczywistym Akeneo wymaga konfiguracji
-sekretów i katalogu celów. Dokumentacja modelu: [TypeSafe](https://docs.typesafe.ai/models).
+Testy korzystają z atrap API. Pilotaż na rzeczywistym Akeneo wymaga konfiguracji sekretów. Dokumentacja modelu: [TypeSafe](https://docs.typesafe.ai/models).

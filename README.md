@@ -30,8 +30,8 @@ Streamlit Community Cloud buduje aplikację z gałęzi `main`. Po zmianie moduł
 `app.py` zrestartuj aplikację (**Manage app → ⋮ → Reboot app**), bo przeładowanie na żywo
 nie wczytuje ponownie zaimportowanych modułów.
 
-Dysk Streamlit Cloud nie jest trwały: restart lub redeploy może usunąć kolejki, wyniki
-i katalog celów linkowania z `.streamlit/`. Przed aktualizacją pobierz kopię w panelu
+Dysk Streamlit Cloud nie jest trwały: restart lub redeploy może usunąć kolejki i wyniki
+z `.streamlit/`. Przed aktualizacją pobierz kopię w panelu
 **Kopia zapasowa danych** (pasek boczny) i w razie potrzeby przywróć ją po restarcie.
 
 ## Struktura
@@ -39,7 +39,7 @@ i katalog celów linkowania z `.streamlit/`. Przed aktualizacją pobierz kopię 
 | Plik | Zawartość |
 | --- | --- |
 | `app.py` | interfejs Streamlit (pasek boczny i zakładki) |
-| `ui.py` | stan sesji, kolejki opisów, katalog celów, podgląd wyniku, kopia zapasowa |
+| `ui.py` | stan sesji, kolejki opisów, podgląd wyniku, kopia zapasowa |
 | `config.py` | stałe, ścieżki i modele |
 | `akeneo.py`, `akeneo_auth.py`, `akeneo_payloads.py` | klient Akeneo, token, payloady zapisu |
 | `descriptions.py`, `description_generation.py`, `description_output.py`, `visual_editor.py` | generowanie, walidacja i edycja opisów |
