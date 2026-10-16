@@ -26,7 +26,8 @@ class DescriptionAppIntegrationTests(unittest.TestCase):
             "normalize_spaces", "normalize_for_compare", "strip_html", "strip_code_fences",
             "clean_ai_fingerprints", "split_contributor_names", "format_contributor_names",
             "description_link_targets", "description_link_instructions",
-            "parse_akeneo_product", "_prepare_product_data", "_value_from_values", "_list_from_values", "safe_string_value",
+            "parse_akeneo_product", "_prepare_product_data", "_value_from_values", "_entry_text",
+            "_list_from_values", "safe_string_value",
         }
         nodes = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in names]
         self.assertEqual(len(nodes), len(names))
@@ -52,6 +53,7 @@ class DescriptionAppIntegrationTests(unittest.TestCase):
             "check_internal_link_url": Mock(),
             "TRUSTED_ORIGINS": TRUSTED_ORIGINS,
             "akeneo_get_option_label": lambda code, value, *args: {"sp": "szkoła podstawowa", "ang": "język angielski"}.get(value, value),
+            "akeneo_is_select_attribute": lambda code: code in {"school_type", "subject"},
         }
         exec(compile(module, str(Path(__file__).parents[1] / "app.py"), "exec"), self.app)
 
@@ -77,6 +79,31 @@ class DescriptionAppIntegrationTests(unittest.TestCase):
         self.assertIsNone(result["error"])
         report = deliver_description_result(result, value, Mock(), channel="Bookland", locale="pl_PL")
         self.assertEqual(report.warnings, [])
+
+    def test_external_links_from_model_are_stripped_without_linking(self):
+        planted = full_description(link_paragraph=0).replace("</p>", ' <a href="https://evil.example/x">tu</a></p>', 1)
+        self.sdk.return_value = SimpleNamespace(text=planted)
+        result = self.app["process_product_from_akeneo"]("SKU1", "fake", "Bookland", "pl_PL", use_research=False)
+        self.assertIsNone(result["error"])
+        self.assertNotIn("evil.example", result["description_html"])
+        self.assertEqual(result["allowed_links"], [])
+
+    def test_link_only_keeps_links_from_source_description(self):
+        old = "https://bookland.com.pl/istniejacy"
+        self.product["description"] = f'<p>Stary opis <a href="{old}">z linkiem</a>.</p>'
+        value = f'<p>Stary opis <a href="{old}">z linkiem</a> i <a href="{LINK}">kategorią</a>.</p>'
+        self.sdk.return_value = SimpleNamespace(text=value)
+        result = self.app["process_product_from_akeneo"]("SKU1", "fake", "Bookland", "pl_PL",
+                    internal_link={"url": LINK, "category": "kryminał"}, link_only=True, use_research=False)
+        self.assertIn(old, result["description_html"])
+        self.assertIn(LINK, result["description_html"])
+
+    def test_text_attributes_are_not_rewritten_as_option_codes(self):
+        values = {"publisher": [{"data": "WSiP-Edukacja", "scope": None, "locale": None}],
+                  "school_type": [{"data": "sp", "scope": "Bookland", "locale": "pl_PL"}]}
+        parsed = self.app["parse_akeneo_product"]({"identifier": "SKU1", "values": values}, "Bookland", "pl_PL", "fake-token")
+        self.assertEqual(parsed["publisher"], "WSiP-Edukacja")
+        self.assertEqual(parsed["school"], "szkoła podstawowa")
 
     def test_api_failure_is_not_stored_as_html(self):
         self.sdk.side_effect = ValueError("invalid request")

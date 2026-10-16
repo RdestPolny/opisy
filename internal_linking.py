@@ -24,6 +24,7 @@ TRUSTED_ORIGINS = {"luigisbox"}
 RELATED_ORIGINS = {"luigisbox", "firecrawl"}
 # Limit dotyczy tylko ręcznego katalogu; kandydaci spod karty produktu trafiają do Jev wszyscy.
 MAX_REGISTRY_CANDIDATES = 8
+JEV_MODEL = "jev-1.13.0"
 JEV_TIMEOUT = 30
 # Minimalna trafność Jev (skala 0–3); próg noul (0–1) ustawia operator suwakiem.
 SCORE_THRESHOLD = 2.5
@@ -249,7 +250,7 @@ def select_internal_links(product, config) -> dict:
         questions[f"support_{index}"] = support
     try:
         response = requests.post("https://api.typesafe.ai/v1/systemone", headers={"Authorization": f"Bearer {api_key}"},
-                                 json={"model": config.get("model") or "jev-1.13.0", "state": state, "questions": questions}, timeout=JEV_TIMEOUT)
+                                 json={"model": config.get("model") or JEV_MODEL, "state": state, "questions": questions}, timeout=JEV_TIMEOUT)
         response.raise_for_status()
         answers = response.json()["answers"]
         scores = []

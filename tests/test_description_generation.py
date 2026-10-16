@@ -58,12 +58,22 @@ class DescriptionGenerationTests(unittest.TestCase):
         self.assertEqual(result["description_html"], "")
         self.assertIn("pusty", result["error"])
 
-    def test_limit_signal_preserves_usable_content_as_warning(self):
+    def test_limit_signal_retries_then_preserves_usable_content_as_warning(self):
         request = Mock(return_value=SimpleNamespace(text=full_description(), candidates=[SimpleNamespace(finish_reason="MAX_TOKENS")]))
         result = self.generate(request)
         self.assertIsNone(result["error"])
         self.assertEqual(result["generation_warnings"][0]["code"], "OUTPUT_MAY_BE_TRUNCATED")
-        self.assertEqual(request.call_count, 1)
+        self.assertEqual(request.call_count, 3)
+
+    def test_truncated_output_is_replaced_by_complete_retry(self):
+        request = Mock(side_effect=[
+            SimpleNamespace(text=full_description(), candidates=[SimpleNamespace(finish_reason="MAX_TOKENS")]),
+            SimpleNamespace(text=full_description(), candidates=[SimpleNamespace(finish_reason="STOP")]),
+        ])
+        result = self.generate(request)
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(request.call_count, 2)
+        self.assertNotIn("Poprzedni wynik", request.call_args.args[0])
 
     def test_provider_blocked_empty_response_is_not_retried(self):
         request = Mock(return_value=SimpleNamespace(text="", candidates=[SimpleNamespace(finish_reason="SAFETY")]))

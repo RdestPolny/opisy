@@ -39,6 +39,7 @@ def generate_description_result(request, *, contents, context, normalize_respons
         raise ValueError("max_attempts musi być dodatnie")
     last_error = "Nie uzyskano opisu"
     previous = ""
+    truncated = None  # ostatni poprawny, ale ucięty wynik – zapas, gdy ponowienia nie pomogą
     for attempt in range(1, max_attempts + 1):
         prompt = contents
         if previous:
@@ -60,6 +61,12 @@ def generate_description_result(request, *, contents, context, normalize_respons
         finish = getattr(candidates[0], "finish_reason", None) if candidates else None
         finish = str(getattr(finish, "value", finish) or "")
         previous = report.clean_html
+        if not report.errors and finish == "MAX_TOKENS" and attempt < max_attempts:
+            # Ucięty opis bywa poprawnym HTML-em, ale kończy się w pół zdania: ponawiamy od zera.
+            truncated = (attempt, finish, report)
+            previous = ""
+            last_error = "Opis ucięty limitem tokenów"
+            continue
         if not report.errors:
             generation_warnings = [issue for issue in report.warnings if issue["code"] == "HTML_NORMALIZED"]
             if finish and finish != "STOP":
@@ -83,6 +90,23 @@ def generate_description_result(request, *, contents, context, normalize_respons
         # Do not repeat a provider-blocked request with the same contents.
         if finish and finish not in {"STOP", "MAX_TOKENS"}:
             break
+    if truncated:
+        _, finish, report = truncated
+        warning = {
+            "code": "OUTPUT_MAY_BE_TRUNCATED",
+            "message": f"Zachowano otrzymany opis; powód zakończenia generowania: {finish}. Sprawdź kompletność.",
+        }
+        return {
+            "description_html": report.clean_html,
+            "error": None,
+            "status": "completed_with_warnings",
+            "validation_errors": [],
+            "validation_warnings": report.warnings + [warning],
+            "generation_warnings": [warning],
+            "validation_version": VALIDATOR_API_VERSION,
+            "api_attempts": attempt,
+            "finish_reason": finish,
+        }
     return {
         "description_html": previous,
         "error": last_error,

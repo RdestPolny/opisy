@@ -25,7 +25,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence, Set, Tuple
-from urllib.parse import urljoin
+from urllib.parse import quote, urljoin
 
 import pandas as pd
 import requests
@@ -43,6 +43,7 @@ from description_output import (
     refresh_description_result, preserve_description_on_failure, deliver_description_result,
     current_description_value, analyze_description_html, description_link_snapshot,
 )
+from akeneo_auth import AKENEO_TOKENS
 from description_generation import generate_description_result
 from internal_linking import SCORE_THRESHOLD, TRUSTED_ORIGINS, select_internal_links, validate_targets, verify_target_url
 
@@ -1006,27 +1007,40 @@ def request_with_retry(
 ) -> requests.Response:
     session = get_http_session()
     last_error: Optional[Exception] = None
+    reauthorized = False
     for attempt in range(max_attempts):
         try:
             response = session.request(method, url, timeout=timeout, **kwargs)
+            headers = kwargs.get("headers") or {}
+            if (response.status_code == 401 and not reauthorized and "Authorization" in headers
+                    and url.startswith(_akeneo_root() + "/api/rest/")):
+                # Token Akeneo wygasł lub został unieważniony: jedno odnowienie i powtórka.
+                reauthorized = True
+                stale = headers["Authorization"].removeprefix("Bearer ")
+                kwargs["headers"] = {**headers, "Authorization": f"Bearer {akeneo_get_token(force=True, stale=stale)}"}
+                response = session.request(method, url, timeout=timeout, **kwargs)
             if response.status_code == 429:
                 retry_after = response.headers.get("Retry-After", "")
                 try:
                     wait = min(float(retry_after), 60.0)
                 except ValueError:
                     wait = min(2 ** attempt + (attempt * 0.3), 60.0)
-                time.sleep(max(wait, 1.0))
+                if attempt + 1 < max_attempts:
+                    time.sleep(max(wait, 1.0))
                 continue
             if response.status_code >= 500:
-                time.sleep(min(2 ** attempt + 0.5, 30.0))
+                last_error = RuntimeError(f"HTTP {response.status_code} z {url}: {response.text[:200]}")
+                if attempt + 1 < max_attempts:
+                    time.sleep(min(2 ** attempt + 0.5, 30.0))
                 continue
             return response
         except requests.RequestException as exc:
             last_error = exc
-            time.sleep(min(2 ** attempt + 0.5, 30.0))
+            if attempt + 1 < max_attempts:
+                time.sleep(min(2 ** attempt + 0.5, 30.0))
     if last_error:
         raise last_error
-    raise RuntimeError(f"Brak poprawnej odpowiedzi z {url}")
+    raise RuntimeError(f"Brak poprawnej odpowiedzi z {url} (limit zapytań HTTP 429)")
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -1056,7 +1070,6 @@ def research_book_with_perplexity(title: str, author: str, isbn: str = "") -> Op
             {"role": "user", "content": query},
         ],
         "max_tokens": 500,
-        "return_citations": False,
         "return_images": False,
     }
     try:
@@ -1066,7 +1079,8 @@ def research_book_with_perplexity(title: str, author: str, isbn: str = "") -> Op
             headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
             json=payload,
             timeout=PERPLEXITY_TIMEOUT,
-            max_attempts=3,
+            # Research jest dodatkiem: najwyżej jedno ponowienie, żeby timeout nie kosztował 3×45 s.
+            max_attempts=2,
         )
         response.raise_for_status()
         return response.json()["choices"][0]["message"]["content"].strip()
@@ -1126,7 +1140,7 @@ def generate_description(
         return {"description_html": report.clean_html, "error": "; ".join(report.errors) or None,
                 "status": "error" if report.errors else ("completed_with_warnings" if report.warnings else "completed"),
                 "api_attempts": 0, "validation_errors": report.errors, "validation_warnings": report.warnings,
-                "preserved_links": description_link_snapshot(report.clean_html)}
+                "allowed_links": [], "preserved_links": description_link_snapshot(report.clean_html)}
     product_data = dict(product_data)
     contributors = product_data.get("contributors") or split_contributor_names(product_data.get("author", ""))
     product_data["contributors"] = contributors
@@ -1148,18 +1162,21 @@ def generate_description(
         "require_full_structure": not link_only,
         "required_link": internal_link.get("url", "") if isinstance(internal_link, dict) else "",
         "required_link_paragraph": 2 if isinstance(internal_link, dict) and internal_link and not link_only else 0,
-        "allowed_links": [target["url"] for target in internal_link] if isinstance(internal_link, list) else None,
-        "required_contributors": contributors if not link_only else (),
+        # Zawsze lista: poza wybranymi celami przetrwają tylko linki obecne w opisie źródłowym,
+        # więc tekst z opisu lub researchu nie wstawi do Akeneo dowolnego zewnętrznego linku.
+        "allowed_links": [target["url"] for target in description_link_targets(internal_link) if target.get("url")],
+        "preserved_links": description_link_snapshot(product_data.get("description", "")),
+        "required_contributors": list(contributors) if not link_only else [],
         "required_contributor_role": product_data.get("contributor_role", "") if not link_only else "",
     }
-    return generate_description_result(
+    result = generate_description_result(
         lambda prompt: get_gemini_client().models.generate_content(
             model=GEMINI_MODEL,
             contents=prompt,
             config=types.GenerateContentConfig(
                 system_instruction=system_prompt,
                 temperature=0.55,
-                max_output_tokens=2400,
+                max_output_tokens=4096,
                 # The description workflow owns the complete retry budget.
                 http_options=types.HttpOptions(retry_options=types.HttpRetryOptions(attempts=1)),
             ),
@@ -1168,6 +1185,8 @@ def generate_description(
         context=context,
         normalize_response=lambda text: clean_ai_fingerprints(strip_code_fences(text)),
     )
+    # Ten sam kontekst walidacji trafia do wyniku, żeby edycja i wysyłka sprawdzały to samo.
+    return {**result, **{key: value for key, value in context.items() if key != "require_full_structure"}}
 
 
 
@@ -1455,8 +1474,7 @@ def _akeneo_root() -> str:
     return base
 
 
-@st.cache_data(ttl=3000, show_spinner=False)
-def akeneo_get_token() -> str:
+def _fetch_akeneo_token() -> Tuple[str, int]:
     token_url = _akeneo_root() + "/api/oauth/v1/token"
     response = request_with_retry(
         "POST",
@@ -1470,28 +1488,36 @@ def akeneo_get_token() -> str:
     )
     if response.status_code != 200:
         raise RuntimeError(f"Błąd autoryzacji Akeneo {response.status_code}: {response.text[:300]}")
-    return response.json()["access_token"]
+    payload = response.json()
+    return payload["access_token"], int(payload.get("expires_in") or 3600)
 
 
-def akeneo_headers(token: str, content_type: str = "") -> Dict[str, str]:
-    headers = {"Authorization": f"Bearer {token}"}
+def akeneo_get_token(*, force: bool = False, stale: str = "") -> str:
+    return AKENEO_TOKENS.get(_fetch_akeneo_token, force=force, stale=stale)
+
+
+def akeneo_headers(token: str = "", content_type: str = "") -> Dict[str, str]:
+    # Zawsze aktualny token: przekazywany parametr bywa starszy niż godzina w długim przebiegu.
+    headers = {"Authorization": f"Bearer {akeneo_get_token()}"}
     if content_type:
         headers["Content-Type"] = content_type
     return headers
 
 
-def akeneo_get_attribute(code: str, token: str) -> Dict:
+@st.cache_data(ttl=3600, show_spinner=False)
+def akeneo_get_attribute(code: str, _token: str = "") -> Dict:
+    """Definicja atrybutu (typ, scopable, localizable). Błędy nie trafiają do cache."""
     response = request_with_retry(
         "GET",
-        _akeneo_root() + f"/api/rest/v1/attributes/{code}",
-        headers=akeneo_headers(token),
+        _akeneo_root() + f"/api/rest/v1/attributes/{quote(code, safe='')}",
+        headers=akeneo_headers(),
     )
     response.raise_for_status()
     return response.json()
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
-def akeneo_existing_attribute_codes(token: str) -> List[str]:
+def akeneo_existing_attribute_codes(_token: str = "") -> List[str]:
     """Zwraca tylko kody atrybutów istniejących w danym PIM-ie.
 
     Dzięki temu parametr `attributes` nie wywoła błędu 422, gdy instalacja używa
@@ -1506,24 +1532,25 @@ def akeneo_existing_attribute_codes(token: str) -> List[str]:
     ]
     existing: List[str] = []
     for code in candidates:
-        try:
-            response = request_with_retry(
-                "GET",
-                _akeneo_root() + f"/api/rest/v1/attributes/{code}",
-                headers=akeneo_headers(token),
-                max_attempts=2,
-            )
-            if response.status_code == 200:
-                existing.append(code)
-        except Exception:
-            continue
+        response = request_with_retry(
+            "GET",
+            _akeneo_root() + f"/api/rest/v1/attributes/{quote(code, safe='')}",
+            headers=akeneo_headers(),
+            max_attempts=2,
+        )
+        if response.status_code == 200:
+            existing.append(code)
+        elif response.status_code != 404:
+            # Wyjątek zamiast częściowej listy: cache_data nie zapamięta błędu na godzinę,
+            # a brak np. `description` zmieniłby input_hash i wymusił regenerację.
+            raise RuntimeError(f"Nie udało się sprawdzić atrybutu {code}: HTTP {response.status_code}")
     return existing
 
 
 def akeneo_product_exists(sku: str, token: str) -> bool:
     response = request_with_retry(
         "GET",
-        _akeneo_root() + f"/api/rest/v1/products/{sku}",
+        _akeneo_root() + f"/api/rest/v1/products/{quote(sku, safe='')}",
         headers=akeneo_headers(token),
         max_attempts=3,
     )
@@ -1543,34 +1570,46 @@ def _clean_option_slug(code: str) -> str:
     return code
 
 
+SELECT_ATTRIBUTE_TYPES = {"pim_catalog_simpleselect", "pim_catalog_multiselect"}
+
+
+def akeneo_is_select_attribute(attribute_code: str) -> bool:
+    """Etykiety opcji rozwiązujemy tylko dla atrybutów typu select; tekst zostaje bez zmian."""
+    try:
+        return akeneo_get_attribute(attribute_code).get("type") in SELECT_ATTRIBUTE_TYPES
+    except Exception:
+        return False
+
+
 @st.cache_data(ttl=7200, show_spinner=False)
+def _akeneo_option_label(attribute_code: str, option_code: str, locale: str) -> str:
+    response = request_with_retry(
+        "GET",
+        _akeneo_root() + f"/api/rest/v1/attributes/{quote(attribute_code, safe='')}/options/{quote(option_code, safe='')}",
+        headers=akeneo_headers(),
+        max_attempts=2,
+        timeout=10,
+    )
+    response.raise_for_status()
+    labels = response.json().get("labels") or {}
+    return str(
+        labels.get(locale)
+        or labels.get("pl_PL")
+        or labels.get("en_US")
+        or labels.get("en_GB")
+        or labels.get("default")
+        or next((value for value in labels.values() if value), "")
+    ).strip()
+
+
 def akeneo_get_option_label(attribute_code: str, option_code: str, token: str, locale: str = DEFAULT_LOCALE) -> str:
     if not option_code or not token:
         return _clean_option_slug(option_code)
     try:
-        response = request_with_retry(
-            "GET",
-            _akeneo_root() + f"/api/rest/v1/attributes/{attribute_code}/options/{option_code}",
-            headers=akeneo_headers(token),
-            max_attempts=2,
-            timeout=10,
-        )
-        if response.status_code == 200:
-            data = response.json()
-            labels = data.get("labels") or {}
-            label = (
-                labels.get(locale)
-                or labels.get("pl_PL")
-                or labels.get("en_US")
-                or labels.get("en_GB")
-                or labels.get("default")
-                or next((value for value in labels.values() if value), "")
-            )
-            if label:
-                return str(label).strip()
+        # Nieudane zapytanie nie trafia do cache, więc kolejna próba może się powieść.
+        return _akeneo_option_label(attribute_code, option_code, locale) or _clean_option_slug(option_code)
     except Exception:
-        pass
-    return _clean_option_slug(option_code)
+        return _clean_option_slug(option_code)
 
 
 def _value_from_values(
@@ -1588,26 +1627,18 @@ def _value_from_values(
             scope_ok = entry.get("scope") in (None, channel)
             locale_ok = entry.get("locale") in (None, locale)
             if scope_ok and locale_ok:
-                data = entry.get("data", "")
-                if isinstance(data, list):
-                    if resolve_option and token:
-                        return ", ".join(akeneo_get_option_label(name, str(item).strip(), token, locale) for item in data if str(item).strip())
-                    return ", ".join(str(item).strip() for item in data if str(item).strip())
-                val = safe_string_value(data)
-                if resolve_option and token and val:
-                    return akeneo_get_option_label(name, val, token, locale) or val
-                return val
+                return _entry_text(name, entry.get("data", ""), locale, token, resolve_option)
         if entries and not strict_scope:
-            data = entries[0].get("data", "")
-            if isinstance(data, list):
-                if resolve_option and token:
-                    return ", ".join(akeneo_get_option_label(name, str(item).strip(), token, locale) for item in data if str(item).strip())
-                return ", ".join(str(item).strip() for item in data if str(item).strip())
-            val = safe_string_value(data)
-            if resolve_option and token and val:
-                return akeneo_get_option_label(name, val, token, locale) or val
-            return val
+            return _entry_text(name, entries[0].get("data", ""), locale, token, resolve_option)
     return ""
+
+
+def _entry_text(name: str, data: Any, locale: str, token: str, resolve_option: bool) -> str:
+    items = [str(item).strip() for item in data] if isinstance(data, list) else [safe_string_value(data)]
+    items = [item for item in items if item]
+    if resolve_option and token and items and akeneo_is_select_attribute(name):
+        items = [akeneo_get_option_label(name, item, token, locale) or item for item in items]
+    return ", ".join(items)
 
 
 def _list_from_values(
@@ -1797,7 +1828,8 @@ def akeneo_search_products(
         if response.status_code != 200:
             continue
         for item in response.json().get("_embedded", {}).get("items", []):
-            parsed = parse_akeneo_product(item, DEFAULT_CHANNEL, locale, token=token)
+            # Do listy wyników wystarczy tytuł; bez rozwiązywania etykiet opcji per produkt.
+            parsed = parse_akeneo_product(item, DEFAULT_CHANNEL, locale, token="")
             sku = parsed["identifier"]
             if sku:
                 products[sku] = {
@@ -1810,13 +1842,13 @@ def akeneo_search_products(
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
-def akeneo_fetch_categories(token: str, locale: str) -> List[Dict]:
+def akeneo_fetch_categories(_token: str, locale: str) -> List[Dict]:
     url = _akeneo_root() + "/api/rest/v1/categories"
     categories: List[Dict] = []
     params: Optional[Dict] = {"limit": 100}
     next_url: Optional[str] = url
     while next_url:
-        response = request_with_retry("GET", next_url, headers=akeneo_headers(token), params=params)
+        response = request_with_retry("GET", next_url, headers=akeneo_headers(), params=params)
         if response.status_code != 200:
             break
         payload = response.json()
@@ -1915,7 +1947,7 @@ def akeneo_update_description(
 
     response = request_with_retry(
         "PATCH",
-        _akeneo_root() + f"/api/rest/v1/products/{sku}",
+        _akeneo_root() + f"/api/rest/v1/products/{quote(sku, safe='')}",
         headers=akeneo_headers(token, "application/json"),
         data=json.dumps(payload, ensure_ascii=False),
     )
@@ -2315,13 +2347,6 @@ def process_product_from_akeneo(
                 product_data.get("isbn") or product_data.get("ean") or sku,
             )
 
-        if not product_data.get("contributor_role"):
-            product_data["contributor_role"] = detect_contributor_role(
-                product_data.get("title", ""),
-                product_data.get("description", ""),
-                research or "",
-            )
-
         generated = generate_description(
             product_data, internal_link=internal_link, link_only=link_only, research=research,
         )
@@ -2336,12 +2361,7 @@ def process_product_from_akeneo(
             "meta_description": "",
             "description_quality": quality,
             "meta_only": False,
-            "required_link": internal_link.get("url", "") if isinstance(internal_link, dict) else "",
-            "required_link_paragraph": 2 if isinstance(internal_link, dict) and internal_link and not link_only else 0,
-            "allowed_links": [target["url"] for target in internal_link] if automatic else None,
             "link_report": link_report,
-            "required_contributors": [] if link_only else product_data.get("contributors", []),
-            "required_contributor_role": "" if link_only else product_data.get("contributor_role", ""),
             "channel": channel,
             "locale": locale,
             "model": GEMINI_MODEL,
@@ -3392,7 +3412,7 @@ def akeneo_get_product_details(
     with AKENEO_REQUEST_SEMAPHORE:
         response = request_with_retry(
             "GET",
-            _akeneo_root() + f"/api/rest/v1/products/{sku}",
+            _akeneo_root() + f"/api/rest/v1/products/{quote(sku, safe='')}",
             headers=akeneo_headers(token),
         )
     if response.status_code == 404:
@@ -4598,7 +4618,6 @@ def get_internal_link() -> Optional[Dict]:
             "mode": "automatic",
             "targets": st.session_state.get("link_targets", []),
             "api_key": st.secrets.get("TYPESAFE_API_KEY", ""),
-            "model": "jev-1.13.0",
             "threshold": st.session_state.get("link_threshold", 0.8),
             "use_related": st.session_state.get("link_related_enabled", True),
             "firecrawl_api_key": st.secrets.get("FIRECRAWL_API_KEY", ""),
