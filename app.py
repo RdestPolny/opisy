@@ -10,6 +10,7 @@ import sqlite3
 import threading
 import time
 import unicodedata
+import zipfile
 
 from workspace_storage import (
     LEGACY_WORKSPACE_ID,
@@ -21,6 +22,7 @@ from workspace_storage import (
     save_workspace as storage_save_workspace,
 )
 from collections import Counter
+from contextlib import contextmanager
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -96,8 +98,6 @@ LINK_FIELDS = {
     "series": ["series", "seria"],
     "edition": ["edition", "edycja", "wydanie"],
 }
-INTERACTIVE_CHECKPOINT_EVERY = 1
-INTERACTIVE_UI_UPDATE_EVERY = 1
 
 REQUIRED_SECRETS = [
     "AKENEO_BASE_URL",
@@ -201,18 +201,25 @@ def utcnow_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
-def db_connect() -> sqlite3.Connection:
+@contextmanager
+def db_connect() -> Iterator[sqlite3.Connection]:
+    """Transakcja z commitem/rollbackiem i zamknięciem połączenia (sqlite3 sam go nie zamyka)."""
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(DB_PATH, timeout=30)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA synchronous=NORMAL")
-    conn.execute("PRAGMA busy_timeout=30000")
-    return conn
+    try:
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA synchronous=NORMAL")
+        conn.execute("PRAGMA busy_timeout=30000")
+        with conn:
+            yield conn
+    finally:
+        conn.close()
 
 
 def init_db() -> None:
     with db_connect() as conn:
+        # Tryb WAL jest trwały dla pliku bazy, więc wystarczy ustawić go raz.
+        conn.execute("PRAGMA journal_mode=WAL")
         conn.executescript(
             """
             CREATE TABLE IF NOT EXISTS meta_jobs (
@@ -442,6 +449,25 @@ def list_meta_jobs(
         return [dict(row) for row in conn.execute(sql, params).fetchall()]
 
 
+def export_previous_metatags_csv(run_id: Optional[str] = None) -> bytes:
+    """Wartości z Akeneo sprzed pierwszego nadpisania przez aplikację."""
+    output = io.StringIO()
+    writer = csv.writer(output, delimiter="\t", lineterminator="\n")
+    writer.writerow(["sku", "channel", "locale", "meta_title", "meta_description", "akeneo_sent_at"])
+    sql = """
+        SELECT sku, channel, locale, akeneo_previous_meta_title, akeneo_previous_meta_description, akeneo_sent_at
+        FROM meta_jobs
+        WHERE (akeneo_previous_meta_title != '' OR akeneo_previous_meta_description != '')
+    """
+    params: List[object] = []
+    if run_id:
+        sql += " AND run_id=?"
+        params.append(run_id)
+    with db_connect() as conn:
+        writer.writerows(tuple(row) for row in conn.execute(sql + " ORDER BY sku", params))
+    return output.getvalue().encode("utf-8-sig")
+
+
 def list_meta_delivery_jobs(
     *,
     run_id: Optional[str] = None,
@@ -536,6 +562,12 @@ def estimate_batch_input_tokens(run_id: Optional[str], queued_count: int, sample
         token_estimates.append(chars / 3.6)
     avg = sum(token_estimates) / len(token_estimates)
     return {"avg_input_tokens": avg, "estimated_input_tokens": avg * int(queued_count)}
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def cached_batch_input_estimate(run_id: Optional[str], queued_count: int) -> Dict[str, float]:
+    # Estymacja buduje 24 prompty; przy każdym kliknięciu wystarczy wynik sprzed kilku minut.
+    return estimate_batch_input_tokens(run_id, queued_count)
 
 
 def meta_status_counts(run_id: Optional[str] = None) -> Dict[str, int]:
@@ -3920,7 +3952,7 @@ def ingest_batch_result_bytes(job_name: str, content: bytes) -> Dict[str, int]:
 
 
 
-def revalidate_meta_jobs_v44(run_id: Optional[str] = None) -> Dict[str, int]:
+def revalidate_meta_jobs(run_id: Optional[str] = None) -> Dict[str, int]:
     """Przelicza stare validation_failed nowymi, łagodniejszymi regułami bez kosztu AI."""
     jobs = list_meta_jobs(
         statuses=["validation_failed"],
@@ -4518,19 +4550,31 @@ def refresh_and_ingest_batch_jobs(run_id: Optional[str] = None) -> List[Dict]:
 # SESSION STATE I UI HELPERY
 # ═══════════════════════════════════════════════════════════════════
 
-def init_session_state() -> None:
-    workspace_id = st.session_state.get("description_workspace_id", LEGACY_WORKSPACE_ID)
+def _workspace_from_url() -> str:
+    """Kolejka z adresu (?workspace=...), żeby odświeżenie strony nie wracało do kolejki wspólnej."""
+    wanted = str(st.query_params.get("workspace", "") or "")
+    known = {workspace["workspace_id"] for workspace in list_description_workspaces()}
+    return wanted if wanted in known else LEGACY_WORKSPACE_ID
+
+
+def _restore_workspace_state(workspace_id: str) -> None:
     workspace = load_description_workspace(workspace_id)
-    restored_results = workspace["results"]
     restored_products = {sku: {"title": sku} for sku in workspace["selected_skus"]}
-    for result in restored_results:
+    for result in workspace["results"]:
         if result.get("sku") in restored_products:
             restored_products[result["sku"]]["title"] = result.get("title", result["sku"])
+    st.session_state.description_workspace_id = workspace_id
+    st.session_state.bulk_results = workspace["results"]
+    st.session_state.bulk_selected_products = restored_products
+    st.session_state.saved_queue_skus = list(workspace["selected_skus"])
+
+
+def init_session_state() -> None:
+    # Workspace czytamy z bazy tylko przy starcie sesji, nie przy każdym rerunie.
+    if "bulk_results" not in st.session_state:
+        _restore_workspace_state(st.session_state.get("description_workspace_id") or _workspace_from_url())
     defaults = {
-        "bulk_results": restored_results,
-        "description_workspace_id": workspace_id,
         "generator_mode": "Generator opisów",
-        "bulk_selected_products": restored_products,
         "products_to_send": {},
         "link_active": False,
         "link_only": False,
@@ -4558,17 +4602,8 @@ init_session_state()
 
 
 def switch_description_workspace(workspace_id: str) -> None:
-    workspace = load_description_workspace(workspace_id)
-    restored_results = workspace["results"]
-    restored_products = {sku: {"title": sku} for sku in workspace["selected_skus"]}
-    for result in restored_results:
-        sku = result.get("sku")
-        if sku in restored_products:
-            restored_products[sku]["title"] = result.get("title", sku)
-
-    st.session_state.description_workspace_id = workspace_id
-    st.session_state.bulk_results = restored_results
-    st.session_state.bulk_selected_products = restored_products
+    _restore_workspace_state(workspace_id)
+    st.query_params["workspace"] = workspace_id
     st.session_state.products_to_send = {}
     st.session_state.interactive_seed_results = {}
     st.session_state.last_interactive_checkpoint_path = ""
@@ -4719,6 +4754,93 @@ def render_link_catalog(locale: str) -> None:
                 st.error(str(exc))
         if st.session_state.link_targets:
             st.download_button("Pobierz zapisany katalog CSV", pd.DataFrame(st.session_state.link_targets, columns=columns).to_csv(index=False, sep=";"), "katalog_linkowania.csv", "text/csv")
+
+
+BACKUP_DB_NAME = "product_workflow.sqlite3"
+BACKUP_LINKS_NAME = "internal_link_targets.json"
+
+
+def build_app_backup() -> bytes:
+    """ZIP ze spójną kopią SQLite (kolejki, wyniki, kolejki opisów) i katalogiem celów linkowania."""
+    snapshot = DB_PATH.with_name(f"backup-{time.time_ns()}.sqlite3")
+    buffer = io.BytesIO()
+    try:
+        target = sqlite3.connect(snapshot)
+        try:
+            with db_connect() as conn:
+                conn.backup(target)
+        finally:
+            target.close()
+        with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+            archive.write(snapshot, BACKUP_DB_NAME)
+            if LINK_TARGETS_PATH.exists():
+                archive.write(LINK_TARGETS_PATH, BACKUP_LINKS_NAME)
+    finally:
+        snapshot.unlink(missing_ok=True)
+    return buffer.getvalue()
+
+
+def restore_app_backup(raw: bytes) -> List[str]:
+    """Przywraca kopię z build_app_backup; najpierw sprawdza całość, potem podmienia dane."""
+    restored: List[str] = []
+    with zipfile.ZipFile(io.BytesIO(raw)) as archive:
+        names = set(archive.namelist())
+        if BACKUP_DB_NAME not in names:
+            raise ValueError("To nie jest kopia tej aplikacji (brak bazy w archiwum).")
+        targets = None
+        if BACKUP_LINKS_NAME in names:
+            targets = validate_targets(json.loads(archive.read(BACKUP_LINKS_NAME).decode("utf-8")))
+        incoming = DB_PATH.with_name(f"restore-{time.time_ns()}.sqlite3")
+        incoming.write_bytes(archive.read(BACKUP_DB_NAME))
+    try:
+        source = sqlite3.connect(incoming)
+        try:
+            tables = {row[0] for row in source.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            if "meta_jobs" not in tables:
+                raise ValueError("Baza w archiwum nie zawiera kolejki metatagów.")
+            with db_connect() as conn:
+                source.backup(conn)
+        finally:
+            source.close()
+    finally:
+        incoming.unlink(missing_ok=True)
+    init_db()  # migracje, gdy kopia pochodzi ze starszej wersji
+    restored.append("baza zadań i kolejek")
+    if targets is not None:
+        save_link_targets(targets)
+        st.session_state.pop("link_targets", None)
+        restored.append(f"katalog celów linkowania ({len(targets)})")
+    return restored
+
+
+def render_backup_panel() -> None:
+    with st.expander("Kopia zapasowa danych"):
+        st.caption(
+            "Streamlit Cloud nie gwarantuje trwałości dysku: restart lub redeploy może wyczyścić kolejki, "
+            "wyniki i katalog celów linkowania. Pobieraj kopię przed aktualizacją aplikacji."
+        )
+        lazy_download_button(
+            "kopię danych (ZIP)", "app_backup", build_app_backup,
+            f"opisy-kopia-{datetime.now().strftime('%Y%m%d-%H%M')}.zip", "application/zip",
+        )
+        uploaded = st.file_uploader("Przywróć z kopii", type=["zip"], key="backup_upload")
+        if uploaded and st.button("Przywróć dane z kopii", key="restore_backup"):
+            try:
+                restored = restore_app_backup(uploaded.getvalue())
+                st.session_state.pop("bulk_results", None)  # odczytaj kolejkę opisów z przywróconej bazy
+                st.success("Przywrócono: " + ", ".join(restored) + ".")
+            except Exception as exc:
+                st.error(f"Nie udało się przywrócić kopii: {exc}")
+
+
+def lazy_download_button(label: str, key: str, build, file_name: str, mime: str) -> None:
+    """Eksport liczony dopiero po kliknięciu, a nie przy każdym rerunie aplikacji."""
+    state_key = f"export_data_{key}"
+    if st.button(f"Przygotuj: {label}", key=f"prepare_{key}"):
+        with st.spinner("Przygotowuję plik..."):
+            st.session_state[state_key] = build()
+    if st.session_state.get(state_key) is not None:
+        st.download_button(f"Pobierz: {label}", st.session_state[state_key], file_name, mime, key=f"download_{key}")
 
 
 def _toggle_queued_product(key: str, sku: str, title: str) -> None:
@@ -4885,7 +5007,8 @@ def process_selected_products(
     2) serwerowego CSV zapisywanego w trakcie pracy,
     3) SQLite (dla trybu tylko metatagi).
 
-    Jeśli przekazano checkpoint_path, po każdym SKU powstaje atomowy checkpoint CSV.
+    Checkpoint CSV i workspace opisów są zapisywane po każdej paczce
+    (INTERACTIVE_CHUNK_SIZE produktów); metatagi trafiają do SQLite po każdym SKU.
     """
     ordered_skus = list(dict.fromkeys(str(sku).strip() for sku in skus if str(sku).strip()))
     total = len(ordered_skus)
@@ -4971,33 +5094,19 @@ def process_selected_products(
                 results_by_sku[sku] = result
                 newly_processed += 1
                 done_count = resumed_count + newly_processed
+                progress.progress(
+                    done_count / total,
+                    f"Gotowe {done_count}/{total} · nowe {newly_processed} · wznowione {resumed_count}",
+                )
 
-                if not meta_only:
-                    save_description_workspace(
-                        ordered_skus,
-                        [results_by_sku[item] for item in ordered_skus if item in results_by_sku],
-                    )
-
-                # Checkpoint jest celowo częsty. Przy 500 produktach oznacza ~100
-                # małych, atomowych zapisów, ale najwyżej kilka wyników może zostać
-                # utraconych przy brutalnym ubiciu procesu.
-                if checkpoint_path and newly_processed % INTERACTIVE_CHECKPOINT_EVERY == 0:
-                    write_interactive_checkpoint(checkpoint_path, ordered_skus, results_by_sku)
-
-                # Nie wysyłamy wiadomości do przeglądarki po każdym SKU - to zmniejsza
-                # obciążenie websocketu Streamlita przy długich przebiegach.
-                if newly_processed % INTERACTIVE_UI_UPDATE_EVERY == 0 or done_count == total:
-                    progress.progress(
-                        done_count / total,
-                        f"Gotowe {done_count}/{total} · nowe {newly_processed} · wznowione {resumed_count}",
-                    )
-
-        # Twardy checkpoint po każdej małej paczce produktów.
+        # Zapis raz na paczkę: pełny zapis po każdym SKU rósł kwadratowo z długością listy.
+        if not meta_only:
+            save_description_workspace(
+                ordered_skus,
+                [results_by_sku[item] for item in ordered_skus if item in results_by_sku],
+            )
         if checkpoint_path:
             write_interactive_checkpoint(checkpoint_path, ordered_skus, results_by_sku)
-
-    if checkpoint_path:
-        write_interactive_checkpoint(checkpoint_path, ordered_skus, results_by_sku)
 
     progress.progress(1.0, f"Gotowe {total}/{total}")
     if checkpoint_path:
@@ -5013,7 +5122,7 @@ def process_selected_products(
 
 st.markdown(f'<h1 class="main-header">📚 {APP_NAME}</h1>', unsafe_allow_html=True)
 st.markdown(
-    f'<p class="sub-header">v{APP_VERSION} · Gemini: {GEMINI_MODEL} · AI meta title + seed i kontrola powtarzalności</p>',
+    f'<p class="sub-header">v{APP_VERSION} · Gemini: {GEMINI_MODEL}</p>',
     unsafe_allow_html=True,
 )
 
@@ -5114,6 +5223,9 @@ with st.sidebar:
         )
         if st.session_state.use_research and "PERPLEXITY_API_KEY" not in st.secrets:
             st.caption("Brak PERPLEXITY_API_KEY - research będzie pomijany.")
+
+    st.markdown("---")
+    render_backup_panel()
 
 
 interactive_tab, scale_tab, results_tab = st.tabs(
@@ -5772,7 +5884,7 @@ with scale_tab:
 
             shard_count = (queued_count + int(products_per_batch) - 1) // int(products_per_batch) if queued_count else 0
             active_jobs = active_batch_job_count(selected_run)
-            estimate = estimate_batch_input_tokens(selected_run, queued_count)
+            estimate = cached_batch_input_estimate(selected_run, queued_count)
             plan_cols = st.columns(4)
             plan_cols[0].metric("SKU do wysłania", queued_count)
             plan_cols[1].metric("Planowane shardy", shard_count)
@@ -5782,7 +5894,7 @@ with scale_tab:
                 f"{estimate['estimated_input_tokens'] / 1_000_000:.1f}M tok." if estimate['estimated_input_tokens'] else "0",
             )
             st.caption(
-                "Batch Turbo v4.6: ok. 1000 SKU/shard, do 12 równoległych uploadów, soft cap 80 aktywnych jobs, "
+                "Batch: ok. 1000 SKU/shard, do 12 równoległych uploadów, soft cap 80 aktywnych jobs, "
                 "20 równoległych status-checków i 8 downloadów. Gotowe shardy są odbierane niezależnie. "
                 "Gemini 3.5 Flash-Lite ma domyślny minimal thinking; nie dokładamy zbędnych parametrów JSONL."
             )
@@ -5795,7 +5907,7 @@ with scale_tab:
                     sent_products = sum(item.get("products", 0) for item in submitted if item.get("job_name"))
                     sent_jobs = sum(1 for item in submitted if item.get("job_name"))
                     st.success(f"Wysłano {sent_jobs} jobs dla {sent_products:,} produktów.".replace(",", " "))
-                    st.dataframe(pd.DataFrame(submitted), use_container_width=True)
+                    st.dataframe(pd.DataFrame(submitted), width="stretch")
                 else:
                     st.info("Ta partia nie ma produktów ze statusem queued.")
 
@@ -5805,7 +5917,7 @@ with scale_tab:
                 if updates:
                     ingested_now = sum(1 for row in updates if row.get("ingested"))
                     st.success(f"Odebrano teraz {ingested_now} gotowych shardów.")
-                    st.dataframe(pd.DataFrame(updates), use_container_width=True)
+                    st.dataframe(pd.DataFrame(updates), width="stretch")
                 else:
                     st.info("Brak nieodebranych zadań batch w tej partii.")
 
@@ -5824,7 +5936,7 @@ with scale_tab:
                 batch_df = pd.DataFrame(batch_rows)
                 st.dataframe(
                     batch_df[["display_name", "state", "product_count", "created_at", "ingested_at", "error_message"]],
-                    use_container_width=True,
+                    width="stretch",
                     hide_index=True,
                 )
         else:
@@ -5845,12 +5957,14 @@ with results_tab:
         key="results_run_filter",
     )
     counts = meta_status_counts(result_run or None)
-    st.json(counts)
+    count_columns = st.columns(max(len(counts), 1))
+    for column, (status_name, status_count) in zip(count_columns, sorted(counts.items())):
+        column.metric(status_name, f"{int(status_count):,}".replace(",", " "))
 
-    st.caption("v4.6: podobne początki i duplikaty meta description nie blokują eksportu. Poziomy meta title są sprawdzane przede wszystkim względem nazwy produktu, nie linków i opisów innych wariantów.")
+    st.caption("Podobne początki i duplikaty meta description nie blokują eksportu. Poziomy meta title są sprawdzane przede wszystkim względem nazwy produktu, nie linków i opisów innych wariantów.")
     col_revalidate, col_audit, col_requeue = st.columns(3)
-    if col_revalidate.button("Przelicz walidację v4.6 bez AI"):
-        audit = revalidate_meta_jobs_v44(run_id=result_run or None)
+    if col_revalidate.button("Przelicz walidację bez AI"):
+        audit = revalidate_meta_jobs(run_id=result_run or None)
         st.success(
             f"Sprawdzono {audit['checked']} produktów. Bez regenerowania zaakceptowano {audit['promoted']}; "
             f"nadal wymagają poprawy {audit['still_failed']}."
@@ -5869,15 +5983,18 @@ with results_tab:
         st.success(f"Do kolejki wróciło {count} produktów.")
 
     completed_count = counts.get("completed", 0)
+    export_scope = result_run or "all"
     if completed_count:
-        st.download_button(
-            f"Pobierz CSV Magento - {completed_count} poprawnych produktów",
-            export_meta_csv(["completed"], run_id=result_run or None),
+        lazy_download_button(
+            f"CSV Magento - {completed_count} poprawnych produktów",
+            f"magento_{export_scope}",
+            lambda: export_meta_csv(["completed"], run_id=result_run or None),
             "magento_metatagi.tsv",
             "text/tab-separated-values",
         )
 
-        with st.expander("Wyślij poprawne metatagi bezpośrednio do Akeneo"):
+        # Lista wysyłki czyta całą partię z bazy, więc ładujemy ją dopiero na żądanie.
+        if st.toggle("Wyślij poprawne metatagi bezpośrednio do Akeneo", key=f"show_delivery_{export_scope}"):
             delivery_all = list_meta_delivery_jobs(run_id=result_run or None, include_sent=True)
             delivered_count = sum(1 for job in delivery_all if job.get("akeneo_status") == "sent")
             failed_delivery_count = sum(1 for job in delivery_all if job.get("akeneo_status") == "failed")
@@ -5936,11 +6053,19 @@ with results_tab:
                             )
                 except Exception as exc:
                     st.error(f"Nie udało się rozpocząć wysyłki do Akeneo: {exc}")
-    st.download_button(
-        "Pobierz raport jakości CSV",
-        export_quality_report_csv(run_id=result_run or None),
+    lazy_download_button(
+        "Raport jakości CSV",
+        f"quality_{export_scope}",
+        lambda: export_quality_report_csv(run_id=result_run or None),
         "raport_jakosci_metatagow.csv",
         "text/csv",
+    )
+    lazy_download_button(
+        "Metatagi z Akeneo sprzed nadpisania (do przywrócenia)",
+        f"previous_{export_scope}",
+        lambda: export_previous_metatags_csv(run_id=result_run or None),
+        "akeneo_metatagi_przed_zmiana.tsv",
+        "text/tab-separated-values",
     )
 
     status_filter = st.multiselect(
@@ -5960,7 +6085,6 @@ with results_tab:
             "status",
             "meta_title",
             "meta_description",
-            "opening_mode",
             "opening_signature",
             "attempts",
             "validation_errors",
@@ -5969,7 +6093,14 @@ with results_tab:
             "akeneo_sent_at",
             "akeneo_error",
         ]
-        st.dataframe(preview_df[visible_columns], use_container_width=True, hide_index=True)
+        st.dataframe(preview_df[visible_columns], width="stretch", hide_index=True)
+
+# Kolejka opisów jest zapisywana od razu po zmianie, nie dopiero przy generowaniu.
+if not st.session_state.get("meta_only"):
+    current_queue = list(st.session_state.bulk_selected_products)
+    if current_queue != st.session_state.get("saved_queue_skus"):
+        save_description_workspace(current_queue, st.session_state.bulk_results)
+        st.session_state.saved_queue_skus = current_queue
 
 st.markdown("---")
 st.caption(
