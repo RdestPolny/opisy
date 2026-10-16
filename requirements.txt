@@ -1,7 +1,6 @@
-streamlit>=1.51
-pandas
-requests
-google-genai>=1.63.0
+streamlit>=1.51,<2
+pandas>=2.2,<4
+requests>=2.32,<3
+google-genai>=1.63.0,<3
 httpx>=0.28,<1
 nh3==0.3.7
-# runtime-refresh: validator-api-v4

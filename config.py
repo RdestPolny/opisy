@@ -6,7 +6,7 @@ from pathlib import Path
 import streamlit as st
 
 
-APP_VERSION = "4.11.1"
+APP_VERSION = "4.14.0"
 APP_NAME = "Generator opisów i metatagów produktów"
 DESCRIPTION_PROMPT_VERSION = "description-v4.10-contextual-links"
 PROMPT_VERSION = "meta-v4.9.0-contributors-description-quality-akeneo-write-2026-09"

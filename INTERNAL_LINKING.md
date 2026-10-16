@@ -70,7 +70,7 @@ Link do produktu wymaga jawnego `source_skus` oraz znanej, zgodnej `edition`
 po obu stronach. Wpisanie mapowania oznacza potwierdzenie relacji przez operatora;
 sam podobny tytuł ani ogólna asocjacja cross-sell nie wystarcza. Nie linkujemy SKU do siebie.
 
-Obsługiwane nazwy atrybutów Akeneo są określone w `LINK_FIELDS` w `app.py`:
+Obsługiwane nazwy atrybutów Akeneo są określone w `LINK_FIELDS` w `config.py`:
 
 - szkoła: `school_type`, `typ_szkoly`, `szkola`;
 - klasa: `grade`, `klasa`;

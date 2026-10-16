@@ -42,6 +42,24 @@ class AppSmokeTests(unittest.TestCase):
         mode.set_value(next(o for o in mode.options if o != mode.value)).run()
         self.assertFalse(at.exception, [e.value for e in at.exception])
 
+    def test_results_tab_exports_and_backup_with_data(self):
+        import job_store
+
+        job_store.init_db()  # ścieżka względna -> baza w katalogu tymczasowym testu
+        job_store.bulk_upsert_meta_jobs([{
+            "sku": "A", "channel": "Bookland", "locale": "pl_PL", "store_view_code": "sv",
+            "product_data": {"title": "Tytuł", "author": "", "description": "Opis"},
+        }])
+        job_store.save_meta_results_bulk([{"job_key": job_store.make_job_key("A", "Bookland", "pl_PL"),
+                                           "meta_title": "Tytuł", "meta_description": "Opis", "status": "completed"}])
+        at = self.run_app()
+        for label in ("Przygotuj: CSV Magento", "Przygotuj: Raport jakości", "Przygotuj: kopię danych"):
+            next(b for b in at.button if b.label.startswith(label)).click().run()
+            self.assertFalse(at.exception, [e.value for e in at.exception])
+        next(t for t in at.toggle if "Akeneo" in t.label).set_value(True).run()
+        self.assertFalse(at.exception, [e.value for e in at.exception])
+        self.assertTrue(any(b.label.startswith("Wyślij do Akeneo (1)") for b in at.button))
+
 
 if __name__ == "__main__":
     unittest.main()

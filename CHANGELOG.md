@@ -1,3 +1,33 @@
+# 4.14.0
+
+Porządki po audycie: poprawki błędów kolejki i Akeneo, szybsze reruny, podział app.py na moduły.
+
+Błędy
+- Ponowny import nie resetuje zadań w trwającym batchu (podwójny koszt Gemini), a wynik batcha trafia
+  tylko do zadań, które nadal na niego czekają. Zadania bez odpowiedzi dostają status failed.
+- Odzyskiwanie batchy po crashu pomija zadania znane lokalnie i zakończone porażką.
+- Token Akeneo jest odnawiany przed wygaśnięciem i po odpowiedzi 401; długie przebiegi nie kończą się serią 401.
+- Import SKU odróżnia „brak produktu” od błędu Akeneo w raporcie.
+- Wysyłka metatagów zapisuje wartości sprzed nadpisania (nowy eksport do przywrócenia), pomija identyczne
+  i nie gubi statusów przy błędzie jednej paczki.
+- Etykiety opcji są rozwiązywane tylko dla atrybutów typu select (tekst nie zamienia się w slug);
+  cache Akeneo nie zależy od tokenu i nie zapamiętuje błędów.
+- Filtr linków działa zawsze: przetrwają tylko wybrane cele i linki z opisu źródłowego.
+  Tryb „tylko link” nie usuwa istniejących linków. Ucięty opis (MAX_TOKENS) jest generowany ponownie.
+- Checkboxy kolejki nie cofają „Zaznacz pierwsze N” ani czyszczenia kolejki.
+
+Wydajność i dane
+- Eksporty CSV i lista wysyłki do Akeneo liczone na żądanie, nie przy każdym kliknięciu.
+- Checkpointy zapisywane raz na paczkę; workspace czytany raz na sesję i zapamiętany w adresie (`?workspace=`);
+  kolejka opisów zapisuje się od razu. Połączenia SQLite są zamykane.
+- Panel „Kopia zapasowa danych”: ZIP z bazą i katalogiem celów oraz przywracanie.
+
+Kod
+- app.py podzielony na moduły (opis w README); usunięte zdublowane prompty i stałe, martwy kod,
+  licznik opisanych produktów oraz snapshot sitemap z workflow (−11 MB w repozytorium).
+- Testy kolejki, wysyłki, kopii, ponowień HTTP i smoke test całej aplikacji; CI w GitHub Actions.
+- Wersje zależności mają górne granice.
+
 # 4.13.0
 
 Jev ocenia wszystkich kandydatów spod karty produktu, a sitemap nie jest już źródłem linków.

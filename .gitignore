@@ -1,6 +1,9 @@
-.streamlit/secrets.toml
+# Dane runtime aplikacji (baza, batche, checkpointy, katalog celów, sekrety)
+.streamlit/*
+!.streamlit/config.toml
 config.json
+
 __pycache__/
+*.pyc
+.venv/
 .DS_Store
-.streamlit/internal_link_targets.json
-.streamlit/internal_link_targets.*.tmp
