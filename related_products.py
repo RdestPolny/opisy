@@ -151,6 +151,19 @@ def same_work(title_a: str, title_b: str) -> bool:
 
 # ───────────────────────────── Luigi's Box ─────────────────────────────
 
+def _is_in_stock(attrs: Dict) -> bool:
+    """Stan magazynowy w sklepie z ``availability_boolean``/``availability``. Pole ``is_available``
+    ma w indeksie Booklandu zawsze 0, więc go nie używamy; brak danych traktujemy jak dostępny."""
+    for key in ("availability_boolean", "availability"):
+        raw = attrs.get(key)
+        raw = raw[0] if isinstance(raw, list) and raw else raw
+        try:
+            return int(float(raw)) > 0
+        except (TypeError, ValueError):
+            continue
+    return True
+
+
 def summarize_luigis_hit(hit: Dict) -> Optional[Dict]:
     """Zamienia trafienie Luigi's Box w zwięzły opis produktu dla Jev i promptu."""
     if not isinstance(hit, dict):
@@ -171,7 +184,6 @@ def summarize_luigis_hit(hit: Dict) -> Optional[Dict]:
         return None
     paths = [path for path in _values(attrs.get("category_upto_lvl_5")) if path]
     category_paths = [" > ".join(part.strip() for part in path.split("|") if part.strip()) for path in paths]
-    available = _as_int(attrs.get("is_available"))
     return {
         "id": str(hit.get("url") or _first(attrs.get("lb_id")) or _first(attrs.get("sku"))),
         "title": title,
@@ -184,7 +196,7 @@ def summarize_luigis_hit(hit: Dict) -> Optional[Dict]:
         "publisher": _first(attrs.get("wydawnictwo")) or _first(attrs.get("brand")),
         "binding": _first(attrs.get("oprawa")),
         "publication_year": (_first(attrs.get("publication_year")) or "").split(".")[0],
-        "available": available is None or available > 0,
+        "available": _is_in_stock(attrs),
         "visible": _first(attrs.get("widoczne_bookland")) != "0",
         "crosslinking": _first(attrs.get("use_in_crosslinking")) != "0",
         "category_names": _raw_list(attrs.get("category")),
@@ -237,6 +249,37 @@ def luigis_find_item(item_id: str, *, session=None, timeout=_TIMEOUT) -> Optiona
         if str(hit.get("url")) == item_id:
             return hit
     return None
+
+
+# Status produktu w sklepie dla listy wyboru: brak karty oznacza brak URL-a i rekomendacji do linkowania.
+SHOP_STATUS_LABELS = {
+    "missing": "brak w sklepie",
+    "hidden": "ukryty w sklepie",
+    "out_of_stock": "brak na stanie",
+}
+
+
+def luigis_item_statuses(item_ids: Iterable[str], *, session=None, chunk_size: int = 50,
+                         timeout=_TIMEOUT) -> Dict[str, Dict]:
+    """Sprawdza wiele SKU naraz (filtry ``lb_id`` łączą się przez OR) i zwraca
+    {sku: {"status": ok|out_of_stock|hidden|missing, "url": ...}}."""
+    ids = list(dict.fromkeys(str(item).strip() for item in item_ids if str(item).strip()))
+    statuses: Dict[str, Dict] = {}
+    for start in range(0, len(ids), chunk_size):
+        chunk = ids[start:start + chunk_size]
+        params = [("tracker_id", LUIGIS_TRACKER_ID), ("f[]", "type:product"),
+                  *(("f[]", f"lb_id:{item}") for item in chunk), ("size", str(len(chunk)))]
+        response = (session or requests).get(f"{LUIGIS_API}/search", params=params, timeout=timeout)
+        response.raise_for_status()
+        for hit in ((response.json() or {}).get("results") or {}).get("hits") or []:
+            item = summarize_luigis_hit(hit)
+            if not item or str(hit.get("url")) not in chunk:
+                continue
+            status = "hidden" if not item["visible"] else "out_of_stock" if not item["available"] else "ok"
+            statuses[str(hit.get("url"))] = {"status": status, "url": item["url"]}
+    for item in ids:
+        statuses.setdefault(item, {"status": "missing", "url": ""})
+    return statuses
 
 
 def luigis_search_by_title(title: str, *, session=None, timeout=_TIMEOUT) -> Optional[Dict]:

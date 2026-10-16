@@ -61,5 +61,33 @@ class AppSmokeTests(unittest.TestCase):
         self.assertTrue(any(b.label.startswith("Wyślij do Akeneo (1)") for b in at.button))
 
 
+    def test_search_marks_products_missing_from_shop(self):
+        from unittest.mock import patch
+
+        import akeneo
+        import ui
+
+        products = [{"identifier": "A", "title": "W sklepie"}, {"identifier": "B", "title": "Poza sklepem"},
+                    {"identifier": "C", "title": "Wyprzedany"}]
+        statuses = {"A": {"status": "ok", "url": "u"}, "B": {"status": "missing", "url": ""},
+                    "C": {"status": "out_of_stock", "url": "u"}}
+        ui._cached_shop_statuses.clear()
+        with patch.object(akeneo, "akeneo_search_products", return_value=products), \
+             patch.object(akeneo, "akeneo_get_token", return_value="t"), \
+             patch.object(ui, "luigis_item_statuses", return_value=statuses):
+            at = self.run_app()
+            next(t for t in at.text_input if t.label == "Szukaj produktu").set_value("matematyka")
+            next(b for b in at.button if b.label == "Szukaj").click().run()
+            labels = [c.label for c in at.checkbox if c.key and c.key.startswith("search_")]
+            self.assertEqual(len(labels), 3)
+            self.assertIn("⛔ brak w sklepie", labels[1])
+            self.assertIn("⚠️ brak na stanie", labels[2])
+            self.assertNotIn("⛔", labels[0])
+            next(c for c in at.checkbox if c.key == "hide_unlinkable_search").check().run()
+            labels = [c.label for c in at.checkbox if c.key and c.key.startswith("search_")]
+            self.assertEqual([label.split(" - ")[0] for label in labels], ["A", "C"])
+            self.assertFalse(at.exception, [e.value for e in at.exception])
+
+
 if __name__ == "__main__":
     unittest.main()

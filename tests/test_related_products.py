@@ -11,6 +11,7 @@ from related_products import (
     fetch_related_products,
     parse_product_page,
     last_segment_url,
+    luigis_item_statuses,
     rank_related_products,
     same_work,
     title_slug_url,
@@ -112,6 +113,28 @@ class LuigisRetrievalTests(unittest.TestCase):
         related = fetch_related_products({"identifier": MZP}, session=FakeLuigis(fail=True))
         self.assertEqual(related["products"], [])
         self.assertIn("Luigi's Box niedostępny", related["warnings"][0])
+
+    def test_shop_statuses_in_one_request(self):
+        session = FakeLuigis()
+        statuses = luigis_item_statuses([MZP, KULT, "0000000000000", MZP], session=session)
+        self.assertEqual(statuses[MZP]["status"], "ok")
+        self.assertTrue(statuses[MZP]["url"].startswith("https://bookland.com.pl/matematyka-z-plusem"))
+        self.assertEqual(statuses["0000000000000"], {"status": "missing", "url": ""})
+        self.assertEqual(len(session.calls), 1)
+        lb_filters = [value for key, value in session.calls[0][2] if key == "f[]" and value.startswith("lb_id:")]
+        self.assertEqual(len(lb_filters), 3)
+
+    def test_shop_status_reads_stock_and_visibility(self):
+        def statuses(**attrs):
+            raw = {**FIXTURE[KULT]["s"], "a": {**FIXTURE[KULT]["s"]["a"], **attrs}}
+            session = FakeLuigis()
+            session.get = lambda url, params=None, timeout=None: session._response({"results": {"hits": [hit(raw)]}})
+            return luigis_item_statuses([KULT], session=session)[KULT]["status"]
+
+        self.assertEqual(statuses(), "ok")  # is_available=0 w indeksie nie oznacza braku towaru
+        self.assertEqual(statuses(availability_boolean=["0"]), "out_of_stock")
+        self.assertEqual(statuses(availability=1, availability_boolean=["1"]), "ok")
+        self.assertEqual(statuses(widoczne_bookland=["0"]), "hidden")
 
     def test_title_slug_and_last_segment_urls(self):
         self.assertEqual(title_slug_url("Kult. Łukasz Orbitowski"), "https://bookland.com.pl/kult-lukasz-orbitowski")

@@ -9,7 +9,7 @@ import zipfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import pandas as pd
 import streamlit as st
@@ -38,6 +38,7 @@ from description_output import (
 )
 from descriptions import process_product_from_akeneo
 from internal_linking import SCORE_THRESHOLD
+from related_products import SHOP_STATUS_LABELS, luigis_item_statuses
 from job_store import (
     clear_description_workspace,
     db_connect,
@@ -246,6 +247,50 @@ def _toggle_queued_product(key: str, sku: str, title: str) -> None:
         st.session_state.bulk_selected_products[sku] = {"title": title}
     else:
         st.session_state.bulk_selected_products.pop(sku, None)
+
+
+SHOP_STATUS_ICONS = {"missing": "⛔", "hidden": "⛔", "out_of_stock": "⚠️"}
+UNLINKABLE_STATUSES = {"missing", "hidden"}
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def _cached_shop_statuses(skus: Tuple[str, ...]) -> Dict[str, Dict]:
+    return luigis_item_statuses(skus)
+
+
+def shop_statuses(products: Sequence[Dict]) -> Optional[Dict[str, Dict]]:
+    """Status produktów w sklepie (Luigi's Box) albo None, gdy nie udało się sprawdzić."""
+    skus = tuple(sorted({str(product["identifier"]) for product in products}))
+    if not skus:
+        return {}
+    try:
+        return _cached_shop_statuses(skus)
+    except Exception:
+        return None
+
+
+def filter_by_shop_status(products: List[Dict], statuses: Optional[Dict[str, Dict]], key: str) -> List[Dict]:
+    """Podsumowanie dostępności w sklepie i opcja ukrycia produktów bez karty na Booklandzie."""
+    if statuses is None:
+        st.caption("Nie udało się sprawdzić dostępności produktów w sklepie (Luigi's Box).")
+        return products
+    unlinkable = [p for p in products if statuses.get(str(p["identifier"]), {}).get("status") in UNLINKABLE_STATUSES]
+    out_of_stock = sum(statuses.get(str(p["identifier"]), {}).get("status") == "out_of_stock" for p in products)
+    if not unlinkable and not out_of_stock:
+        st.caption(f"Wszystkie {len(products)} produkty są dostępne w sklepie.")
+        return products
+    st.caption(
+        f"⛔ {len(unlinkable)} bez widocznej karty w sklepie: nie dostaną linków ani URL-a. "
+        f"⚠️ {out_of_stock} z kartą, ale bez towaru na stanie."
+    )
+    if unlinkable and st.checkbox("Ukryj produkty bez karty w sklepie", key=f"hide_unlinkable_{key}"):
+        return [p for p in products if p not in unlinkable]
+    return products
+
+
+def shop_status_suffix(statuses: Optional[Dict[str, Dict]], sku: str) -> str:
+    status = (statuses or {}).get(str(sku), {}).get("status", "ok")
+    return f" · {SHOP_STATUS_ICONS[status]} {SHOP_STATUS_LABELS[status]}" if status in SHOP_STATUS_LABELS else ""
 
 
 def queue_checkbox(label: str, product: Dict, prefix: str) -> None:

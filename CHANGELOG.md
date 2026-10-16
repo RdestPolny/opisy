@@ -1,3 +1,13 @@
+# 4.16.0
+
+Status produktów w sklepie widoczny przed generowaniem.
+
+- Wyszukiwarka i backlog oznaczają produkty: ⛔ brak w sklepie / ukryty (bez karty i URL-a, więc bez
+  linkowania) oraz ⚠️ brak na stanie. Status pochodzi z Luigi's Box, jedno zapytanie na 50 SKU,
+  wynik w cache na 15 minut. Produkty bez karty można ukryć; „Zaznacz pierwsze N” wtedy je pomija.
+- Stan magazynowy rekomendacji jest czytany z `availability_boolean`; pole `is_available` ma w indeksie
+  Booklandu zawsze 0, przez co wszystkie rekomendacje trafiały do Jev jako „chwilowo niedostępne”.
+
 # 4.15.0
 
 Linkowanie wewnętrzne nie wymaga już niczego ręcznie.

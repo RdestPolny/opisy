@@ -81,10 +81,13 @@ from ui import (
     init_session_state,
     lazy_download_button,
     process_selected_products,
+    filter_by_shop_status,
     queue_checkbox,
     render_backup_panel,
     render_result_preview,
     reset_interactive_results,
+    shop_status_suffix,
+    shop_statuses,
     switch_description_workspace,
 )
 from workspace_storage import LEGACY_WORKSPACE_ID
@@ -257,9 +260,12 @@ with interactive_tab:
             except Exception as exc:
                 st.error(str(exc))
         if st.session_state.search_res:
+            statuses = shop_statuses(st.session_state.search_res)
+            visible_results = filter_by_shop_status(st.session_state.search_res, statuses, "search")
             with st.container(height=420):
-                for product in st.session_state.search_res:
-                    queue_checkbox(f"{product['identifier']} - {product['title']}", product, "search")
+                for product in visible_results:
+                    label = f"{product['identifier']} - {product['title']}"
+                    queue_checkbox(label + shop_status_suffix(statuses, product["identifier"]), product, "search")
 
     elif method == "Wklej SKU lub URL":
         loaded_count = st.session_state.pop("manual_products_loaded", 0)
@@ -400,20 +406,23 @@ with interactive_tab:
                     max_desc_len=int(max_len) if max_len and not only_no_desc else None,
                 )
             if st.session_state.backlog_items:
+                statuses = shop_statuses(st.session_state.backlog_items)
+                visible_backlog = filter_by_shop_status(st.session_state.backlog_items, statuses, "backlog")
+            if st.session_state.backlog_items and visible_backlog:
                 n_select = st.number_input(
                     "Zaznacz pierwszych N",
                     1,
-                    len(st.session_state.backlog_items),
-                    min(10, len(st.session_state.backlog_items)),
+                    len(visible_backlog),
+                    min(10, len(visible_backlog)),
                 )
                 if st.button("Zaznacz pierwsze N"):
-                    for product in st.session_state.backlog_items[: int(n_select)]:
+                    for product in visible_backlog[: int(n_select)]:
                         st.session_state.bulk_selected_products[product["identifier"]] = {"title": product["title"]}
                     st.rerun()
                 with st.container(height=420):
-                    for product in st.session_state.backlog_items:
+                    for product in visible_backlog:
                         label = f"{product['identifier']} - {product['title']} ({product['desc_len']} zn.)"
-                        queue_checkbox(label, product, "backlog")
+                        queue_checkbox(label + shop_status_suffix(statuses, product["identifier"]), product, "backlog")
         except Exception as exc:
             st.error(str(exc))
 
