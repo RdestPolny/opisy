@@ -9,20 +9,18 @@ from urllib.parse import unquote, urljoin, urlsplit
 import requests
 
 from related_products import fetch_related_products, product_item_ids, rank_related_products
-from sitemap_retrieval import (
-    BOOKLAND_SITEMAP_INDEX_URL,
-    DEFAULT_SITEMAP_DB_PATH,
-    find_url_by_title,
-    search_sitemap_candidates,
-)
+# Snapshot sitemap służy już tylko do odszukania kanonicznego adresu karty dla zapasu Firecrawl.
+from sitemap_retrieval import DEFAULT_SITEMAP_DB_PATH, find_url_by_title
 
 FIELDS = ("school", "grade", "subject", "series", "edition")
 HOSTS = {"bookland.com.pl", "www.bookland.com.pl"}
-# Źródła, których URL-e pochodzą z indeksu sklepu (Luigi's Box / sitemap), więc nie
+# Źródło, którego URL-e pochodzą z indeksu sklepu (Luigi's Box), więc nie
 # wymagają ponownego live-checku per SKU.
-TRUSTED_ORIGINS = {"sitemap", "luigisbox"}
+TRUSTED_ORIGINS = {"luigisbox"}
 RELATED_ORIGINS = {"luigisbox", "firecrawl"}
-MAX_JEV_CANDIDATES = 8
+# Limit dotyczy tylko ręcznego katalogu; kandydaci spod karty produktu trafiają do Jev wszyscy.
+MAX_REGISTRY_CANDIDATES = 8
+JEV_TIMEOUT = 30
 # Minimalna trafność Jev (skala 0–3); próg noul (0–1) ustawia operator suwakiem.
 SCORE_THRESHOLD = 2.5
 
@@ -180,68 +178,24 @@ def select_internal_links(product, config) -> dict:
         related_candidates = _related_candidates(product, config, result)
         result["candidates"].extend(related_candidates)
 
-    sitemap_candidates = []
-    # Sitemap (dopasowanie po slugach) jest tylko zapasem, gdy rekomendacje spod karty nic nie dały.
-    if config.get("use_sitemap") and not related_candidates:
-        sitemap_db_path = config.get("sitemap_db_path") or DEFAULT_SITEMAP_DB_PATH
-        sitemap_index_url = config.get("sitemap_index_url") or BOOKLAND_SITEMAP_INDEX_URL
-        try:
-            retrieved = search_sitemap_candidates(
-                product,
-                limit=config.get("sitemap_limit", 8),
-                db_path=sitemap_db_path,
-                index_url=sitemap_index_url,
-            )
-        except (OSError, ValueError, TypeError):
-            retrieved = []
-        for target in retrieved:
-            sitemap_candidates.append({
-                **target,
-                "origin": "sitemap",
-                "category": target["label"],
-                "score": None,
-                "noul": None,
-                "eligible": True,
-                "selected": False,
-                "reason": "",
-                "source_constraints": {},
-            })
-        result["candidates"].extend(sitemap_candidates)
-        if not sitemap_candidates:
-            result["warnings"].append(
-                "Indeks sitemap Booklandu nie zwrócił kandydatów; Jev użyje tylko katalogu ręcznego."
-            )
-
     eligible_registry = [candidate for candidate in registry_candidates if candidate["eligible"]]
-    eligible_sitemap = [candidate for candidate in sitemap_candidates if candidate["eligible"]]
     eligible_related = [candidate for candidate in related_candidates if candidate["eligible"]]
     shortlisted = []
     if eligible_related:
         # Ręczny katalog (potwierdzony przez operatora) dostaje najwyżej po jednym miejscu na typ,
-        # potem 2 kategorie ze ścieżki produktu, a resztę budżetu produkty spod karty.
+        # a Jev ocenia wszystkie kategorie ze ścieżki produktu i wszystkie produkty spod karty.
         for kind in ("category", "product"):
             shortlisted.extend([c for c in eligible_registry if c["kind"] == kind][:1])
-        related_categories = [c for c in eligible_related if c["kind"] == "category"]
-        related_products = [c for c in eligible_related if c["kind"] == "product"]
-        shortlisted.extend(related_categories[:2])
-        shortlisted.extend(related_products[:MAX_JEV_CANDIDATES - len(shortlisted)])
-        shortlisted.extend([c for c in related_categories[2:]][:MAX_JEV_CANDIDATES - len(shortlisted)])
-    elif eligible_sitemap:
-        # Curated registry keeps half the budget, while the cached sitemap retrieval
-        # always gets room in the single bounded Jev request.
-        for kind in ("category", "product"):
-            shortlisted.extend([c for c in eligible_registry if c["kind"] == kind][:2])
-        shortlisted.extend([c for c in eligible_registry if c not in shortlisted][:4 - len(shortlisted)])
-        shortlisted.extend(eligible_sitemap[:8 - len(shortlisted)])
+        shortlisted.extend(c for c in eligible_related if c["kind"] == "category")
+        shortlisted.extend(c for c in eligible_related if c["kind"] == "product")
     else:
         for kind in ("category", "product"):
             shortlisted.extend([c for c in eligible_registry if c["kind"] == kind][:4])
-        shortlisted.extend([c for c in eligible_registry if c not in shortlisted][:8 - len(shortlisted)])
+        shortlisted.extend([c for c in eligible_registry if c not in shortlisted][:MAX_REGISTRY_CANDIDATES - len(shortlisted)])
 
-    eligible = eligible_registry + eligible_related + eligible_sitemap
-    for candidate in eligible:
+    for candidate in eligible_registry:
         if candidate not in shortlisted:
-            candidate["reason"] = "Poza limitem ośmiu kandydatów."
+            candidate["reason"] = "Poza limitem kandydatów z katalogu ręcznego."
     api_key = _text(config.get("api_key"))
     if not api_key:
         result["warnings"].append("Brak klucza TypeSafe: opis powstanie bez linków.")
@@ -284,18 +238,14 @@ def select_internal_links(product, config) -> dict:
             support = {"type": "noul", "instructions": f"Bookland's own recommender shows the product named by {pointer} under the product card of `source`. Using `source` and `candidates[{index}].details`/`relation_to_source`, would a link to it be a natural, useful suggestion for a reader of the `source` description: companion material for the same subject, level or series, another book by the same author, or a close match in the same narrow genre? Another edition or format of the very same title is not useful. Judge only this relationship.",
                        "criteria": {"true": "The supplied facts show a specific, reader-useful relationship (same series/course, same subject and level, same author, or the same narrow genre) and the target is a different title.",
                                     "false": "The relationship is only generic bestseller/popularity overlap, a different subject, level or audience, another edition of the same title, or the facts are insufficient."}}
-        elif candidate["kind"] == "product":
+        else:
             support = {"type": "noul", "instructions": f"Does {pointer} describe relevant companion material for the product in `source`, consistent with its explicit subject and course/series facts? Judge only this semantic relationship.",
                        "criteria": {"true": "The supplied source and target facts support relevant companion material for the same subject and course or series.",
                                     "false": "The target concerns a different subject or course, or the source lacks evidence that the named material is relevant."}}
-        else:
-            support = {"type": "noul", "instructions": f"Does the Bookland sitemap destination named by {pointer} represent a useful internal destination for the product in `source`? Use the supplied label and path only; do not infer facts absent from them.",
-                       "criteria": {"true": "The destination label/path and source facts clearly support a useful topical or product relationship.",
-                                    "false": "The relationship is weak, ambiguous, generic, or unsupported by the supplied source and destination data."}}
         questions[f"support_{index}"] = support
     try:
         response = requests.post("https://api.typesafe.ai/v1/systemone", headers={"Authorization": f"Bearer {api_key}"},
-                                 json={"model": config.get("model") or "jev-1.13.0", "state": state, "questions": questions}, timeout=15)
+                                 json={"model": config.get("model") or "jev-1.13.0", "state": state, "questions": questions}, timeout=JEV_TIMEOUT)
         response.raise_for_status()
         answers = response.json()["answers"]
         scores = []
@@ -320,20 +270,7 @@ def select_internal_links(product, config) -> dict:
             # Remis rozstrzygamy na korzyść głębszej kategorii / mocniejszego powiązania.
             winners.append(max(accepted, key=lambda c: (c["score"], c["noul"], c.get("rank_hint", 0))))
 
-    generic = sorted(
-        [
-            c for c in shortlisted
-            if c["kind"] == "sitemap" and c["score"] >= SCORE_THRESHOLD and c["noul"] >= threshold
-        ],
-        key=lambda c: (c["score"], c["noul"], c.get("retrieval_score", 0)),
-        reverse=True,
-    )
-    for candidate in generic:
-        if len(winners) >= 2:
-            break
-        winners.append(candidate)
-
-    for winner in winners[:2]:
+    for winner in winners:
         winner["selected"] = True
         link = {key: winner[key] for key in ("kind", "code", "label", "url", "category", "origin")}
         if winner.get("relation"):
@@ -383,7 +320,7 @@ def _related_candidates(product: dict, config: dict, result: dict) -> list[dict]
         }
 
     candidates = []
-    for rank, category in enumerate((related.get("categories") or [])[:4]):
+    for rank, category in enumerate(related.get("categories") or []):
         try:
             _validate_url(category["url"])
         except (ValueError, KeyError):
@@ -394,9 +331,12 @@ def _related_candidates(product: dict, config: dict, result: dict) -> list[dict]
             relation="", rank_hint=category.get("depth", 0) - (5 if category.get("publisher") else 0) - rank * 0.01,
         ))
 
+    products = related.get("products") or []
+    # Bez limitu z góry: odpadają tylko self-linki i inne wydania tego samego tytułu.
     ranked = rank_related_products(
-        source, related.get("products") or [], exclude_ids=product_item_ids(product),
-        source_title=_text(product.get("title")), limit=int(config.get("related_product_limit", 6)),
+        source, products, exclude_ids=product_item_ids(product),
+        source_title=_text(product.get("title")),
+        limit=int(config.get("related_product_limit") or len(products) or 1),
     )
     for rank, item in enumerate(ranked):
         url = item["url"]

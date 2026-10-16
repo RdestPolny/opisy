@@ -1,3 +1,15 @@
+# 4.13.0
+
+Jev ocenia wszystkich kandydatów spod karty produktu, a sitemap nie jest już źródłem linków.
+
+- Usunięta opcja „Zapasowo uwzględniaj sitemapę Booklandu w doborze Jev” razem z panelem statusu cache.
+  Gdy Luigi's Box nic nie zwróci, Jev ocenia tylko ręczny katalog celów.
+- Do Jev trafiają wszystkie kategorie ze ścieżki produktu i wszystkie produkty z karuzeli (zwykle 15–20)
+  zamiast limitu 8 kandydatów i wstępnego wyboru 6 produktów. Odpadają tylko self-linki, produkty ukryte
+  i inne wydania tego samego tytułu. Timeout requestu Jev wydłużony z 15 do 30 s.
+- „Automatyczne (Jev)” jest domyślnym trybem doboru celów.
+- Snapshot sitemap zostaje tylko dla zapasu Firecrawl (szukanie adresu karty po tytule).
+
 # 4.12.1
 
 - Tabela „Dobór linków” pokazuje skale i progi: trafność 0–3 (próg 2,5) oraz noul 0–1 (próg z suwaka).

@@ -47,9 +47,7 @@ from description_output import (
 from description_generation import generate_description_result
 from internal_linking import SCORE_THRESHOLD, TRUSTED_ORIGINS, select_internal_links, validate_targets, verify_target_url
 from sitemap_retrieval import (
-    BOOKLAND_SITEMAP_INDEX_URL,
     DEFAULT_SITEMAP_DB_PATH,
-    bundled_snapshot_status,
     restore_bundled_snapshot,
     sitemap_cache_status,
 )
@@ -2672,7 +2670,7 @@ def process_product_from_akeneo(
             selected = []
             for target in link_report["links"]:
                 try:
-                    # URL z sitemap albo z indeksu Luigi's Box (url_key widocznego produktu)
+                    # URL z indeksu Luigi's Box (url_key widocznego produktu)
                     # jest już kanoniczny. Nie robimy kolejnego requestu per SKU;
                     # ręczne cele i linki zeskrobane przez Firecrawl przechodzą live-check.
                     if target.get("origin") not in TRUSTED_ORIGINS:
@@ -4982,7 +4980,6 @@ def init_session_state() -> None:
         "products_to_send": {},
         "link_active": False,
         "link_only": False,
-        "link_sitemap_enabled": True,
         "link_url": "",
         "link_category": "",
         "search_res": [],
@@ -5073,11 +5070,8 @@ def get_internal_link() -> Optional[Dict]:
             "use_related": st.session_state.get("link_related_enabled", True),
             "firecrawl_api_key": st.secrets.get("FIRECRAWL_API_KEY", ""),
             "related_size": 16,
-            "related_product_limit": 6,
-            "use_sitemap": st.session_state.get("link_sitemap_enabled", True),
-            "sitemap_index_url": BOOKLAND_SITEMAP_INDEX_URL,
+            # Snapshot sitemap służy tylko do znalezienia adresu karty dla zapasu Firecrawl.
             "sitemap_db_path": str(DEFAULT_SITEMAP_DB_PATH),
-            "sitemap_limit": 8,
         }
     if (
         st.session_state.get("link_active")
@@ -5134,53 +5128,13 @@ def render_link_catalog(locale: str) -> None:
     )
     if st.session_state.link_related_enabled and not st.secrets.get("FIRECRAWL_API_KEY"):
         st.caption("Brak FIRECRAWL_API_KEY – zapasowe scrapowanie karty produktu jest wyłączone.")
-    st.session_state.link_sitemap_enabled = st.checkbox(
-        "Zapasowo uwzględniaj sitemapę Booklandu w doborze Jev",
-        value=st.session_state.get("link_sitemap_enabled", True),
-        help=(
-            "Używane tylko, gdy rekomendacje spod karty nie dały kandydatów. "
-            "Aplikacja korzysta ze statycznego snapshotu sitemap zapisanego w repozytorium. "
-            "Przy pierwszym użyciu odtwarza z niego lokalny SQLite FTS; nie pobiera sitemap Booklandu per SKU."
-        ),
-    )
-    if st.session_state.link_sitemap_enabled:
-        sitemap_status = sitemap_cache_status(DEFAULT_SITEMAP_DB_PATH)
-        snapshot_status = bundled_snapshot_status()
-        if int(sitemap_status.get("url_count", 0)) <= 0 and snapshot_status.get("available"):
-            try:
-                sitemap_status = restore_bundled_snapshot(db_path=DEFAULT_SITEMAP_DB_PATH)
-            except Exception:
-                pass
-
-        sitemap_cols = st.columns(3)
-        sitemap_cols[0].metric("URL-e w cache sitemap", f"{int(sitemap_status['url_count']):,}".replace(",", " "))
-        sitemap_cols[1].metric("Przetworzone sitemapy", int(sitemap_status["sitemap_count"]))
-        sitemap_cols[2].metric("Błędy sitemap", int(sitemap_status["failed_sitemaps"]))
-
-        if snapshot_status.get("available"):
-            snapshot_urls = f"{int(snapshot_status['url_count']):,}".replace(",", " ")
-            st.caption(
-                f"Źródło: snapshot z repo ({snapshot_urls} URL-i"
-                + (f", stan {snapshot_status['refreshed_at']}" if snapshot_status.get("refreshed_at") else "")
-                + "). Runtime nie pobiera sitemap z Booklandu."
-            )
-            if st.button("Przywróć cache ze snapshotu", key="restore_bookland_sitemap_snapshot"):
-                try:
-                    with st.spinner("Odtwarzam lokalny indeks FTS ze snapshotu w repo..."):
-                        stats = restore_bundled_snapshot(
-                            db_path=DEFAULT_SITEMAP_DB_PATH,
-                            force=True,
-                        )
-                    indexed_urls = f"{int(stats['url_count']):,}".replace(",", " ")
-                    st.success(f"Przywrócono {indexed_urls} URL-i ze snapshotu.")
-                    st.rerun()
-                except Exception as exc:
-                    st.error(f"Nie udało się odtworzyć snapshotu sitemap: {exc}")
-        else:
-            st.warning(
-                "Snapshot sitemap nie jest jeszcze dostępny w repozytorium. "
-                "Po zakończeniu workflow GitHub Actions pojawi się automatycznie."
-            )
+    if st.session_state.link_related_enabled and st.secrets.get("FIRECRAWL_API_KEY"):
+        # Zapas Firecrawl szuka adresu karty po tytule w snapshocie sitemap z repo.
+        try:
+            if int(sitemap_cache_status(DEFAULT_SITEMAP_DB_PATH).get("url_count", 0)) <= 0:
+                restore_bundled_snapshot(db_path=DEFAULT_SITEMAP_DB_PATH)
+        except Exception:
+            pass
 
     with st.expander("Katalog celów linkowania", expanded=not st.session_state.link_targets):
         st.caption("Dla kategorii wpisz kod Akeneo i rzeczywisty adres Booklandu. Opcjonalne pola ograniczają dobór; brak zgodnych danych oznacza pominięcie celu.")
@@ -5580,8 +5534,8 @@ with st.sidebar:
         st.markdown("---")
         st.subheader("Opcje opisów")
         st.session_state.link_active = st.checkbox("Włącz linkowanie", value=st.session_state.link_active)
-        st.session_state.link_mode = st.radio("Dobór celów", ["Ręczne", "Automatyczne (Jev)"], horizontal=True,
-                                              index=1 if st.session_state.get("link_mode") == "Automatyczne (Jev)" else 0)
+        st.session_state.link_mode = st.radio("Dobór celów", ["Automatyczne (Jev)", "Ręczne"], horizontal=True,
+                                              index=1 if st.session_state.get("link_mode") == "Ręczne" else 0)
         st.session_state.link_only = st.checkbox(
             "Tylko dodaj link - bez przepisywania opisu",
             value=st.session_state.link_only,
@@ -5589,7 +5543,7 @@ with st.sidebar:
         if st.session_state.link_mode == "Automatyczne (Jev)":
             st.session_state.link_threshold = st.slider("Minimalne potwierdzenie dopasowania", 0.5, 1.0,
                                                         st.session_state.get("link_threshold", 0.8), 0.05)
-            st.caption("Jev ocenia maksymalnie 8 kandydatów i wybiera do 2 linków. Sitemap jest najpierw filtrowana lokalnie, więc jej rozmiar nie zwiększa liczby requestów do Jev.")
+            st.caption("Jev ocenia w jednym requeście wszystkie kategorie ze ścieżki produktu i wszystkie produkty spod karty (Luigi's Box) i wybiera do 2 linków.")
             if not st.secrets.get("TYPESAFE_API_KEY"):
                 st.warning("Dodaj TYPESAFE_API_KEY w sekretach Streamlit. Bez klucza opis powstanie bez automatycznych linków.")
             render_link_catalog(locale)

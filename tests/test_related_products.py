@@ -189,24 +189,25 @@ class JevIntegrationTests(unittest.TestCase):
         def fetcher(product, **kwargs):
             return fetch_related_products(product, session=FakeLuigis(), **kwargs)
 
-        with patch("internal_linking.search_sitemap_candidates") as sitemap, \
-             patch("internal_linking.requests.post") as post:
+        with patch("internal_linking.requests.post") as post:
             post.return_value.json.return_value = typed_response(values)
             result = select_internal_links(product, {
-                "targets": [], "api_key": "secret", "use_related": True, "use_sitemap": True,
+                "targets": [], "api_key": "secret", "use_related": True,
                 "related_fetcher": fetcher, **config,
             })
-        return result, post, sitemap
+        return result, post
 
-    def test_related_candidates_replace_sitemap_and_jev_sees_facts(self):
+    def test_all_related_candidates_go_to_jev_with_facts(self):
         product = {"identifier": MZP, "title": "Matematyka z plusem. Szkoła podstawowa klasa 5. Podręcznik",
                    "description": "Podręcznik do matematyki dla klasy 5.", "categories": ["mat5"]}
-        values = [(2.6, .9), (2.0, .9)] + [(2.9, .95)] + [(2.7, .9)] * 5
-        result, post, sitemap = self.run_selection(product, values)
-        sitemap.assert_not_called()
+        values = [(2.6, .9), (2.0, .9)] + [(2.9, .95)] + [(2.7, .9)] * 13
+        result, post = self.run_selection(product, values)
         body = post.call_args.kwargs["json"]
         candidates = body["state"]["candidates"]
-        self.assertEqual(len(candidates), 8)
+        # 2 kategorie ze ścieżki + 14 produktów z karuzeli (16 minus self-link i inne wydanie).
+        self.assertEqual(len(candidates), 16)
+        self.assertEqual(len(body["questions"]), 32)
+        self.assertEqual(post.call_args.kwargs["timeout"], 30)
         self.assertEqual([c["kind"] for c in candidates[:2]], ["category", "category"])
         self.assertTrue(all(c["origin"] == "luigisbox" for c in candidates))
         self.assertIn("ta sama seria", candidates[2]["relation_to_source"])
@@ -224,24 +225,20 @@ class JevIntegrationTests(unittest.TestCase):
 
     def test_rejected_candidates_mean_no_links(self):
         product = {"identifier": KULT, "title": "Kult. Łukasz Orbitowski", "description": "Powieść.", "categories": []}
-        result, _, _ = self.run_selection(product, [(2.0, .5)] * 8)
+        result, _ = self.run_selection(product, [(2.0, .5)] * 15)
         self.assertEqual(result["links"], [])
         self.assertTrue(all(c["reason"] for c in result["candidates"] if c["score"] is not None))
 
-    def test_sitemap_is_fallback_when_related_is_empty(self):
-        sitemap_candidate = {"origin": "sitemap", "kind": "sitemap", "code": "s", "label": "x",
-                             "url": "https://bookland.com.pl/x", "path": "/x", "source_skus": "",
-                             "school": "", "grade": "", "subject": "", "series": "", "edition": ""}
-        with patch("internal_linking.search_sitemap_candidates", return_value=[sitemap_candidate]) as sitemap, \
-             patch("internal_linking.requests.post") as post:
-            post.return_value.json.return_value = typed_response([(2.9, .9)])
+    def test_no_related_candidates_means_no_sitemap_fallback(self):
+        with patch("internal_linking.requests.post") as post:
             result = select_internal_links({"identifier": "000", "title": "Nieznany"}, {
                 "targets": [], "api_key": "secret", "use_related": True, "use_sitemap": True,
                 "related_fetcher": lambda product, **kwargs: {"source": None, "products": [], "categories": [],
                                                               "warnings": ["brak"], "provider": "luigisbox"},
             })
-        sitemap.assert_called_once()
-        self.assertEqual(result["links"][0]["origin"], "sitemap")
+        post.assert_not_called()
+        self.assertEqual(result["candidates"], [])
+        self.assertEqual(result["links"], [])
         self.assertIn("brak", result["warnings"])
 
     def test_fetcher_crash_never_blocks_description(self):
