@@ -1,61 +1,47 @@
 """Run the real description adapters without executing Streamlit or opening a DB."""
-import ast
-import html
-import json
-import re
 import unittest
-import unicodedata
-from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
-from google.genai import types
-from description_generation import generate_description_result
-from description_output import analyze_description_html, description_link_snapshot, deliver_description_result, sanitize_html
+import akeneo
+import descriptions
+from description_output import deliver_description_result
 from internal_linking import TRUSTED_ORIGINS
 from test_description_output import LINK, full_description
 
 
 class DescriptionAppIntegrationTests(unittest.TestCase):
     def setUp(self):
-        source = (Path(__file__).parents[1] / "app.py").read_text()
-        tree = ast.parse(source)
-        names = {
-            "generate_description", "process_product_from_akeneo", "build_system_prompt_full",
-            "build_system_prompt_link_only", "build_description_user_message", "detect_contributor_role",
-            "normalize_spaces", "normalize_for_compare", "strip_html", "strip_code_fences",
-            "clean_ai_fingerprints", "split_contributor_names", "format_contributor_names",
-            "description_link_targets", "description_link_instructions",
-            "parse_akeneo_product", "_prepare_product_data", "_value_from_values", "_entry_text",
-            "_list_from_values", "safe_string_value",
-        }
-        nodes = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in names]
-        self.assertEqual(len(nodes), len(names))
-        fields = next(n for n in tree.body if isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id == "LINK_FIELDS" for t in n.targets))
-        module = ast.Module(body=[ast.ImportFrom(module="__future__", names=[ast.alias(name="annotations")], level=0), fields, *nodes], type_ignores=[])
-        ast.fix_missing_locations(module)
         self.product = {"title": "Przykładowa książka", "description": "Źródło produktu", "contributors": ["Jan Kowalski"], "contributor_role": "", "author": "Jan Kowalski"}
         self.sdk = Mock(return_value=SimpleNamespace(text=full_description(link_paragraph=1, missing_bold=True)))
-        self.app = {
-            "types": types, "html": html, "re": re, "unicodedata": unicodedata, "json": json,
-            "_POLISH_CHARS": str.maketrans("ąćęłńóśźż", "acelnoszz"),
-            "GEMINI_MODEL": "existing-configured-model",
-            "DESCRIPTION_PROMPT_VERSION": "test-version",
-            "generate_description_result": generate_description_result,
-            "get_gemini_client": lambda: SimpleNamespace(models=SimpleNamespace(generate_content=self.sdk)),
-            "akeneo_get_product_details": lambda *args: self.product,
-            "validate_description_quality": lambda value: ("ok", "Opis OK"),
-            "generate_product_url": lambda title: "https://example.com/product",
-            "sanitize_html": sanitize_html,
-            "analyze_description_html": analyze_description_html,
-            "description_link_snapshot": description_link_snapshot,
-            "select_internal_links": Mock(return_value={"links": [], "warnings": [], "candidates": []}),
-            "check_internal_link_url": Mock(),
-            "TRUSTED_ORIGINS": TRUSTED_ORIGINS,
-            "akeneo_get_option_label": lambda code, value, *args: {"sp": "szkoła podstawowa", "ang": "język angielski"}.get(value, value),
-            "akeneo_is_select_attribute": lambda code: code in {"school_type", "subject"},
+        fakes = {
+            descriptions: {
+                "GEMINI_MODEL": "existing-configured-model",
+                "DESCRIPTION_PROMPT_VERSION": "test-version",
+                "get_gemini_client": lambda: SimpleNamespace(models=SimpleNamespace(generate_content=self.sdk)),
+                "akeneo_get_product_details": lambda *args: self.product,
+                "validate_description_quality": lambda value: ("ok", "Opis OK"),
+                "generate_product_url": lambda title: "https://example.com/product",
+                "select_internal_links": Mock(return_value={"links": [], "warnings": [], "candidates": []}),
+                "check_internal_link_url": Mock(),
+                "TRUSTED_ORIGINS": TRUSTED_ORIGINS,
+            },
+            akeneo: {
+                "akeneo_get_option_label": lambda code, value, *args: {"sp": "szkoła podstawowa", "ang": "język angielski"}.get(value, value),
+                "akeneo_is_select_attribute": lambda code: code in {"school_type", "subject"},
+            },
         }
-        exec(compile(module, str(Path(__file__).parents[1] / "app.py"), "exec"), self.app)
+        for module, attributes in fakes.items():
+            patcher = patch.multiple(module, **attributes)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.app = {
+            "process_product_from_akeneo": descriptions.process_product_from_akeneo,
+            "select_internal_links": descriptions.select_internal_links,
+            "check_internal_link_url": descriptions.check_internal_link_url,
+            "parse_akeneo_product": akeneo.parse_akeneo_product,
+            "_prepare_product_data": akeneo._prepare_product_data,
+        }
 
     def test_generation_to_delivery_preserves_model_html_warnings_and_context(self):
         result = self.app["process_product_from_akeneo"]("SKU1", "fake-token", "Bookland", "pl_PL", internal_link={"url": LINK, "category": "kryminał"}, use_research=False)
