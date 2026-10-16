@@ -23,7 +23,6 @@ from workspace_storage import (
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
-from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence, Set, Tuple
 from urllib.parse import urljoin
@@ -40,38 +39,14 @@ from akeneo_payloads import (
     serialize_collection_updates,
 )
 from description_output import (
-    is_meta_only_result, is_reusable_result, sanitize_html,
+    is_meta_only_result, is_reusable_result,
     refresh_description_result, preserve_description_on_failure, deliver_description_result,
     current_description_value, analyze_description_html, description_link_snapshot,
 )
 from description_generation import generate_description_result
 from internal_linking import SCORE_THRESHOLD, TRUSTED_ORIGINS, select_internal_links, validate_targets, verify_target_url
 
-try:
-    from product_input import ProductInputResolutionError, resolve_product_inputs
-except ImportError:
-    class ProductInputResolutionError(ValueError):
-        pass
-
-    def resolve_product_inputs(raw_inputs: Sequence[str]) -> Tuple[List[Dict], List[str]]:
-        """Awaryjny resolver: przyjmuje SKU lub URL kończący się SKU."""
-        resolved: List[Dict] = []
-        errors: List[str] = []
-        for raw in raw_inputs:
-            value = raw.strip()
-            if not value:
-                continue
-            if value.startswith("http://") or value.startswith("https://"):
-                slug = value.rstrip("/").split("/")[-1]
-                match = re.search(r"(?:sku[-_/]?)?([A-Za-z0-9._-]{3,})$", slug)
-                if not match:
-                    errors.append(f"Nie udało się rozpoznać SKU z URL: {value}")
-                    continue
-                sku = match.group(1)
-                resolved.append({"input": value, "sku": sku, "title": sku, "source": "url"})
-            else:
-                resolved.append({"input": value, "sku": value, "title": value, "source": "sku"})
-        return resolved, errors
+from product_input import ProductInputResolutionError, resolve_product_inputs
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -96,7 +71,7 @@ INTERACTIVE_CHUNK_SIZE = 10
 GEMINI_HTTP_TIMEOUT_MS = 60_000
 AKENEO_MAX_ATTEMPTS = 3
 AKENEO_META_UPDATE_CHUNK_SIZE = 100
-BATCH_PRODUCTS_PER_FILE = 2500
+BATCH_PRODUCTS_PER_FILE = 1000
 AKENEO_SKU_FILTER_CHUNK_SIZE = 50
 MAX_META_RETRIES = 2
 RESULT_PREVIEW_LIMIT = 100
@@ -137,76 +112,6 @@ _POLISH_CHARS = str.maketrans(
     "acelnoszzACELNOSZZ",
 )
 
-# Używamy prostego podzbioru JSON Schema zgodnego także ze starszymi
-# wersjami endpointu generateContent i pakietu google-genai. Celowo nie dodajemy
-# additionalProperties, ponieważ część wersji API serializuje je niezgodnie.
-# Gemini generuje teraz oba pola: zoptymalizowany meta title i meta description.
-META_RESPONSE_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "meta_title": {
-            "type": "string",
-            "description": "Unikalny meta title produktu, maksymalnie 75 znaków ze spacjami.",
-        },
-        "meta_description": {
-            "type": "string",
-            "description": "Unikalny polski meta description produktu, 140-160 znaków, bez CTA.",
-        },
-    },
-    "required": ["meta_title", "meta_description"],
-}
-
-BANNED_STARTERS = (
-    "odkryj",
-    "poznaj",
-    "sprawdź",
-    "sprawdz",
-    "sięgnij",
-    "siegnij",
-    "zanurz",
-    "przenieś się",
-    "przenies sie",
-    "daj się",
-    "daj sie",
-    "ta książka",
-    "ta ksiazka",
-    "książka",
-    "ksiazka",
-    "w tej książce",
-    "w tej ksiazce",
-    "idealna propozycja",
-    "to wyjątkowa",
-    "to wyjatkowa",
-    "jeśli szukasz",
-    "jesli szukasz",
-    "szukasz",
-    "warto sięgnąć",
-    "warto siegnac",
-    "oto",
-    "pozycja, która",
-    "pozycja ktora",
-)
-
-BANNED_CTA_PHRASES = (
-    "sprawdź ofertę",
-    "sprawdz oferte",
-    "kup teraz",
-    "zamów teraz",
-    "zamow teraz",
-    "zamów już dziś",
-    "zamow juz dzis",
-    "dodaj do koszyka",
-    "nie czekaj",
-    "przekonaj się",
-    "przekonaj sie",
-    "sięgnij po",
-    "siegnij po",
-    "poznaj ofertę",
-    "poznaj oferte",
-    "odkryj ofertę",
-    "odkryj oferte",
-)
-
 # Elementy, które nie mogą trafić do meta title. Są to typowe oznaczenia
 # magazynowe, statusy i wartości zastępcze spotykane w danych produktowych.
 TITLE_INTERNAL_NOISE_PATTERNS = (
@@ -245,53 +150,6 @@ TITLE_COMPONENT_TRANSLATIONS = (
     ("Test Book", "testy"),
 )
 
-OPENING_MODES = (
-    "Zacznij od konkretnego konfliktu lub problemu obecnego w opisie źródłowym.",
-    "Zacznij od bohatera, autora albo głównego podmiotu i jego sytuacji.",
-    "Zacznij od miejsca, epoki lub czasu, o ile źródło rzeczywiście je wskazuje.",
-    "Zacznij od stawki: co może zostać utracone, zmienione albo zrozumiane.",
-    "Zacznij od najważniejszego motywu, bez używania ogólnej oceny produktu.",
-    "Zacznij od relacji między postaciami, ideami lub elementami produktu.",
-    "Zacznij od konkretnej obietnicy wiedzy, ale bez języka reklamowego i CTA.",
-    "Zacznij od problemu praktycznego, który produkt pomaga zrozumieć lub rozwiązać.",
-    "Zacznij od nieoczywistego kontrastu wynikającego z opisu źródłowego.",
-    "Zacznij od wydarzenia uruchamiającego fabułę albo tok wywodu.",
-    "Zacznij od emocji lub napięcia, ale nazwij ich źródło konkretnie.",
-    "Zacznij od pytania merytorycznego, lecz nie od pytania sprzedażowego.",
-    "Zacznij od nazwy serii, tomu lub cyklu, jeżeli dane to potwierdzają.",
-    "Zacznij od roli odbiorcy i sytuacji, w której treść będzie dla niego użyteczna.",
-    "Zacznij od szczegółu, symbolu albo obrazu wyraźnie obecnego w źródle.",
-    "Zacznij od tezy lub najważniejszego wniosku, który zapowiada zawartość.",
-    "Zacznij od zmiany, przez którą przechodzi bohater, czytelnik lub omawiany proces.",
-    "Zacznij od konsekwencji decyzji opisanej w materiale źródłowym.",
-    "Zacznij od konkretnego tematu przewodniego połączonego z gatunkiem lub formą.",
-    "Zacznij od napięcia między dwoma celami, wartościami albo punktami widzenia.",
-    "Zacznij zdaniem krótkim i rzeczowym, a drugie niech rozwinie kontekst.",
-    "Zacznij zdaniem złożonym opartym na przyczynie i skutku obecnych w źródle.",
-    "Zacznij od faktu technicznego lub zakresu treści, jeśli to produkt użytkowy albo edukacyjny.",
-    "Zacznij od najbardziej charakterystycznej informacji, której nie da się łatwo przypisać innemu produktowi.",
-)
-
-RHYTHM_MODES = (
-    "Dwa zdania: pierwsze krótsze, drugie rozwijające.",
-    "Jedno zwarte zdanie z naturalnym rytmem i bez wyliczenia.",
-    "Dwa zdania podobnej długości, połączone logicznie.",
-    "Pierwsze zdanie informacyjne, drugie pokazujące stawkę lub korzyść poznawczą.",
-    "Pierwsze zdanie osadza kontekst, drugie dopowiada główny wyróżnik.",
-    "Jedno zdanie z wyraźnym podmiotem i konkretnym czasownikiem.",
-)
-
-FOCUS_MODES = (
-    "fabuła lub przebieg zdarzeń",
-    "bohater albo główny podmiot",
-    "temat i sens publikacji",
-    "konflikt lub problem",
-    "kontekst miejsca i czasu",
-    "konkretna użyteczność dla odbiorcy",
-    "wyróżnik serii, tomu lub formatu",
-    "emocjonalna stawka bez przesadnego wartościowania",
-)
-
 POLISH_STOPWORDS = {
     "a", "aby", "albo", "ale", "ani", "aż", "bardziej", "bardzo", "bez", "bo", "by", "być",
     "co", "czy", "dla", "do", "gdy", "gdzie", "go", "ich", "jak", "jako", "jest", "jeśli", "już",
@@ -319,8 +177,6 @@ st.markdown(
 <style>
     .main-header { font-size: 2.35rem; font-weight: 700; margin-bottom: .35rem; }
     .sub-header { color: #666; font-size: 1rem; margin-bottom: 1.5rem; }
-    .scrollable-results { max-height: 420px; overflow-y: auto; border: 1px solid #e0e0e0;
-        border-radius: .5rem; padding: 1rem; background: #fafafa; }
     .small-note { font-size: .86rem; color: #666; }
 </style>
 """,
@@ -358,14 +214,6 @@ def init_db() -> None:
     with db_connect() as conn:
         conn.executescript(
             """
-            CREATE TABLE IF NOT EXISTS optimized_products (
-                sku TEXT PRIMARY KEY,
-                title TEXT NOT NULL DEFAULT '',
-                url TEXT NOT NULL DEFAULT '',
-                first_optimized TEXT NOT NULL,
-                last_optimized TEXT NOT NULL
-            );
-
             CREATE TABLE IF NOT EXISTS meta_jobs (
                 job_key TEXT PRIMARY KEY,
                 run_id TEXT NOT NULL DEFAULT '',
@@ -426,13 +274,6 @@ def init_db() -> None:
                 updated_at TEXT NOT NULL,
                 ingested_at TEXT NOT NULL DEFAULT ''
             );
-
-            CREATE TABLE IF NOT EXISTS description_workspace (
-                id INTEGER PRIMARY KEY CHECK (id = 1),
-                selected_skus TEXT NOT NULL DEFAULT '[]',
-                results TEXT NOT NULL DEFAULT '[]',
-                updated_at TEXT NOT NULL
-            );
             """
         )
 
@@ -491,32 +332,6 @@ def list_description_workspaces() -> List[Dict]:
 def create_description_workspace(name: str) -> Dict:
     with db_connect() as conn:
         return storage_create_workspace(conn, name)
-
-
-def add_optimized_product(sku: str, title: str, url: str) -> None:
-    now = utcnow_iso()
-    with db_connect() as conn:
-        conn.execute(
-            """
-            INSERT INTO optimized_products(sku, title, url, first_optimized, last_optimized)
-            VALUES (?, ?, ?, ?, ?)
-            ON CONFLICT(sku) DO UPDATE SET
-                title=excluded.title,
-                url=excluded.url,
-                last_optimized=excluded.last_optimized
-            """,
-            (sku, title, url, now, now),
-        )
-
-
-def optimized_products_count() -> int:
-    with db_connect() as conn:
-        return int(conn.execute("SELECT COUNT(*) FROM optimized_products").fetchone()[0])
-
-
-def clear_optimized_products() -> None:
-    with db_connect() as conn:
-        conn.execute("DELETE FROM optimized_products")
 
 
 def make_job_key(sku: str, channel: str, locale: str) -> str:
@@ -673,14 +488,6 @@ def save_meta_result(
         )
 
 
-def set_meta_job_error(job_key: str, error_message: str, attempts: int = 0) -> None:
-    with db_connect() as conn:
-        conn.execute(
-            "UPDATE meta_jobs SET status='failed', attempts=?, error_message=?, updated_at=? WHERE job_key=?",
-            (attempts, error_message[:2000], utcnow_iso(), job_key),
-        )
-
-
 def get_meta_job(job_key: str) -> Optional[Dict]:
     with db_connect() as conn:
         row = conn.execute("SELECT * FROM meta_jobs WHERE job_key=?", (job_key,)).fetchone()
@@ -810,7 +617,7 @@ def estimate_batch_input_tokens(run_id: Optional[str], queued_count: int, sample
         return {"avg_input_tokens": 0.0, "estimated_input_tokens": 0.0}
     token_estimates = []
     for job in sample:
-        chars = len(META_SYSTEM_PROMPT) + len(build_meta_prompt(job, int(job.get("attempts", 0)), ()))
+        chars = len(META_SYSTEM_PROMPT) + len(build_meta_prompt(job, int(job.get("attempts", 0))))
         # Dla PL/EN w tym zastosowaniu 3.6 znaku/token jest bezpieczniejszym
         # przybliżeniem niż klasyczne 4 znaki/token.
         token_estimates.append(chars / 3.6)
@@ -851,37 +658,6 @@ def new_run_id(prefix: str) -> str:
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     suffix = hashlib.sha1(f"{time.time_ns()}|{prefix}".encode("utf-8")).hexdigest()[:6]
     return f"{prefix}-{timestamp}-{suffix}"
-
-
-def existing_opening_signatures(exclude_job_key: str = "") -> Tuple[Set[str], Counter]:
-    sql = (
-        "SELECT opening_signature, short_opening_signature FROM meta_jobs "
-        "WHERE status='completed' AND opening_signature<>''"
-    )
-    params: List[object] = []
-    if exclude_job_key:
-        sql += " AND job_key<>?"
-        params.append(exclude_job_key)
-    with db_connect() as conn:
-        rows = conn.execute(sql, params).fetchall()
-    long_signatures = {row["opening_signature"] for row in rows if row["opening_signature"]}
-    short_counts = Counter(
-        row["short_opening_signature"] for row in rows if row["short_opening_signature"]
-    )
-    return long_signatures, short_counts
-
-
-def recent_opening_examples(limit: int = 20) -> List[str]:
-    with db_connect() as conn:
-        rows = conn.execute(
-            """
-            SELECT meta_description FROM meta_jobs
-            WHERE status='completed' AND meta_description<>''
-            ORDER BY updated_at DESC LIMIT ?
-            """,
-            (limit,),
-        ).fetchall()
-    return [first_words(row["meta_description"], 8) for row in rows]
 
 
 def requeue_jobs(statuses: Sequence[str], reason: str = "", run_id: Optional[str] = None) -> int:
@@ -946,11 +722,6 @@ def normalize_for_compare(value: str) -> str:
     return normalize_spaces(text)
 
 
-def first_words(value: str, count: int) -> str:
-    words = normalize_spaces(strip_html(value)).split()
-    return " ".join(words[:count])
-
-
 def opening_signature(value: str, count: int = 6) -> str:
     words = normalize_for_compare(value).split()
     return " ".join(words[:count])
@@ -962,18 +733,6 @@ def smart_truncate(value: str, max_chars: int) -> str:
         return text
     shortened = text[: max_chars + 1].rsplit(" ", 1)[0].rstrip(" ,;:-")
     return shortened
-
-
-def first_meaningful_sentence(description: str, max_chars: int = 240) -> str:
-    text = strip_html(description)
-    if not text:
-        return ""
-    sentences = re.split(r"(?<=[.!?])\s+", text)
-    for sentence in sentences:
-        sentence = normalize_spaces(sentence)
-        if len(sentence) >= 35:
-            return smart_truncate(sentence, max_chars)
-    return smart_truncate(text, max_chars)
 
 
 def extract_semantic_cues(description: str, title: str = "", limit: int = 8) -> List[str]:
@@ -1009,18 +768,15 @@ def product_input_hash(
 
 
 def build_style_plan(sku: str, title: str, author: str, description: str, attempt: int = 0) -> Dict:
-    seed = stable_seed(sku, title, author, strip_html(description), str(attempt))
-    opening_mode = OPENING_MODES[seed % len(OPENING_MODES)]
-    rhythm_mode = RHYTHM_MODES[(seed // len(OPENING_MODES)) % len(RHYTHM_MODES)]
-    focus_mode = FOCUS_MODES[(seed // (len(OPENING_MODES) * len(RHYTHM_MODES))) % len(FOCUS_MODES)]
-    cues = extract_semantic_cues(description, title)
+    # Prompt korzysta tylko z seed i semantic_cues. Pozostałe pola zostają puste,
+    # bo kolumny meta_jobs są NOT NULL w istniejących bazach.
     return {
-        "seed": seed,
-        "opening_mode": opening_mode,
-        "rhythm_mode": rhythm_mode,
-        "focus_mode": focus_mode,
-        "semantic_cues": cues,
-        "source_lead": first_meaningful_sentence(description),
+        "seed": stable_seed(sku, title, author, strip_html(description), str(attempt)),
+        "opening_mode": "",
+        "rhythm_mode": "",
+        "focus_mode": "",
+        "semantic_cues": extract_semantic_cues(description, title),
+        "source_lead": "",
     }
 
 
@@ -1174,73 +930,6 @@ def existing_meta_title_owners(exclude_job_key: Optional[str] = None) -> Dict[st
 # ═══════════════════════════════════════════════════════════════════
 # PROMPTY
 # ═══════════════════════════════════════════════════════════════════
-
-META_SYSTEM_PROMPT = """Jesteś seniorem SEO e-commerce i redaktorem informacji produktowej Bookland.
-Tworzysz jednocześnie meta_title i meta_description dla konkretnego SKU.
-
-CEL META TITLE
-Meta title ma identyfikować dokładnie ten wariant produktu i odpowiadać na intencję użytkownika:
-„Co to dokładnie jest, z jakiej serii, na jakim poziomie, w jakim formacie i dla kogo?”.
-Nie przepisuj mechanicznie nazwy magazynowej. Zredaguj ją jak specjalista SEO, ale bez dopowiadania danych.
-
-TWARDE ZASADY META TITLE
-- Preferowana długość: 58-72 znaki ze spacjami. Twarde maksimum: 75. Ważniejsza jest kompletna identyfikacja wariantu niż sztuczne skracanie title.
-- Nie dodawaj nazwy sklepu Bookland.
-- Nie stosuj CTA, języka reklamowego, superlatywów ani zdań opisowych.
-- Nie kończ urwanym słowem, przyimkiem, spójnikiem, separatorem ani wielokropkiem.
-- Nie obcinaj słowa i nie twórz fragmentów typu „Online Acces”, „with”, „and”, „Kod”.
-- Użyj maksymalnie dwóch logicznych separatorów: preferuj „–” i opcjonalnie „|”.
-- Nie używaj cudzysłowu wokół całego meta title.
-- Usuń oznaczenia wewnętrzne i śmieci katalogowe: „zz”, „OOP”, statusy dostępności, ISBN/EAN, „praca zbiorowa”.
-- Popraw oczywistą literówkę tylko wtedy, gdy korekta jest jednoznaczna, np. „Acces Code” → „Access Code”.
-- Nie zmieniaj oficjalnej nazwy serii, marki, platformy, poziomu ani numeru części.
-- Każdy wariant produktu musi dostać odróżniający meta title. Nie wolno zgubić informacji typu: uczeń/nauczyciel, eBook/eText, kod/dostęp, z kluczem/bez klucza, część lub poziom.
-
-PRIORYTETY INFORMACJI W META TITLE
-1. Oficjalna nazwa serii, tytuł lub marka produktu.
-2. Poziom, tom, część, klasa albo egzamin, jeśli występuje.
-3. Typ komponentu lub format, który odróżnia SKU.
-4. Odbiorca albo rodzaj dostępu: uczeń, nauczyciel, kod, dostęp online.
-5. Autor - przede wszystkim dla zwykłych książek. Dodaj go tylko, gdy zwiększa trafność i mieści się bez utraty ważniejszego wyróżnika.
-
-MATERIAŁY DO NAUKI JĘZYKÓW I DŁUGIE ANGIELSKIE NAZWY
-- Zachowuj dokładnie nazwę serii i poziom, np. Roadmap B2+, Big English 3, Formula B2 First.
-- Zachowuj nazwy platform i formatów: MyEnglishLab, eBook, eText.
-- Ogólne komponenty możesz naturalnie skrócić lub przetłumaczyć:
-  Student's Book → podręcznik ucznia; Workbook/Activity Book → zeszyt ćwiczeń;
-  Coursebook → podręcznik; Teacher's Book → książka nauczyciela;
-  Student Online Access Code → kod uczniowski;
-  Teacher's Online Access Code → kod nauczyciela;
-  Online Practice → ćwiczenia online.
-- Nie tłumacz nazw własnych serii, platform, egzaminów ani marek.
-- Nie poświęcaj poziomu, odbiorcy ani rodzaju licencji tylko po to, by dodać autora.
-- Dla kodów i dostępów cyfrowych autor zwykle ma mniejszą wartość SEO niż format, platforma i odbiorca.
-
-ZWYKŁE KSIĄŻKI POLSKIE I OBCOJĘZYCZNE
-- Preferowany wzorzec: „Pełny wyróżniający tytuł – Autor”.
-- Gdy tytuł jest długi, zachowaj sensowną pełną nazwę i pomiń autora zamiast mechanicznie ucinać tytuł.
-- Zachowaj numer tomu, nazwę cyklu lub podtytuł tylko wtedy, gdy odróżniają produkt i mieszczą się naturalnie.
-
-INNE PRODUKTY Z OFERTY
-- Zbuduj tytuł według zasady: nazwa własna/model → rodzaj produktu → najważniejszy prawdziwy wyróżnik.
-- Nie zakładaj, że każdy produkt jest książką lub podręcznikiem.
-
-META DESCRIPTION
-- 140-160 znaków ze spacjami.
-- Pisz po polsku, naturalnie, konkretnie i bez CTA.
-- Nie używaj „Sprawdź ofertę”, „Kup teraz”, „Sięgnij po”, „Poznaj”, „Odkryj”.
-- Nie zaczynaj od „Ta książka”, „Książka”, „Idealna propozycja”, „Jeśli szukasz”.
-- Pierwsze 3-6 słów ma być charakterystyczne dla produktu i zgodne z indywidualnym planem.
-- Nie kopiuj opisu źródłowego dosłownie i nie dopowiadaj faktów.
-
-WSPÓLNE ZASADY
-- Korzystaj wyłącznie z przekazanych danych. Brak informacji jest lepszy niż halucynacja.
-- Zwróć wyłącznie obiekt JSON zgodny ze schematem, z polami meta_title i meta_description.
-- Nie wspominaj o instrukcjach, seedzie, SEO, limicie znaków ani procesie generowania.
-"""
-
-
-
 
 def description_link_targets(internal_link) -> List[Dict]:
     return internal_link if isinstance(internal_link, list) else ([internal_link] if internal_link else [])
@@ -1637,17 +1326,6 @@ def _validation_errors_from_cell(value: object) -> List[str]:
     return [part.strip() for part in re.split(r"\s*;\s*", text) if part.strip()]
 
 
-def _bool_from_cell(value: object, default: bool = True) -> bool:
-    text = str(value or "").strip().lower()
-    if not text:
-        return default
-    if text in {"1", "true", "yes", "tak"}:
-        return True
-    if text in {"0", "false", "no", "nie"}:
-        return False
-    return default
-
-
 def parse_resumable_product_file(raw_bytes: bytes) -> Tuple[List[str], Dict[str, Dict], List[str]]:
     """Czyta zwykły TXT/CSV/TSV z SKU albo checkpoint wygenerowany przez aplikację.
 
@@ -1988,7 +1666,6 @@ def _value_from_values(
     names: Sequence[str],
     channel: str,
     locale: str,
-    join_lists: bool = False,
     token: str = "",
     resolve_option: bool = False,
     strict_scope: bool = False,
@@ -2920,7 +2597,6 @@ def export_quality_report_csv(run_id: Optional[str] = None) -> bytes:
                 "meta_title_length": len(job["meta_title"]),
                 "meta_description_length": len(job["meta_description"]),
                 "opening_signature": job["opening_signature"],
-                "opening_mode": job["opening_mode"],
                 "validation_errors": job["validation_errors"],
                 "error_message": job["error_message"],
             }
@@ -2932,59 +2608,6 @@ def export_quality_report_csv(run_id: Optional[str] = None) -> bytes:
 # ═══════════════════════════════════════════════════════════════════
 # V4.3: KANDYDACI META TITLE + LOKALNY RANKER + BLOKOWANIE POPRAWNYCH PÓL
 # ═══════════════════════════════════════════════════════════════════
-
-# W v4.2 model zwracał jeden meta title. Przy długich nazwach kursów często
-# wybierał kompromis, który kończył się słowem „Kod”, mieszał języki albo gubił
-# wariant uczniowski. V4.3 prosi o cztery kandydatury, a następnie wybiera wynik
-# lokalnie na podstawie kompletności, naturalności i unikalności.
-META_RESPONSE_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "product_type": {
-            "type": "string",
-            "description": "Krótka klasyfikacja produktu, np. student_access_code, teacher_access_code, ebook, textbook, workbook, dictionary, general_book, other.",
-        },
-        "canonical_identity": {
-            "type": "string",
-            "description": "Najkrótsza poprawna nazwa serii, tytułu lub modelu identyfikująca produkt.",
-        },
-        "meta_title_candidates": {
-            "type": "array",
-            "items": {"type": "string"},
-            "description": "Cztery różne, kompletne kandydatury meta title, każda maksymalnie 75 znaków.",
-        },
-        "meta_description": {
-            "type": "string",
-            "description": "Unikalny polski meta description produktu, 140-160 znaków, bez CTA i retorycznych pytań.",
-        },
-    },
-    "required": ["product_type", "canonical_identity", "meta_title_candidates", "meta_description"],
-}
-
-# Bardziej restrykcyjna lista otwarć. W analizie v4.2 część formalnie poprawnych
-# opisów zaczynała się od sztucznych konstrukcji typu „Niezrozumienie...”,
-# „Tradycyjna nauka czy...” lub od ukrytego CTA „Rozwiń...”.
-BANNED_STARTERS = tuple(dict.fromkeys((*BANNED_STARTERS,
-    "rozwiń", "rozwin", "zyskaj", "wybierz", "postaw na", "skorzystaj",
-    "naukowe cele", "niezrozumienie", "tradycyjna nauka", "ekscytacja",
-    "postępy w", "postepy w", "nowoczesne podejście", "nowoczesne podejscie",
-    "czy ", "jak ", "dlaczego ",
-)))
-
-V43_PRODUCT_TYPES = (
-    "student_access_code",
-    "teacher_access_code",
-    "digital_course_bundle",
-    "ebook",
-    "etext",
-    "online_practice",
-    "textbook",
-    "workbook",
-    "school_book",
-    "dictionary",
-    "general_book",
-    "other",
-)
 
 V43_GENERIC_POLISH_TITLE_WORDS = (
     "Kod", "Uczeń", "Ucznia", "Nauczyciel", "Nauczyciela", "Nauczycielski",
@@ -3486,69 +3109,6 @@ def select_best_meta_title_candidate(
 
 
 
-META_SYSTEM_PROMPT = """Jesteś seniorem SEO e-commerce, redaktorem informacji produktowej i specjalistą od katalogów edukacyjnych Bookland.
-Dla jednego SKU wykonujesz dwie odrębne czynności: budujesz kandydatury meta title i tworzysz meta description.
-
-NAJWAŻNIEJSZA ZASADA
-Najpierw rozpoznaj produkt i jego wariant, dopiero potem redaguj. Nie skracaj nazwy od prawej strony i nie twórz zlepku przypadkowych słów.
-
-KLASYFIKACJA PRODUKTU
-Wybierz product_type spośród: student_access_code, teacher_access_code, digital_course_bundle, ebook, etext, online_practice, textbook, workbook, school_book, dictionary, general_book, other.
-Ustal canonical_identity: oficjalną nazwę serii, tytułu lub modelu bez śmieci katalogowych.
-
-META TITLE: CZTERY KANDYDATURY
-Zwróć cztery różne, pełne kandydatury. Każda musi mieć maksymalnie 75 znaków ze spacjami i być gotowa do publikacji.
-- Kandydat 1: najwierniejszy oficjalnej nazwie.
-- Kandydat 2: najbardziej naturalny po polsku i czytelny w SERP.
-- Kandydat 3: najbardziej zwarty, ale nadal jednoznaczny.
-- Kandydat 4: alternatywna redakcja zachowująca wszystkie cechy wariantu.
-
-PRIORYTETY META TITLE
-1. Nazwa serii, tytuł lub model.
-2. Poziom, egzamin, tom, część albo klasa.
-3. Komponent i format odróżniający SKU.
-4. Odbiorca oraz typ kodu lub dostępu.
-5. Autor tylko dla zwykłych książek i tylko wtedy, gdy nie wypiera ważniejszych danych.
-
-SPÓJNOŚĆ DLA MATERIAŁÓW JĘZYKOWYCH
-- Zachowuj oficjalne nazwy: MyEnglishLab, Teacher's Portal, Online Practice, eBook, eText, B2 First, C1 Advanced.
-- Tłumacz ogólne komponenty: Student's Book = podręcznik ucznia; Workbook/Activity Book = zeszyt ćwiczeń; Teacher's Book = książka nauczyciela.
-- Typ dostępu zapisuj po polsku: kod uczniowski, kod nauczycielski, kod dostępu, bez kodu.
-- Nigdy nie kończ tytułu samym słowem „Kod”, „Access”, „Student”, „Teacher”, „Online” ani przyimkiem.
-- Nie pisz „Kod Ucznia”, „Uczeń – eBook”, „Online Kod”, „Portal Kod” ani „eBook Kod”.
-- Nie mieszaj dowolnie „Online Practice” z „ćwiczeniami online”. Jeśli to oficjalna nazwa komponentu w źródle, preferuj „Online Practice”.
-- Polskie rzeczowniki pospolite zapisuj małą literą. Nazwy własne i poziomy zachowuj dokładnie.
-- Preferuj jeden separator „ – ”. Drugi separator „ | ” stosuj tylko wtedy, gdy realnie poprawia czytelność. Nie sklejaj kilku kropek i separatorów.
-
-PRZYKŁADOWY KIERUNEK, NIE SZABLON DO KOPIOWANIA
-Big English 1. eText + MyEnglishLab Student Online Access Code → Big English 1 – eText + MyEnglishLab | kod uczniowski
-Roadmap B2. eBook and Online Practice. Kod uczniowski → Roadmap B2 – eBook + Online Practice | kod uczniowski
-Business Partner B1. Teacher's Portal. Kod nauczycielski → Business Partner B1 – Teacher's Portal | kod nauczycielski
-1000 chińskich słów(ek). Ilustrowany słownik → 1000 chińskich słów(ek) – słownik ilustrowany
-
-ZWYKŁE KSIĄŻKI
-Preferuj „Tytuł – Autor”. Gdy tytuł jest długi, zachowaj pełny sens tytułu i pomiń autora. Nie używaj wartości „praca zbiorowa” ani podejrzanie sklejonych autorów.
-
-META DESCRIPTION
-- Celuj w 145-158 znaków; bezwzględny zakres to 140-160.
-- Pisz po polsku, konkretnie i informacyjnie. Bez CTA, drugiej osoby, retorycznych pytań i sztucznego problemu.
-- Nie zaczynaj od: Odkryj, Poznaj, Sprawdź, Rozwiń, Zyskaj, Wybierz, Niezrozumienie, Tradycyjna nauka, Nowoczesne podejście.
-- Dla materiałów edukacyjnych zacznij od nazwy serii, typu materiału, formatu, odbiorcy albo konkretnej funkcji.
-- Dla beletrystyki możesz zacząć od bohatera, konfliktu lub miejsca, jeśli wynikają ze źródła.
-- Nie dodawaj czasu dostępu, liczby urządzeń, funkcji, poziomu ani żadnego faktu, którego nie ma w danych.
-- Nie kopiuj całego zdania źródłowego.
-
-DANE I FORMAT
-Korzystaj wyłącznie z przekazanych danych. Zwróć tylko obiekt JSON zgodny ze schematem. Nie komentuj procesu.
-"""
-
-
-
-
-
-
-
-
 def locked_fields_from_job(job: Dict) -> Tuple[str, str]:
     errors = parse_validation_error_list(job.get("validation_errors", ""))
     title_errors, description_errors = split_field_errors(errors)
@@ -3585,8 +3145,6 @@ def locked_fields_from_job(job: Dict) -> Tuple[str, str]:
 # - statusy są odpytywane równolegle, a gotowe pliki pobierane osobną pulą,
 #   dzięki czemu szybki shard nie czeka na najwolniejszy.
 
-PROMPT_VERSION = "meta-v4.9.0-contributors-description-quality-akeneo-write-2026-09"
-BATCH_PRODUCTS_PER_FILE = 1000
 TURBO_BATCH_SHARD_SIZE = 1000
 BATCH_SUBMIT_WORKERS = 12
 BATCH_ACTIVE_JOB_SOFT_CAP = 80
@@ -3596,7 +3154,6 @@ META_DESCRIPTION_HARD_MIN = 120
 META_DESCRIPTION_HARD_MAX = 170
 META_DESCRIPTION_TARGET_MIN = 135
 META_DESCRIPTION_TARGET_MAX = 160
-META_RECENT_OPENINGS_HINT = 0
 AKENEO_REQUEST_SEMAPHORE = threading.BoundedSemaphore(AKENEO_MAX_WORKERS)
 
 
@@ -4415,8 +3972,6 @@ def revalidate_meta_jobs_v44(run_id: Optional[str] = None) -> Dict[str, int]:
 # - kontekst opisu jest dynamicznie krótszy dla kodów/dostępów cyfrowych;
 # - maksymalny output Gemini zmniejszony, bo schema zawiera tylko 3 tytuły + opis.
 
-PROMPT_VERSION = "meta-v4.9.0-contributors-description-quality-akeneo-write-2026-09"
-META_RECENT_OPENINGS_HINT = 0
 GEMINI_META_MAX_OUTPUT_TOKENS = 320
 BATCH_REFRESH_WORKERS = 20
 
@@ -4437,9 +3992,6 @@ def description_context_limit(job: Dict) -> int:
 def meta_validation_errors(
     meta_description: str,
     *,
-    existing_long_signatures: Optional[Set[str]] = None,
-    existing_short_signatures: Optional[Counter] = None,
-    recent_descriptions: Optional[Sequence[str]] = None,
     job: Optional[Dict] = None,
 ) -> List[str]:
     """Tylko błędy, które realnie uzasadniają retry.
@@ -4659,7 +4211,6 @@ def bulk_upsert_meta_jobs(entries: Sequence[Dict]) -> Dict[str, bool]:
 def build_meta_prompt(
     job: Dict,
     attempt: int = 0,
-    avoid_openings: Sequence[str] = (),
     previous_meta_title: str = "",
     previous_meta_description: str = "",
     previous_errors: Sequence[str] = (),
@@ -4751,7 +4302,6 @@ def generate_metatags_interactive(job: Dict) -> Dict:
                 contents=build_meta_prompt(
                     job,
                     attempt,
-                    (),
                     previous_meta_title=last_title,
                     previous_meta_description=last_description,
                     previous_errors=[*last_title_errors, *last_description_errors],
@@ -4840,7 +4390,7 @@ def batch_request_for_job(job: Dict, attempt: int = 0) -> Dict:
     return {
         "key": job["job_key"],
         "request": {
-            "contents": [{"role": "user", "parts": [{"text": build_meta_prompt(job, attempt, ())}]}],
+            "contents": [{"role": "user", "parts": [{"text": build_meta_prompt(job, attempt)}]}],
             "system_instruction": {"parts": [{"text": META_SYSTEM_PROMPT}]},
             "generation_config": {
                 # Gemini 3.5 Flash-Lite ma `minimal` jako domyślny thinking.
@@ -4982,7 +4532,6 @@ def init_session_state() -> None:
         "meta_only": False,
         "magento_store_view": "store_view_bookland",
         "backlog_items": [],
-        "backlog_category": "",
         "active_meta_run_id": "",
         "last_import_report_path": "",
         "interactive_seed_results": {},
@@ -5162,6 +4711,21 @@ def render_link_catalog(locale: str) -> None:
                 st.error(str(exc))
         if st.session_state.link_targets:
             st.download_button("Pobierz zapisany katalog CSV", pd.DataFrame(st.session_state.link_targets, columns=columns).to_csv(index=False, sep=";"), "katalog_linkowania.csv", "text/csv")
+
+
+def _toggle_queued_product(key: str, sku: str, title: str) -> None:
+    if st.session_state[key]:
+        st.session_state.bulk_selected_products[sku] = {"title": title}
+    else:
+        st.session_state.bulk_selected_products.pop(sku, None)
+
+
+def queue_checkbox(label: str, product: Dict, prefix: str) -> None:
+    """Checkbox zawsze zgodny z kolejką (także po „Zaznacz pierwsze N” i czyszczeniu)."""
+    sku = product["identifier"]
+    key = f"{prefix}_{sku}"
+    st.session_state[key] = sku in st.session_state.bulk_selected_products
+    st.checkbox(label, key=key, on_change=_toggle_queued_product, args=(key, sku, product["title"]))
 
 
 def render_result_preview(result: Dict) -> None:
@@ -5543,11 +5107,6 @@ with st.sidebar:
         if st.session_state.use_research and "PERPLEXITY_API_KEY" not in st.secrets:
             st.caption("Brak PERPLEXITY_API_KEY - research będzie pomijany.")
 
-        st.markdown("---")
-        st.metric("Opisane produkty", optimized_products_count())
-        if st.button("Wyczyść licznik opisanych produktów"):
-            clear_optimized_products()
-            st.rerun()
 
 interactive_tab, scale_tab, results_tab = st.tabs(
     [generator_mode, "Metatagi 50k / Batch API", "Kontrola metatagów"]
@@ -5579,15 +5138,9 @@ with interactive_tab:
             except Exception as exc:
                 st.error(str(exc))
         if st.session_state.search_res:
-            st.markdown('<div class="scrollable-results">', unsafe_allow_html=True)
-            for product in st.session_state.search_res:
-                sku = product["identifier"]
-                selected = sku in st.session_state.bulk_selected_products
-                if st.checkbox(f"{sku} - {product['title']}", value=selected, key=f"search_{sku}"):
-                    st.session_state.bulk_selected_products[sku] = {"title": product["title"]}
-                elif selected:
-                    st.session_state.bulk_selected_products.pop(sku, None)
-            st.markdown("</div>", unsafe_allow_html=True)
+            with st.container(height=420):
+                for product in st.session_state.search_res:
+                    queue_checkbox(f"{product['identifier']} - {product['title']}", product, "search")
 
     elif method == "Wklej SKU lub URL":
         loaded_count = st.session_state.pop("manual_products_loaded", 0)
@@ -5738,16 +5291,10 @@ with interactive_tab:
                     for product in st.session_state.backlog_items[: int(n_select)]:
                         st.session_state.bulk_selected_products[product["identifier"]] = {"title": product["title"]}
                     st.rerun()
-                st.markdown('<div class="scrollable-results">', unsafe_allow_html=True)
-                for product in st.session_state.backlog_items:
-                    sku = product["identifier"]
-                    selected = sku in st.session_state.bulk_selected_products
-                    label = f"{sku} - {product['title']} ({product['desc_len']} zn.)"
-                    if st.checkbox(label, value=selected, key=f"backlog_{sku}"):
-                        st.session_state.bulk_selected_products[sku] = {"title": product["title"]}
-                    elif selected:
-                        st.session_state.bulk_selected_products.pop(sku, None)
-                st.markdown("</div>", unsafe_allow_html=True)
+                with st.container(height=420):
+                    for product in st.session_state.backlog_items:
+                        label = f"{product['identifier']} - {product['title']} ({product['desc_len']} zn.)"
+                        queue_checkbox(label, product, "backlog")
         except Exception as exc:
             st.error(str(exc))
 
@@ -5933,7 +5480,6 @@ with interactive_tab:
                             item, final_html, akeneo_update_description,
                             channel=channel, locale=locale,
                         )
-                        add_optimized_product(item["sku"], item["title"], item["url"])
                         sent += 1
                     except Exception as exc:
                         send_errors.append(f"{item['sku']}: {exc}")
