@@ -288,6 +288,9 @@ def init_db() -> None:
         ensure_column("meta_jobs", "akeneo_status", "TEXT NOT NULL DEFAULT ''")
         ensure_column("meta_jobs", "akeneo_sent_at", "TEXT NOT NULL DEFAULT ''")
         ensure_column("meta_jobs", "akeneo_error", "TEXT NOT NULL DEFAULT ''")
+        # Wartości z Akeneo sprzed pierwszego nadpisania – do ewentualnego przywrócenia.
+        ensure_column("meta_jobs", "akeneo_previous_meta_title", "TEXT NOT NULL DEFAULT ''")
+        ensure_column("meta_jobs", "akeneo_previous_meta_description", "TEXT NOT NULL DEFAULT ''")
         ensure_column("batch_jobs", "run_id", "TEXT NOT NULL DEFAULT ''")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_meta_jobs_run ON meta_jobs(run_id)")
         ensure_workspace_schema(conn)
@@ -350,103 +353,12 @@ def upsert_meta_job(
     run_id: str = "",
     source_type: str = "catalog",
 ) -> Tuple[str, bool]:
-    title = safe_string_value(product_data.get("title"))
-    author = safe_string_value(product_data.get("author"))
-    description = safe_string_value(product_data.get("description"))
-    details = safe_string_value(product_data.get("details"))
-    input_hash = product_input_hash(sku, title, author, description, channel, locale)
-    style = build_style_plan(sku, title, author, description)
-    job_key = make_job_key(sku, channel, locale)
-    now = utcnow_iso()
-
-    with db_connect() as conn:
-        existing = conn.execute(
-            "SELECT input_hash, prompt_version, model, status FROM meta_jobs WHERE job_key=?",
-            (job_key,),
-        ).fetchone()
-        unchanged_completed = bool(
-            existing
-            and existing["input_hash"] == input_hash
-            and existing["prompt_version"] == PROMPT_VERSION
-            and existing["model"] == GEMINI_MODEL
-            and existing["status"] == "completed"
-            and not force_regenerate
-        )
-        if unchanged_completed:
-            conn.execute(
-                """
-                UPDATE meta_jobs SET run_id=?, source_type=?, store_view_code=?, updated_at=?
-                WHERE job_key=?
-                """,
-                (run_id, source_type, store_view_code, now, job_key),
-            )
-            return job_key, False
-
-        conn.execute(
-            """
-            INSERT INTO meta_jobs(
-                job_key, run_id, source_type, sku, channel, locale, store_view_code, title, author,
-                description, details, source_updated, input_hash, prompt_version, model, style_seed,
-                opening_mode, rhythm_mode, focus_mode, semantic_cues, source_lead, status, attempts,
-                created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', 0, ?, ?)
-            ON CONFLICT(job_key) DO UPDATE SET
-                run_id=excluded.run_id,
-                source_type=excluded.source_type,
-                store_view_code=excluded.store_view_code,
-                title=excluded.title,
-                author=excluded.author,
-                description=excluded.description,
-                details=excluded.details,
-                source_updated=excluded.source_updated,
-                input_hash=excluded.input_hash,
-                prompt_version=excluded.prompt_version,
-                model=excluded.model,
-                style_seed=excluded.style_seed,
-                opening_mode=excluded.opening_mode,
-                rhythm_mode=excluded.rhythm_mode,
-                focus_mode=excluded.focus_mode,
-                semantic_cues=excluded.semantic_cues,
-                source_lead=excluded.source_lead,
-                status='queued',
-                attempts=0,
-                meta_title='',
-                meta_description='',
-                opening_signature='',
-                short_opening_signature='',
-                normalized_hash='',
-                validation_errors='',
-                error_message='',
-                batch_job_name='',
-                updated_at=excluded.updated_at
-            """,
-            (
-                job_key,
-                run_id,
-                source_type,
-                sku,
-                channel,
-                locale,
-                store_view_code,
-                title,
-                author,
-                description,
-                details,
-                source_updated,
-                input_hash,
-                PROMPT_VERSION,
-                GEMINI_MODEL,
-                style["seed"],
-                style["opening_mode"],
-                style["rhythm_mode"],
-                style["focus_mode"],
-                ", ".join(style["semantic_cues"]),
-                style["source_lead"],
-                now,
-                now,
-            ),
-        )
-    return job_key, True
+    queued = bulk_upsert_meta_jobs([{
+        "sku": sku, "channel": channel, "locale": locale, "store_view_code": store_view_code,
+        "product_data": product_data, "source_updated": source_updated,
+        "force_regenerate": force_regenerate, "run_id": run_id, "source_type": source_type,
+    }])
+    return make_job_key(sku, channel, locale), queued[str(sku)]
 
 
 def save_meta_result(
@@ -2033,27 +1945,44 @@ def _validated_metatag_texts(meta_title: str, meta_description: str) -> Tuple[st
     return title, description
 
 
-def save_akeneo_meta_deliveries(deliveries: Sequence[Tuple[str, str, str]]) -> None:
+def save_akeneo_meta_deliveries(
+    deliveries: Sequence[Tuple[str, str, str]],
+    previous: Optional[Dict[str, Dict[str, str]]] = None,
+) -> None:
+    """Zapisuje status wysyłki; przy pierwszym udanym nadpisaniu także wartości sprzed zmiany."""
     rows = [(job_key, status, error) for job_key, status, error in deliveries if job_key]
     if not rows:
         return
+    previous = previous or {}
     now = utcnow_iso()
     with db_connect() as conn:
         conn.executemany(
             """
             UPDATE meta_jobs
-            SET akeneo_status=?, akeneo_sent_at=?, akeneo_error=?, updated_at=?
+            SET akeneo_status=?, akeneo_sent_at=?, akeneo_error=?, updated_at=?,
+                akeneo_previous_meta_title=CASE WHEN ?='sent' AND akeneo_previous_meta_title=''
+                    AND akeneo_previous_meta_description='' THEN ? ELSE akeneo_previous_meta_title END,
+                akeneo_previous_meta_description=CASE WHEN ?='sent' AND akeneo_previous_meta_title=''
+                    AND akeneo_previous_meta_description='' THEN ? ELSE akeneo_previous_meta_description END
             WHERE job_key=?
             """,
             [
-                (status, now if status == "sent" else "", error[:2000], now, job_key)
+                (
+                    status, now if status == "sent" else "", error[:2000], now,
+                    status, previous.get(job_key, {}).get("meta_title", ""),
+                    status, previous.get(job_key, {}).get("meta_description", ""),
+                    job_key,
+                )
                 for job_key, status, error in rows
             ],
         )
 
 
-def akeneo_existing_identifiers(token: str, identifiers: Sequence[str]) -> Set[str]:
-    """Sprawdza istnienie SKU przed zbiorczym PATCH-em, który w Akeneo jest operacją upsert."""
+def akeneo_current_metatags(
+    token: str, identifiers: Sequence[str], channel: str, locale: str
+) -> Dict[str, Dict[str, str]]:
+    """Zwraca istniejące SKU z ich obecnymi metatagami (PATCH w Akeneo to upsert, więc
+    brak SKU oznacza, że nie wolno go wysyłać)."""
     wanted = list(dict.fromkeys(str(identifier).strip() for identifier in identifiers if str(identifier).strip()))
     if not wanted:
         return set()
@@ -2068,16 +1997,22 @@ def akeneo_existing_identifiers(token: str, identifiers: Sequence[str]) -> Set[s
             params={
                 "limit": 100,
                 "with_count": "false",
-                "attributes": "meta_title",
+                "attributes": "meta_title,meta_description",
                 "search": json.dumps(search, ensure_ascii=False),
             },
         )
     response.raise_for_status()
-    return {
-        str(item.get("identifier", "")).strip()
-        for item in response.json().get("_embedded", {}).get("items", [])
-        if item.get("identifier")
-    }
+    current: Dict[str, Dict[str, str]] = {}
+    for item in response.json().get("_embedded", {}).get("items", []):
+        identifier = str(item.get("identifier", "")).strip()
+        if not identifier:
+            continue
+        values = item.get("values") or {}
+        current[identifier] = {
+            field: _value_from_values(values, [field], channel, locale)
+            for field in ("meta_title", "meta_description")
+        }
+    return current
 
 
 def akeneo_update_metatag_chunk(
@@ -2180,24 +2115,36 @@ def send_metatags_to_akeneo(
     }
 
     identifier_chunks = list(chunks([item["sku"] for item in candidates], AKENEO_SKU_FILTER_CHUNK_SIZE))
-    existing: Set[str] = set()
+    existing: Dict[str, Dict[str, str]] = {}
     with ThreadPoolExecutor(max_workers=AKENEO_MAX_WORKERS) as executor:
-        futures = [executor.submit(akeneo_existing_identifiers, token, sku_chunk) for sku_chunk in identifier_chunks]
+        futures = [
+            executor.submit(akeneo_current_metatags, token, sku_chunk, channel, locale)
+            for sku_chunk in identifier_chunks
+        ]
         for future in as_completed(futures):
             existing.update(future.result())
 
     existing_items: List[Dict] = []
-    missing_deliveries: List[Tuple[str, str, str]] = []
+    skipped_deliveries: List[Tuple[str, str, str]] = []
     completed = 0
+    stats["unchanged"] = 0
     for item in candidates:
-        if item["sku"] in existing:
+        current = existing.get(item["sku"])
+        if current is None:
+            error = "produkt nie istnieje w Akeneo - pominięto, aby nie utworzyć pustego produktu"
+            stats["errors"].append(f"{item['sku']}: {error}")
+            skipped_deliveries.append((item.get("job_key", ""), "failed", error))
+            completed += 1
+        elif (current["meta_title"].strip() == item["meta_title"].strip()
+              and current["meta_description"].strip() == item["meta_description"].strip()):
+            # Te same wartości już są w Akeneo – nie ma czego nadpisywać.
+            stats["unchanged"] = int(stats["unchanged"]) + 1
+            skipped_deliveries.append((item.get("job_key", ""), "sent", ""))
+            completed += 1
+        else:
             existing_items.append(item)
-            continue
-        error = "produkt nie istnieje w Akeneo - pominięto, aby nie utworzyć pustego produktu"
-        stats["errors"].append(f"{item['sku']}: {error}")
-        missing_deliveries.append((item.get("job_key", ""), "failed", error))
-        completed += 1
-    save_akeneo_meta_deliveries(missing_deliveries)
+    save_akeneo_meta_deliveries(skipped_deliveries)
+    previous = {item.get("job_key", ""): existing[item["sku"]] for item in existing_items}
 
     item_chunks = list(chunks(existing_items, AKENEO_META_UPDATE_CHUNK_SIZE))
     with ThreadPoolExecutor(max_workers=AKENEO_MAX_WORKERS) as executor:
@@ -2212,8 +2159,12 @@ def send_metatags_to_akeneo(
             )
             for item_chunk in item_chunks
         ]
-        for future in as_completed(futures):
-            outcomes = future.result()
+        for future, item_chunk in zip(futures, item_chunks):
+            try:
+                outcomes = future.result()
+            except Exception as exc:
+                # Błąd jednej paczki nie może zgubić statusów paczek już wysłanych.
+                outcomes = [(item, f"Błąd wysyłki paczki: {exc}") for item in item_chunk]
             delivery_updates: List[Tuple[str, str, str]] = []
             for item, error in outcomes:
                 completed += 1
@@ -2223,7 +2174,7 @@ def send_metatags_to_akeneo(
                 else:
                     stats["sent"] = int(stats["sent"]) + 1
                     delivery_updates.append((item.get("job_key", ""), "sent", ""))
-            save_akeneo_meta_deliveries(delivery_updates)
+            save_akeneo_meta_deliveries(delivery_updates, previous)
             if progress_callback:
                 progress_callback(completed, len(candidates))
     if progress_callback and completed:
@@ -2523,6 +2474,13 @@ def import_catalog_to_meta_queue(
     progress_callback=None,
 ) -> Dict[str, int]:
     stats = {"seen": 0, "queued": 0, "skipped_unchanged": 0, "without_description": 0}
+    pending: List[Dict] = []
+
+    def flush() -> None:
+        for queued in bulk_upsert_meta_jobs(pending).values():
+            stats["queued" if queued else "skipped_unchanged"] += 1
+        pending.clear()
+
     for product in akeneo_iter_products_search_after(
         token,
         channel,
@@ -2537,24 +2495,17 @@ def import_catalog_to_meta_queue(
             stats["without_description"] += 1
             if only_with_description:
                 continue
-        product_data = _prepare_product_data(product)
-        _, queued = upsert_meta_job(
-            sku=product["identifier"],
-            channel=channel,
-            locale=locale,
-            store_view_code=store_view_code,
-            product_data=product_data,
-            source_updated=product.get("updated", ""),
-            force_regenerate=force_regenerate,
-            run_id=run_id,
-            source_type="catalog",
-        )
-        if queued:
-            stats["queued"] += 1
-        else:
-            stats["skipped_unchanged"] += 1
+        pending.append({
+            "sku": product["identifier"], "channel": channel, "locale": locale,
+            "store_view_code": store_view_code, "product_data": _prepare_product_data(product),
+            "source_updated": product.get("updated", ""), "force_regenerate": force_regenerate,
+            "run_id": run_id, "source_type": "catalog",
+        })
+        if len(pending) >= 200:
+            flush()
         if progress_callback and stats["seen"] % 100 == 0:
             progress_callback(stats)
+    flush()
     if progress_callback:
         progress_callback(stats)
     return stats
@@ -3146,6 +3097,7 @@ def locked_fields_from_job(job: Dict) -> Tuple[str, str]:
 #   dzięki czemu szybki shard nie czeka na najwolniejszy.
 
 TURBO_BATCH_SHARD_SIZE = 1000
+BATCH_FAILED_STATES = {"JOB_STATE_FAILED", "JOB_STATE_CANCELLED", "JOB_STATE_EXPIRED"}
 BATCH_SUBMIT_WORKERS = 12
 BATCH_ACTIVE_JOB_SOFT_CAP = 80
 BATCH_MAX_SHARDS_PER_SUBMIT = 80
@@ -3520,9 +3472,10 @@ def import_skus_to_meta_queue(
         "run_id": run_id, "input": len(skus), "unique": len(unique_skus),
         "duplicates": duplicate_count, "found": 0, "queued": 0,
         "skipped_unchanged": 0, "inactive": 0, "without_description": 0,
-        "missing": 0, "processed": 0,
+        "missing": 0, "errors": 0, "processed": 0,
     }
     missing_skus: List[str] = []
+    error_skus: Dict[str, str] = {}
     inactive_skus: List[str] = []
     without_description_skus: List[str] = []
     sku_chunks = list(chunks(unique_skus, AKENEO_SKU_FILTER_CHUNK_SIZE))
@@ -3551,13 +3504,17 @@ def import_skus_to_meta_queue(
                         product = akeneo_get_product_details(sku, token, channel, locale)
                         if product:
                             products[sku] = product
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        # Błąd sieci/autoryzacji to nie „brak produktu” – raport musi to rozróżniać.
+                        error_skus[sku] = f"błąd Akeneo: {exc}"[:300]
 
             queue_entries: List[Dict] = []
             for sku in sku_chunk:
                 stats["processed"] = int(stats["processed"]) + 1
                 product = products.get(sku)
+                if not product and sku in error_skus:
+                    stats["errors"] = int(stats["errors"]) + 1
+                    continue
                 if not product:
                     stats["missing"] = int(stats["missing"]) + 1
                     missing_skus.append(sku)
@@ -3600,6 +3557,7 @@ def import_skus_to_meta_queue(
         writer = csv.writer(handle, delimiter="\t", lineterminator="\n")
         writer.writerow(["sku", "powod"])
         writer.writerows((sku, "nie znaleziono w Akeneo") for sku in missing_skus)
+        writer.writerows(error_skus.items())
         writer.writerows((sku, "produkt nieaktywny") for sku in inactive_skus)
         writer.writerows((sku, "brak opisu źródłowego") for sku in without_description_skus)
     stats["report_path"] = str(report_path)
@@ -3617,11 +3575,17 @@ def _remote_batches_by_display_name(display_names: Set[str], api_key: str) -> Di
         return {}
     wanted = set(display_names)
     found: Dict[str, Dict] = {}
+    with db_connect() as conn:
+        known = {row[0] for row in conn.execute("SELECT job_name FROM batch_jobs")}
     try:
         client = genai.Client(api_key=api_key)
         for batch_job in client.batches.list(config={"page_size": 100}):
             display = str(getattr(batch_job, "display_name", "") or "")
-            if display not in wanted:
+            if display not in wanted or display in found:
+                continue
+            # Odzyskujemy tylko zadanie utworzone przed crashem (nieznane w SQLite) i niezakończone
+            # porażką; ponowne wysłanie shardu po FAILED nie może „odzyskać” starej porażki.
+            if batch_job.name in known or batch_state_name(batch_job) in BATCH_FAILED_STATES:
                 continue
             found[display] = {
                 "job_name": batch_job.name,
@@ -3861,7 +3825,13 @@ def ingest_batch_result_bytes(job_name: str, content: bytes) -> Dict[str, int]:
         except Exception:
             stats["failed"] += 1
 
-    jobs = get_meta_jobs_by_keys(keys)
+    # Wynik trafia tylko do zadań, które nadal czekają na ten konkretny batch. Zadanie
+    # zresetowane w międzyczasie (np. wymuszona regeneracja) nie dostanie starego wyniku.
+    jobs = {
+        key: job for key, job in get_meta_jobs_by_keys(keys).items()
+        if job.get("batch_job_name") == job_name and job.get("status") == "batch_submitted"
+    }
+    stats["skipped"] = 0
     title_owners = existing_meta_title_owners()
     result_records: List[Dict] = []
     failed_records: List[Tuple[str, str]] = []
@@ -3875,7 +3845,8 @@ def ingest_batch_result_bytes(job_name: str, content: bytes) -> Dict[str, int]:
                 raise RuntimeError("Brak klucza zadania w odpowiedzi")
             job = jobs.get(key)
             if not job:
-                raise RuntimeError(f"Nieznany klucz zadania: {key}")
+                stats["skipped"] += 1
+                continue
             data = json.loads(strip_code_fences(text))
             locked_title, locked_description = locked_fields_from_job(job)
 
@@ -3910,8 +3881,17 @@ def ingest_batch_result_bytes(job_name: str, content: bytes) -> Dict[str, int]:
             if key:
                 failed_records.append((key, str(exc)))
 
-    save_meta_results_bulk(result_records, failed_records)
+    save_meta_results_bulk(result_records, [(key, message) for key, message in failed_records if key in jobs])
     with db_connect() as conn:
+        # Zadania bez odpowiedzi w pliku wynikowym nie mogą zostać na zawsze w batch_submitted.
+        missing = conn.execute(
+            """
+            UPDATE meta_jobs SET status='failed', error_message='Brak odpowiedzi w wyniku batcha', updated_at=?
+            WHERE batch_job_name=? AND status='batch_submitted'
+            """,
+            (utcnow_iso(), job_name),
+        ).rowcount
+        stats["failed"] += missing
         conn.execute(
             "UPDATE batch_jobs SET ingested_at=?, updated_at=? WHERE job_name=?",
             (utcnow_iso(), utcnow_iso(), job_name),
@@ -4149,15 +4129,19 @@ def bulk_upsert_meta_jobs(entries: Sequence[Dict]) -> Dict[str, bool]:
         for item in prepared:
             entry = item["entry"]
             existing = existing_map.get(item["job_key"])
+            force = bool(entry.get("force_regenerate", False))
             unchanged_completed = bool(
                 existing
                 and existing["input_hash"] == item["input_hash"]
                 and existing["prompt_version"] == PROMPT_VERSION
                 and existing["model"] == GEMINI_MODEL
                 and existing["status"] == "completed"
-                and not bool(entry.get("force_regenerate", False))
+                and not force
             )
-            if unchanged_completed:
+            # Zadanie w trwającym batchu zostaje; reset oznaczałby drugi, płatny request,
+            # a stary wynik nadpisałby nowy. Zmienione dane wejdą przy kolejnym imporcie.
+            in_running_batch = bool(existing and existing["status"] == "batch_submitted" and not force)
+            if unchanged_completed or in_running_batch:
                 touch_rows.append((
                     entry.get("run_id", ""), entry.get("source_type", "catalog"),
                     entry.get("store_view_code", ""), now, item["job_key"],
@@ -4468,7 +4452,7 @@ def refresh_and_ingest_batch_jobs(run_id: Optional[str] = None) -> List[Dict]:
                 }
                 if state == "JOB_STATE_SUCCEEDED" and output_file_name:
                     succeeded_for_download.append({**stored, "output_file_name": output_file_name})
-                elif state in {"JOB_STATE_FAILED", "JOB_STATE_CANCELLED", "JOB_STATE_EXPIRED"}:
+                elif state in BATCH_FAILED_STATES:
                     with db_connect() as conn:
                         conn.execute(
                             """
@@ -4476,6 +4460,11 @@ def refresh_and_ingest_batch_jobs(run_id: Optional[str] = None) -> List[Dict]:
                             WHERE batch_job_name=? AND status='batch_submitted'
                             """,
                             (error_message or state, utcnow_iso(), stored["job_name"]),
+                        )
+                        # Zakończone porażką zadanie nie jest już odpytywane przy każdym odświeżeniu.
+                        conn.execute(
+                            "UPDATE batch_jobs SET ingested_at=? WHERE job_name=?",
+                            (utcnow_iso(), stored["job_name"]),
                         )
             except Exception as exc:
                 updates_by_job[stored["job_name"]] = {
@@ -5528,7 +5517,10 @@ with interactive_tab:
                         locale,
                         progress_callback=interactive_meta_progress,
                     )
-                    st.success(f"Wysłano metatagi dla {stats['sent']} produktów.")
+                    st.success(
+                        f"Wysłano metatagi dla {stats['sent']} produktów"
+                        f" (bez zmian w Akeneo: {stats.get('unchanged', 0)})."
+                    )
                     if stats["errors"]:
                         st.error("\n".join(stats["errors"]))
                 except Exception as exc:
@@ -5649,6 +5641,7 @@ with scale_tab:
                         f"Import {run_id}: {int(stats['queued']):,} produktów w kolejce, "
                         f"{int(stats['skipped_unchanged']):,} już gotowych i niezmienionych, "
                         f"{int(stats['missing']):,} nie znaleziono, "
+                        f"{int(stats['errors']):,} z błędem Akeneo (szczegóły w raporcie), "
                         f"{int(stats['inactive']):,} nieaktywnych, "
                         f"{int(stats['without_description']):,} bez opisu.".replace(",", " ")
                     )
@@ -5910,7 +5903,10 @@ with results_tab:
                         locale,
                         progress_callback=batch_meta_progress,
                     )
-                    st.success(f"Wysłano metatagi dla {delivery_stats['sent']} produktów.")
+                    st.success(
+                        f"Wysłano metatagi dla {delivery_stats['sent']} produktów"
+                        f" (bez zmian w Akeneo: {delivery_stats.get('unchanged', 0)})."
+                    )
                     if delivery_stats["errors"]:
                         shown_errors = list(delivery_stats["errors"])[:50]
                         st.error("\n".join(shown_errors))
