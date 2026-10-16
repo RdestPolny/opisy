@@ -42,17 +42,11 @@ z kategorią, który przekierowuje.
 **Firecrawl (opcjonalnie).** Gdy Luigi's Box nie zwróci rekomendacji (np. zmiana API, blokada z hostingu),
 a w sekretach jest `FIRECRAWL_API_KEY`, aplikacja renderuje kartę produktu przez Firecrawl
 (`/v2/scrape`, `rawHtml`, przewinięcie strony) i odczytuje z HTML karuzelę rekomendacji oraz breadcrumbs.
-Adres karty jest wtedy szukany w snapshocie sitemap po slugu tytułu. Linki z Firecrawl przechodzą live-check.
+Adres karty bierzemy z Luigi's Box, a gdy go nie ma, budujemy ze slugu tytułu (tak Bookland tworzy `url_key`).
+Linki z karuzeli skracamy do ostatniego segmentu ścieżki; linki z Firecrawl przechodzą live-check.
 
 Gdy rekomendacje spod karty nie dadzą żadnego kandydata, Jev ocenia tylko ręczny katalog celów,
-a bez niego opis powstaje bez nowego linku. Nie ma już zapasowego dopasowania po sitemap.
-
-## Snapshot sitemap Booklandu
-
-Snapshot sitemap w repozytorium (`data/`, odświeżany przez GitHub Actions) służy już tylko zapasowi
-Firecrawl: po tytule produktu odszukuje adres jego karty i kanoniczne adresy produktów z karuzeli.
-Gdy w sekretach jest `FIRECRAWL_API_KEY`, aplikacja w razie potrzeby odtwarza z niego lokalny indeks
-`.streamlit/bookland_sitemap.sqlite3`.
+a bez niego opis powstaje bez nowego linku. Aplikacja nie korzysta z sitemap Booklandu.
 
 ## Katalog celów
 

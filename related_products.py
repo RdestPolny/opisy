@@ -4,8 +4,7 @@ Główne źródło to publiczne API Luigi's Box, z którego korzysta sama karta
 produktu Bookland (karuzela „Inni kupili również”, rekomender
 ``item_detail_alternatives``). To te same produkty, które klient widzi pod
 kartą, ale razem z atrybutami (kategorie, przedmiot, poziom, seria, autor),
-więc Jev dostaje do oceny konkretne, opisane cele zamiast przypadkowych slugów
-z sitemap.
+więc Jev dostaje do oceny konkretne, opisane cele.
 
 Zapasowe źródło to Firecrawl: renderuje kartę produktu z JavaScriptem i z HTML
 odczytujemy karuzelę rekomendacji oraz breadcrumbs. Używamy go tylko wtedy,
@@ -110,6 +109,20 @@ def canonical_bookland_url(value: str) -> str:
     return f"{BOOKLAND_ORIGIN}{parsed.path.rstrip('/')}"
 
 
+def title_slug_url(title: str) -> str:
+    """Adres karty zbudowany ze slugu tytułu (tak Bookland tworzy url_key)."""
+    text = (title or "").translate(str.maketrans({"ł": "l", "Ł": "L"}))
+    text = "".join(ch for ch in unicodedata.normalize("NFKD", text) if not unicodedata.combining(ch))
+    slug = re.sub(r"[^a-z0-9]+", "-", text.casefold()).strip("-")
+    return canonical_bookland_url("/" + slug) if slug else ""
+
+
+def last_segment_url(url: str) -> str:
+    """Skraca stary adres z kategorią (/ksiazki/.../tytul) do kanonicznego /tytul."""
+    canonical = canonical_bookland_url(url)
+    return canonical_bookland_url("/" + canonical.rsplit("/", 1)[-1]) if canonical else ""
+
+
 def product_item_ids(product: Dict) -> List[str]:
     """Identyfikatory, pod którymi Luigi's Box zna produkt (na Booklandzie to EAN/SKU)."""
     ids = []
@@ -145,7 +158,7 @@ def summarize_luigis_hit(hit: Dict) -> Optional[Dict]:
     attrs = hit.get("attributes") or {}
     if not isinstance(attrs, dict):
         return None
-    # Atrybut ``url`` to aktualny url_key (jest w sitemap). ``web_url`` bywa
+    # Atrybut ``url`` to aktualny url_key. ``web_url`` bywa
     # starym adresem z kategorią/promocją, który przekierowuje.
     url = ""
     for candidate in (_first(attrs.get("url")), _first(attrs.get("web_url")), _first(attrs.get("original_url"))):
@@ -460,7 +473,8 @@ def fetch_related_products(
     if result["products"] or not firecrawl_api_key:
         return result
 
-    url = product_url or ((result.get("source") or {}).get("url") or "")
+    # Adres z Luigi's Box jest pewniejszy niż slug zbudowany z tytułu.
+    url = ((result.get("source") or {}).get("url") or "") or product_url
     if not url:
         result["warnings"].append("Firecrawl pominięty: nie znamy adresu karty produktu na Booklandzie.")
         return result

@@ -46,11 +46,6 @@ from description_output import (
 )
 from description_generation import generate_description_result
 from internal_linking import SCORE_THRESHOLD, TRUSTED_ORIGINS, select_internal_links, validate_targets, verify_target_url
-from sitemap_retrieval import (
-    DEFAULT_SITEMAP_DB_PATH,
-    restore_bundled_snapshot,
-    sitemap_cache_status,
-)
 
 try:
     from product_input import ProductInputResolutionError, resolve_product_inputs
@@ -5070,8 +5065,6 @@ def get_internal_link() -> Optional[Dict]:
             "use_related": st.session_state.get("link_related_enabled", True),
             "firecrawl_api_key": st.secrets.get("FIRECRAWL_API_KEY", ""),
             "related_size": 16,
-            # Snapshot sitemap służy tylko do znalezienia adresu karty dla zapasu Firecrawl.
-            "sitemap_db_path": str(DEFAULT_SITEMAP_DB_PATH),
         }
     if (
         st.session_state.get("link_active")
@@ -5128,13 +5121,6 @@ def render_link_catalog(locale: str) -> None:
     )
     if st.session_state.link_related_enabled and not st.secrets.get("FIRECRAWL_API_KEY"):
         st.caption("Brak FIRECRAWL_API_KEY – zapasowe scrapowanie karty produktu jest wyłączone.")
-    if st.session_state.link_related_enabled and st.secrets.get("FIRECRAWL_API_KEY"):
-        # Zapas Firecrawl szuka adresu karty po tytule w snapshocie sitemap z repo.
-        try:
-            if int(sitemap_cache_status(DEFAULT_SITEMAP_DB_PATH).get("url_count", 0)) <= 0:
-                restore_bundled_snapshot(db_path=DEFAULT_SITEMAP_DB_PATH)
-        except Exception:
-            pass
 
     with st.expander("Katalog celów linkowania", expanded=not st.session_state.link_targets):
         st.caption("Dla kategorii wpisz kod Akeneo i rzeczywisty adres Booklandu. Opcjonalne pola ograniczają dobór; brak zgodnych danych oznacza pominięcie celu.")

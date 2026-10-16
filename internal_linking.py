@@ -8,9 +8,13 @@ from urllib.parse import unquote, urljoin, urlsplit
 
 import requests
 
-from related_products import fetch_related_products, product_item_ids, rank_related_products
-# Snapshot sitemap służy już tylko do odszukania kanonicznego adresu karty dla zapasu Firecrawl.
-from sitemap_retrieval import DEFAULT_SITEMAP_DB_PATH, find_url_by_title
+from related_products import (
+    fetch_related_products,
+    last_segment_url,
+    product_item_ids,
+    rank_related_products,
+    title_slug_url,
+)
 
 FIELDS = ("school", "grade", "subject", "series", "edition")
 HOSTS = {"bookland.com.pl", "www.bookland.com.pl"}
@@ -297,7 +301,6 @@ def _facts_text(item: dict) -> str:
 
 def _related_candidates(product: dict, config: dict, result: dict) -> list[dict]:
     """Kandydaci z rekomendacji spod karty produktu (Luigi's Box, zapasowo Firecrawl)."""
-    db_path = config.get("sitemap_db_path") or DEFAULT_SITEMAP_DB_PATH
     firecrawl_key = _text(config.get("firecrawl_api_key"))
     fetcher = config.get("related_fetcher") or fetch_related_products
     try:
@@ -305,7 +308,7 @@ def _related_candidates(product: dict, config: dict, result: dict) -> list[dict]
             product,
             size=int(config.get("related_size", 16)),
             firecrawl_api_key=firecrawl_key,
-            product_url=_safe_title_url(product.get("title"), db_path) if firecrawl_key else "",
+            product_url=title_slug_url(_text(product.get("title"))) if firecrawl_key else "",
         )
     except Exception:  # Źródło pomocnicze nie może zatrzymać generowania opisu.
         result["warnings"].append("Nie udało się pobrać produktów powiązanych spod karty produktu.")
@@ -341,8 +344,9 @@ def _related_candidates(product: dict, config: dict, result: dict) -> list[dict]
     for rank, item in enumerate(ranked):
         url = item["url"]
         if provider == "firecrawl":
-            # Linki z karuzeli bywają starymi adresami z kategorią; preferuj adres kanoniczny z sitemap.
-            url = _safe_title_url(item["title"], db_path) or url
+            # Linki z karuzeli bywają starymi adresami z kategorią; kanoniczny jest ostatni segment.
+            # Takie adresy i tak przechodzą live-check przed użyciem.
+            url = last_segment_url(url) or url
         try:
             _validate_url(url)
         except ValueError:
@@ -354,13 +358,6 @@ def _related_candidates(product: dict, config: dict, result: dict) -> list[dict]
             code=item.get("id") or "",
         ))
     return candidates
-
-
-def _safe_title_url(title, db_path) -> str:
-    try:
-        return find_url_by_title(_text(title), db_path=db_path)
-    except Exception:
-        return ""
 
 
 def _related_candidate(*, kind, origin, url, label, details, relation, rank_hint, code="") -> dict:

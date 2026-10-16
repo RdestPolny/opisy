@@ -10,8 +10,10 @@ from related_products import (
     canonical_bookland_url,
     fetch_related_products,
     parse_product_page,
+    last_segment_url,
     rank_related_products,
     same_work,
+    title_slug_url,
 )
 
 FIXTURE = json.loads((Path(__file__).parent / "fixtures" / "luigis_recommendations.json").read_text(encoding="utf-8"))
@@ -110,6 +112,14 @@ class LuigisRetrievalTests(unittest.TestCase):
         related = fetch_related_products({"identifier": MZP}, session=FakeLuigis(fail=True))
         self.assertEqual(related["products"], [])
         self.assertIn("Luigi's Box niedostępny", related["warnings"][0])
+
+    def test_title_slug_and_last_segment_urls(self):
+        self.assertEqual(title_slug_url("Kult. Łukasz Orbitowski"), "https://bookland.com.pl/kult-lukasz-orbitowski")
+        self.assertEqual(title_slug_url("Słownik Cytatów Z Biblii"), "https://bookland.com.pl/slownik-cytatow-z-biblii")
+        self.assertEqual(title_slug_url("  "), "")
+        self.assertEqual(last_segment_url("https://bookland.com.pl/ksiazki/literatura-piekna/wrog"),
+                         "https://bookland.com.pl/wrog")
+        self.assertEqual(last_segment_url("https://evil.example/ksiazki/wrog"), "")
 
     def test_url_guard(self):
         self.assertEqual(canonical_bookland_url("/wrog/"), "https://bookland.com.pl/wrog")
@@ -232,7 +242,7 @@ class JevIntegrationTests(unittest.TestCase):
     def test_no_related_candidates_means_no_sitemap_fallback(self):
         with patch("internal_linking.requests.post") as post:
             result = select_internal_links({"identifier": "000", "title": "Nieznany"}, {
-                "targets": [], "api_key": "secret", "use_related": True, "use_sitemap": True,
+                "targets": [], "api_key": "secret", "use_related": True,
                 "related_fetcher": lambda product, **kwargs: {"source": None, "products": [], "categories": [],
                                                               "warnings": ["brak"], "provider": "luigisbox"},
             })
