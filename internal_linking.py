@@ -180,7 +180,7 @@ def select_internal_links(product, config) -> dict:
 
     for winner in winners:
         winner["selected"] = True
-        link = {key: winner[key] for key in ("kind", "code", "label", "url", "category", "origin")}
+        link = {key: winner[key] for key in ("kind", "code", "label", "name", "url", "category", "origin")}
         if winner.get("relation"):
             # Do promptu Gemini trafiają dwa najmocniejsze fakty (seria/autor/przedmiot).
             link["relation"] = "; ".join(winner["relation"].split("; ")[:2])
@@ -236,6 +236,7 @@ def _related_candidates(product: dict, config: dict, result: dict) -> list[dict]
             kind="category", origin=provider, url=category["url"], label=category["label"],
             details=f"Kategoria Bookland, w której jest produkt źródłowy: {category['label']}",
             relation="", rank_hint=category.get("depth", 0) - (5 if category.get("publisher") else 0) - rank * 0.01,
+            name=category.get("name") or category["label"].split(" > ")[-1],
         ))
 
     products = related.get("products") or []
@@ -264,11 +265,13 @@ def _related_candidates(product: dict, config: dict, result: dict) -> list[dict]
     return candidates
 
 
-def _related_candidate(*, kind, origin, url, label, details, relation, rank_hint, code="") -> dict:
+def _related_candidate(*, kind, origin, url, label, details, relation, rank_hint, code="", name="") -> dict:
     return {
         "kind": kind,
         "code": code or f"{kind}-" + hashlib.sha1(url.encode("utf-8")).hexdigest()[:12],
+        # label: pełna ścieżka (kontekst dla Jev); name: sama nazwa kategorii na anchor.
         "label": label,
+        "name": name or label,
         "url": url,
         "origin": origin,
         "category": label,

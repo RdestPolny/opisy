@@ -1,3 +1,10 @@
+# 4.16.1
+
+- Anchor linku do kategorii to odmieniona nazwa kategorii (np. „książek fantasy”), a nie skopiowany
+  breadcrumb. Gemini dostaje osobno `nazwa_kategorii` i `sciezka` (tylko jako kontekst) oraz zakaz
+  wstawiania ścieżki i znaku „>”. Jev nadal ocenia kategorię po pełnej ścieżce.
+- Nowe ostrzeżenie LINK_ANCHOR_PATH, gdy anchor mimo to zawiera ścieżkę kategorii.
+
 # 4.16.0
 
 Status produktów w sklepie widoczny przed generowaniem.

@@ -38,14 +38,25 @@ Nie doklejaj wezwania „zobacz również”. Nie wymuszaj linku, gdy nie pasuje
 Dla produktu (kind=product) anchor to jego tytuł lub naturalny skrót tytułu. Relację opisuj
 wyłącznie na podstawie pola „powiazanie” (np. ta sama seria, ten sam autor); bez niego pisz ostrożnie,
 np. „czytelnicy sięgają też po…”, nie twierdząc, że to kontynuacja czy uzupełnienie.
-Dla kategorii (kind=category) anchor opisuje zakres kategorii, np. „podręczniki do matematyki dla klasy 5”.
+Dla kategorii (kind=category) anchor to „nazwa_kategorii” odmieniona tak, by gramatycznie pasowała
+do zdania, ewentualnie doprecyzowana zakresem ze „sciezka”, np. nazwa „Fantasy” → „książek fantasy”,
+nazwa „Matematyka” ze ścieżką „… > Szkoła Podstawowa Klasa 5 > Matematyka” → „podręczniki do matematyki
+dla klasy 5”. Nigdy nie wstawiaj do tekstu całej ścieżki kategorii ani znaku „>”.
 Pusta lista oznacza opis bez nowych linków. Nie wymyślaj adresów; kopiuj je dokładnie.
 Cele: """ + json.dumps([
-        {"url": target["url"], "label": target.get("label") or target.get("category", ""),
-         "kind": target.get("kind", "category"),
-         **({"powiazanie": target["relation"]} if target.get("relation") else {})}
-        for target in targets
+        _link_target_for_prompt(target) for target in targets
     ], ensure_ascii=False)
+
+
+def _link_target_for_prompt(target: Dict) -> Dict:
+    label = target.get("label") or target.get("category", "")
+    if target.get("kind", "category") == "category":
+        # Sama nazwa na anchor; pełna ścieżka tylko jako kontekst zakresu kategorii.
+        name = target.get("name") or label.split(" > ")[-1]
+        return {"url": target["url"], "kind": "category", "nazwa_kategorii": name,
+                **({"sciezka": label} if label != name else {})}
+    return {"url": target["url"], "label": label, "kind": target["kind"],
+            **({"powiazanie": target["relation"]} if target.get("relation") else {})}
 
 
 def build_system_prompt_full(internal_link: Optional[Dict] = None) -> str:

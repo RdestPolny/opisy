@@ -240,6 +240,9 @@ def analyze_description_html(
             report.warn("LINK_TARGET_REMOVED", "Usunięto niezatwierdzone lub powtórzone linki; zachowano tekst.")
         if set(allowed) - set(seen):
             report.warn("LINK_MISSING", "Pominięto część proponowanych linków. Sprawdź, czy pasują do treści opisu.")
+    anchors = [unescape(re.sub(r"<[^>]+>", "", text)) for text in re.findall(r"<a\b[^>]*>(.*?)</a>", cleaned, flags=re.DOTALL)]
+    if any(">" in anchor or "›" in anchor for anchor in anchors):
+        report.warn("LINK_ANCHOR_PATH", "Anchor linku zawiera ścieżkę kategorii („>”); użyj odmienionej nazwy kategorii.")
     plain_text = re.sub(r"\s+", " ", unescape(re.sub(r"<[^>]+>", " ", cleaned))).strip()
     if not plain_text:
         report.errors.append("opis jest pusty po oczyszczeniu HTML")

@@ -29,6 +29,13 @@ class DescriptionOutputTests(unittest.TestCase):
     def codes(self, report):
         return {issue["code"] for issue in report.warnings}
 
+    def test_breadcrumb_anchor_is_flagged(self):
+        path = full_description(link_paragraph=0).replace(
+            "</p>", f' <a href="{LINK}">Książki &gt; Fantastyka i horror &gt; Fantasy</a></p>', 1)
+        self.assertIn("LINK_ANCHOR_PATH", self.codes(analyze_description_html(path)))
+        natural = full_description(link_paragraph=0).replace("</p>", f' <a href="{LINK}">książek fantasy</a></p>', 1)
+        self.assertNotIn("LINK_ANCHOR_PATH", self.codes(analyze_description_html(natural)))
+
     def test_required_structure_is_clean(self):
         report = analyze_description_html(full_description(), required_link=LINK, required_link_paragraph=2)
         self.assertEqual(report.errors, [])

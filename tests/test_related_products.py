@@ -248,6 +248,8 @@ class JevIntegrationTests(unittest.TestCase):
         self.assertIn("recommender", body["questions"]["support_2"]["instructions"])
         self.assertIn("seria: Matematyka z plusem", body["state"]["source"]["bookland_facts"])
         kinds = {link["kind"]: link for link in result["links"]}
+        self.assertEqual(kinds["category"]["name"], "Matematyka")
+        self.assertIn(" > ", kinds["category"]["label"])
         self.assertEqual(kinds["category"]["url"],
                          "https://bookland.com.pl/podreczniki-ogolne/szkolne/szkola-podstawowa-klasa-5/matematyka")
         self.assertTrue(kinds["product"]["url"].startswith("https://bookland.com.pl/matematyka-z-plusem-"))

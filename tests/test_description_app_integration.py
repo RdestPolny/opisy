@@ -1,4 +1,5 @@
 """Run the real description adapters without executing Streamlit or opening a DB."""
+import json
 import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -65,6 +66,18 @@ class DescriptionAppIntegrationTests(unittest.TestCase):
         self.assertIsNone(result["error"])
         report = deliver_description_result(result, value, Mock(), channel="Bookland", locale="pl_PL")
         self.assertEqual(report.warnings, [])
+
+    def test_prompt_gets_category_name_not_breadcrumb_as_anchor(self):
+        targets = [{"kind": "category", "url": LINK, "label": "Książki > Fantastyka i horror > Fantasy", "name": "Fantasy"},
+                   {"kind": "product", "url": LINK + "-2", "label": "Dwie wieże", "relation": "ten sam autor: Tolkien"}]
+        prompt = descriptions.description_link_instructions(targets)
+        payload = json.loads(prompt.split("Cele: ", 1)[1])
+        self.assertEqual(payload[0], {"url": LINK, "kind": "category", "nazwa_kategorii": "Fantasy",
+                                      "sciezka": "Książki > Fantastyka i horror > Fantasy"})
+        self.assertEqual(payload[1]["label"], "Dwie wieże")
+        self.assertIn("Nigdy nie wstawiaj do tekstu całej ścieżki kategorii", prompt)
+        manual = json.loads(descriptions.description_link_instructions({"url": LINK, "category": "kryminał"}).split("Cele: ", 1)[1])
+        self.assertEqual(manual, [{"url": LINK, "kind": "category", "nazwa_kategorii": "kryminał"}])
 
     def test_external_links_from_model_are_stripped_without_linking(self):
         planted = full_description(link_paragraph=0).replace("</p>", ' <a href="https://evil.example/x">tu</a></p>', 1)
