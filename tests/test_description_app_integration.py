@@ -79,6 +79,19 @@ class DescriptionAppIntegrationTests(unittest.TestCase):
         manual = json.loads(descriptions.description_link_instructions({"url": LINK, "category": "kryminał"}).split("Cele: ", 1)[1])
         self.assertEqual(manual, [{"url": LINK, "kind": "category", "nazwa_kategorii": "kryminał"}])
 
+    def test_fallback_link_is_inserted_when_gemini_omits_it_and_not_duplicated(self):
+        target = {"kind": "product", "url": LINK, "label": 'Tom <drugi> & "inny"', "fallback": True}
+        self.app["select_internal_links"].return_value = {"links": [target], "warnings": [], "candidates": []}
+        self.sdk.return_value = SimpleNamespace(text=full_description(link_paragraph=0))
+        result = self.app["process_product_from_akeneo"]("SKU1", "fake", "Bookland", "pl_PL",
+                    internal_link={"mode": "automatic"}, use_research=False)
+        self.assertIsNone(result["error"])
+        self.assertEqual(descriptions.description_link_snapshot(result["description_html"]).count(LINK), 1)
+        self.assertIn("&lt;drugi&gt;", result["description_html"])
+        self.assertIn('"fallback": true', self.sdk.call_args.kwargs["config"].system_instruction)
+        self.assertEqual(descriptions._normalize_description_links(result["description_html"], [target]), result["description_html"])
+        self.assertEqual(descriptions._normalize_description_links("", [target]), "")
+
     def test_external_links_from_model_are_stripped_without_linking(self):
         planted = full_description(link_paragraph=0).replace("</p>", ' <a href="https://evil.example/x">tu</a></p>', 1)
         self.sdk.return_value = SimpleNamespace(text=planted)

@@ -212,7 +212,7 @@ with st.sidebar:
         if st.session_state.link_mode == "Automatyczne (Jev)":
             st.session_state.link_threshold = st.slider("Minimalne potwierdzenie dopasowania", 0.5, 1.0,
                                                         st.session_state.get("link_threshold", 0.8), 0.05)
-            st.caption("Jev ocenia w jednym requeście wszystkie kategorie ze ścieżki produktu i wszystkie produkty spod karty (Luigi's Box) i wybiera do 2 linków.")
+            st.caption("Jev ocenia kategorie i produkty spod karty (Luigi's Box) i wybiera do 2 linków. Gdy żaden produkt nie przejdzie progów, wybierany jest produkt z najwyższą oceną Jev.")
             if not st.secrets.get("TYPESAFE_API_KEY"):
                 st.warning("Dodaj TYPESAFE_API_KEY w sekretach Streamlit. Bez klucza opis powstanie bez automatycznych linków.")
             if not st.secrets.get("FIRECRAWL_API_KEY"):

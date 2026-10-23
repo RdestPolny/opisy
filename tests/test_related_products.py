@@ -59,6 +59,14 @@ class FakeLuigis:
 
 
 class LuigisRetrievalTests(unittest.TestCase):
+    def test_different_parts_and_grades_are_not_duplicate_editions(self):
+        for a, b in (("Wielka saga przygodowa tom 1", "Wielka saga przygodowa tom 2"),
+                     ("Wielka saga przygodowa tom I", "Wielka saga przygodowa tom II"),
+                     ("Matematyka z kluczem. Klasa 5. Podręcznik", "Matematyka z kluczem. Klasa 6. Podręcznik")):
+            with self.subTest(a=a, b=b):
+                self.assertFalse(same_work(a, b))
+        self.assertTrue(same_work("Wielka saga tom 1. Oprawa twarda 2024", "Wielka saga tom 1. Oprawa miękka 2025"))
+
     def test_textbook_gets_own_category_path_and_same_series_companions_first(self):
         session = FakeLuigis()
         related = fetch_related_products({"identifier": MZP, "title": "Matematyka z plusem 5"}, session=session)
@@ -233,13 +241,13 @@ class JevIntegrationTests(unittest.TestCase):
     def test_all_related_candidates_go_to_jev_with_facts(self):
         product = {"identifier": MZP, "title": "Matematyka z plusem. Szkoła podstawowa klasa 5. Podręcznik",
                    "description": "Podręcznik do matematyki dla klasy 5.", "categories": ["mat5"]}
-        values = [(2.6, .9), (2.0, .9)] + [(2.9, .95)] + [(2.7, .9)] * 13
+        values = [(2.6, .9), (2.0, .9)] + [(2.9, .95)] + [(2.7, .9)] * 14
         result, post = self.run_selection(product, values)
         body = post.call_args.kwargs["json"]
         candidates = body["state"]["candidates"]
-        # 2 kategorie ze ścieżki + 14 produktów z karuzeli (16 minus self-link i inne wydanie).
-        self.assertEqual(len(candidates), 16)
-        self.assertEqual(len(body["questions"]), 32)
+        # 2 kategorie + 15 produktów: różna klasa nie jest innym wydaniem tego samego dzieła.
+        self.assertEqual(len(candidates), 17)
+        self.assertEqual(len(body["questions"]), 34)
         self.assertEqual(post.call_args.kwargs["timeout"], 30)
         self.assertEqual([c["kind"] for c in candidates[:2]], ["category", "category"])
         self.assertTrue(all(c["origin"] == "luigisbox" for c in candidates))
@@ -258,10 +266,12 @@ class JevIntegrationTests(unittest.TestCase):
         self.assertEqual(result["related_source"]["provider"], "luigisbox")
         self.assertNotIn("secret", json.dumps(result))
 
-    def test_rejected_candidates_mean_no_links(self):
+    def test_rejected_products_use_highest_scored_fallback(self):
         product = {"identifier": KULT, "title": "Kult. Łukasz Orbitowski", "description": "Powieść.", "categories": []}
         result, _ = self.run_selection(product, [(2.0, .5)] * 15)
-        self.assertEqual(result["links"], [])
+        self.assertEqual(len(result["links"]), 1)
+        self.assertEqual(result["links"][0]["kind"], "product")
+        self.assertTrue(result["links"][0]["fallback"])
         self.assertTrue(all(c["reason"] for c in result["candidates"] if c["score"] is not None))
 
     def test_no_related_candidates_means_no_sitemap_fallback(self):

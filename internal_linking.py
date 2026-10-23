@@ -2,6 +2,7 @@
 import hashlib
 import math
 import re
+import time
 import unicodedata
 from html.parser import HTMLParser
 from urllib.parse import unquote, urljoin, urlsplit
@@ -100,6 +101,29 @@ def _number(value, maximum):
     return value
 
 
+def _request_jev(payload, api_key):
+    for attempt in range(3):
+        try:
+            response = requests.post(
+                "https://api.typesafe.ai/v1/systemone",
+                headers={"Authorization": f"Bearer {api_key}"}, json=payload, timeout=JEV_TIMEOUT,
+            )
+            response.raise_for_status()
+            return response
+        except requests.RequestException as exc:
+            status = getattr(exc.response, "status_code", None)
+            retryable = isinstance(exc, (requests.Timeout, requests.ConnectionError)) or status in {408, 429, 500, 502, 503, 504, 529}
+            if not retryable or attempt == 2:
+                raise
+            try:
+                delay = float(exc.response.headers.get("Retry-After", 2 ** attempt))
+                if not math.isfinite(delay):
+                    raise ValueError
+            except (AttributeError, TypeError, ValueError):
+                delay = 2 ** attempt
+            time.sleep(min(max(delay, 1), 30))
+
+
 def select_internal_links(product, config) -> dict:
     """Najwyżej jedna kategoria i jeden produkt spośród rekomendacji spod karty produktu."""
     if not isinstance(product, dict) or not isinstance(config, dict):
@@ -119,7 +143,7 @@ def select_internal_links(product, config) -> dict:
         return result
     if not shortlisted:
         return result
-    state = {"source": {key: _text(product.get(key)) for key in ("identifier", "sku", "title", *FIELDS)},
+    state = {"source": {key: _text(product.get(key)) for key in ("identifier", "sku", "title", "author", "publisher", "details", *FIELDS)},
              "candidates": []}
     categories = product.get("categories")
     state["source"]["categories"] = list(categories) if isinstance(categories, (list, tuple)) else []
@@ -152,9 +176,7 @@ def select_internal_links(product, config) -> dict:
                                     "false": "The relationship is only generic bestseller/popularity overlap, a different subject, level or audience, another edition of the same title, or the facts are insufficient."}}
         questions[f"support_{index}"] = support
     try:
-        response = requests.post("https://api.typesafe.ai/v1/systemone", headers={"Authorization": f"Bearer {api_key}"},
-                                 json={"model": config.get("model") or JEV_MODEL, "state": state, "questions": questions}, timeout=JEV_TIMEOUT)
-        response.raise_for_status()
+        response = _request_jev({"model": config.get("model") or JEV_MODEL, "state": state, "questions": questions}, api_key)
         answers = response.json()["answers"]
         scores = []
         for index in range(len(shortlisted)):
@@ -163,8 +185,21 @@ def select_internal_links(product, config) -> dict:
                 raise ValueError
             _number(score["confidence"], 1)  # Distribution concentration is not factual correctness.
             scores.append((_number(score["score"], 3), _number(support["noul"], 1)))
-    except (requests.RequestException, ValueError, TypeError, KeyError, IndexError):
-        result["warnings"].append("Nie udało się zweryfikować linków w TypeSafe: opis powstanie bez linków.")
+    except (requests.RequestException, ValueError, TypeError, KeyError, IndexError) as exc:
+        status = getattr(getattr(exc, "response", None), "status_code", None)
+        if isinstance(exc, requests.Timeout):
+            reason = "przekroczono czas odpowiedzi"
+        elif status in {401, 403}:
+            reason = f"HTTP {status}: sprawdź klucz i uprawnienia TypeSafe"
+        elif status == 429:
+            reason = "HTTP 429: przekroczono limit zapytań"
+        elif status is not None:
+            reason = f"HTTP {status}"
+        elif isinstance(exc, requests.RequestException):
+            reason = "błąd połączenia z API"
+        else:
+            reason = "nieprawidłowa lub niekompletna odpowiedź API"
+        result["warnings"].append(f"Nie udało się zweryfikować linków w TypeSafe ({reason}): opis powstanie bez linków.")
         return result
     for candidate, (score, noul) in zip(shortlisted, scores):
         candidate.update(score=score, noul=noul, reason="Poniżej progu trafności lub wsparcia faktów." if score < SCORE_THRESHOLD or noul < threshold else "")
@@ -178,9 +213,18 @@ def select_internal_links(product, config) -> dict:
             # Remis rozstrzygamy na korzyść głębszej kategorii / mocniejszego powiązania.
             winners.append(max(accepted, key=lambda c: (c["score"], c["noul"], c.get("rank_hint", 0))))
 
+    products = [c for c in shortlisted if c["kind"] == "product"]
+    if products and not any(c["kind"] == "product" for c in winners):
+        fallback = max(products, key=lambda c: (c["score"], c["noul"], c.get("rank_hint", 0)))
+        fallback.update(fallback=True, reason="Wybór awaryjny: najwyższa ocena Jev mimo niespełnienia progów.")
+        winners.append(fallback)
+        result["warnings"].append("Żaden produkt nie przeszedł progów; wybrano produkt z najwyższą oceną Jev.")
+
     for winner in winners:
         winner["selected"] = True
         link = {key: winner[key] for key in ("kind", "code", "label", "name", "url", "category", "origin")}
+        if winner.get("fallback"):
+            link["fallback"] = True
         if winner.get("relation"):
             # Do promptu Gemini trafiają dwa najmocniejsze fakty (seria/autor/przedmiot).
             link["relation"] = "; ".join(winner["relation"].split("; ")[:2])
