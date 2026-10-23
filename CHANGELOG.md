@@ -1,3 +1,13 @@
+# 4.16.2
+
+- Jeśli żaden produkt nie przejdzie progów, linkowanie wybiera produkt z najwyższym Score Jev;
+  remisy rozstrzygają Noul i ranking. Wybór awaryjny jest oznaczony w raporcie.
+- Link awaryjny trafia do opisu także wtedy, gdy Gemini go pominie: aplikacja dodaje neutralne
+  zdanie z bezpiecznie zakodowanym tytułem i adresem, bez deklarowania niepotwierdzonych relacji.
+- Filtr duplikatów zachowuje różne numery tomów, części i klas mimo podobieństwa tytułów.
+- Jev otrzymuje też autora, wydawcę i dane techniczne z Akeneo. Przejściowe błędy API są ponawiane
+  do trzech prób; komunikaty rozróżniają problem z kluczem, limitem, timeoutem i odpowiedzią API.
+
 # 4.16.1
 
 - Anchor linku do kategorii to odmieniona nazwa kategorii (np. „książek fantasy”), a nie skopiowany

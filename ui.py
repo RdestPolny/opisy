@@ -326,7 +326,8 @@ def render_result_preview(result: Dict) -> None:
                     noul_min = thresholds.get("noul", st.session_state.get("link_threshold", 0.8))
                     st.caption(
                         f"Link jest wybierany, gdy trafność ≥ {score_min:.2f} (skala 0–3) "
-                        f"i noul ≥ {noul_min:.2f} (skala 0–1, suwak „Minimalne potwierdzenie dopasowania”)."
+                        f"i noul ≥ {noul_min:.2f} (skala 0–1, suwak „Minimalne potwierdzenie dopasowania”). "
+                        "Jeśli żaden produkt nie przejdzie progów, wybierany jest produkt z najwyższą oceną Jev."
                     )
                     frame = pd.DataFrame(report["candidates"])
                     preferred = ["selected", "reason", "kind", "origin", "label", "score", "noul", "relation",
@@ -337,7 +338,7 @@ def render_result_preview(result: Dict) -> None:
                         frame[ordered],
                         hide_index=True,
                         column_config={
-                            "reason": st.column_config.TextColumn("Powód odrzucenia"),
+                            "reason": st.column_config.TextColumn("Uzasadnienie wyboru / odrzucenia"),
                             "score": st.column_config.NumberColumn(
                                 f"Trafność (0–3, próg {score_min:.2f})", format="%.2f",
                                 help="Ocena Jev, jak przydatny jest cel dla czytelnika opisu.",

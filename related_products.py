@@ -144,6 +144,12 @@ def same_work(title_a: str, title_b: str) -> bool:
     a, b = _title_core(title_a), _title_core(title_b)
     if not a or not b:
         return False
+    # Podobna nazwa nie czyni różnych tomów, części ani klas jednym dziełem.
+    if re.findall(r"\d+", a) != re.findall(r"\d+", b):
+        return False
+    roman_part = r"\b(?:tom|t|czesc|cz|vol|volume|book)\s+([ivx]+)\b"
+    if re.findall(roman_part, a) != re.findall(roman_part, b):
+        return False
     if a == b:
         return True
     return SequenceMatcher(None, a, b).ratio() >= 0.93

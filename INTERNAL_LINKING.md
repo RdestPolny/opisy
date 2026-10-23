@@ -2,8 +2,10 @@
 
 Moduł wybiera osobno dla każdego SKU maksymalnie jedną kategorię i jeden
 produkt uzupełniający spośród tego, co Bookland poleca pod kartą produktu.
-Jev ocenia trafność; Gemini wplata linki w naturalne zdania. Brak dobrego celu
-oznacza brak nowego linku. Nie trzeba niczego przygotowywać ani wgrywać ręcznie.
+Jev ocenia trafność; Gemini wplata linki w naturalne zdania. Gdy żaden produkt
+nie przejdzie progów, wybieramy produkt z najwyższym Score Jev z dopuszczonych
+kandydatów, także jeśli wybrano już kategorię. Remis rozstrzyga Noul, potem ranking.
+Nie trzeba niczego przygotowywać ani wgrywać ręcznie.
 
 ## Uruchomienie
 
@@ -25,6 +27,7 @@ produktu (karuzela „Inni kupili również”, Luigi's Box, rekomender `item_de
 3. `POST /v1/recommend` zwraca 16 produktów spod karty wraz z atrybutami (seria, przedmiot, poziom, autor,
    kategorie). Ranking deterministyczny ustala kolejność (premiuje tę samą serię i autora) i pomija tylko
    sam produkt, produkty ukryte (`widoczne_bookland=0`, `use_in_crosslinking=0`) i inne wydania tego samego tytułu.
+   Różne numery tomów, części i klas nie są traktowane jako duplikaty na podstawie podobieństwa tytułów.
 4. Jev dostaje w jednym requeście wszystkich tych kandydatów: każdą kategorię ze ścieżki produktu i każdy
    pozostały produkt spod karty (zwykle 15–20). Wybiera najwyżej jedną kategorię i jeden produkt. Limit `jev-1.13.0` to 64k tokenów na request,
    więc taka liczba kandydatów mieści się z dużym zapasem; timeout requestu to 30 s.
@@ -47,6 +50,8 @@ Gdy rekomendacje spod karty nie dadzą żadnego kandydata, opis powstaje bez now
 
 Jev dostaje fakty o produkcie z Akeneo. Obsługiwane nazwy atrybutów Akeneo są określone w `LINK_FIELDS` w `config.py`:
 
+Otrzymuje też tytuł, autora, wydawcę, dane techniczne, kategorie i do 6000 znaków opisu źródłowego.
+
 - szkoła: `school_type`, `typ_szkoly`, `szkola`;
 - klasa: `grade`, `klasa`;
 - przedmiot: `subject`, `przedmiot`;
@@ -62,6 +67,12 @@ kodów, uzupełnij tę mapę. Nie wykorzystujemy roku wydania jako domyślnej ed
 - Jedno wywołanie `jev-1.13.0` ocenia przydatność (`Score`, skala 0–3) i zgodność
   semantyczną (`Noul`). Wybór wymaga Score co najmniej 2.5 oraz Noul co najmniej
   wartości suwaka, domyślnie 0.8. Są to progi pilotażu do oceny na własnych danych.
+- Wyjątek dla produktów: jeśli żaden nie spełnia progów, wybieramy najlepszy według
+  Score, Noul i rankingu. Raport oznacza go jako `fallback=true` i pokazuje uzasadnienie.
+  Kategorii nie wybieramy awaryjnie. Maksimum pozostaje jedną kategorią i jednym produktem.
+- Link awaryjny jest obowiązkowy w prompcie. Jeśli Gemini go pominie, aplikacja
+  dodaje do ostatniego akapitu neutralne zdanie z tytułem i linkiem, bez wymyślania relacji.
+  Istniejący link nie jest dublowany; pustej odpowiedzi nie zamieniamy w opis.
 - URL z Firecrawl musi zwrócić HTTP 200 i HTML; odrzucamy przekierowania, `noindex`
   i canonical wskazujący inny adres. Wynik tej kontroli jest cache'owany na godzinę.
   URL z Luigi's Box (`url_key`) przechodzi walidację domeny i formatu, ale nie jest
@@ -69,7 +80,11 @@ kodów, uzupełnij tę mapę. Nie wykorzystujemy roku wydania jako domyślnej ed
 - Przed edycją, eksportem i wysyłką linki poza wybraną listą oraz duplikaty są
   usuwane z zachowaniem tekstu. Usunięcie proponowanego linku przez użytkownika
   pozostaje ostrzeżeniem, bez blokowania opisu.
-- Brak klucza, błąd API albo brak dobrego celu nie zatrzymuje pełnego generatora.
+- Przejściowe błędy połączenia i timeouty oraz HTTP 408/429/500/502/503/504/529
+  są ponawiane do 3 prób z opóźnieniem wykładniczym lub liczbowym `Retry-After`
+  (1–30 s). Błędy klucza i walidacji nie są ponawiane. Komunikaty rozróżniają
+  błędny klucz/uprawnienia, limit zapytań, timeout i nieprawidłową odpowiedź bez ujawniania sekretów.
+- Brak klucza, błąd API albo brak kandydatów nie zatrzymuje pełnego generatora.
   W trybie **Tylko dodaj link** brak celu zachowuje istniejący opis i nie wywołuje
   Gemini. Pusty opis źródłowy zgłasza błąd.
 - Przy braku dopasowania zachowane linki źródłowe mają osobną listę dozwolonych
