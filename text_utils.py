@@ -305,4 +305,6 @@ def fix_collective_work_phrasing(html_text: str) -> str:
     text = re.sub(r"\s+(?:zatytułowan[aeyą]|pod\s+tytułem)\s+(?=<b>|[„\"A-ZĄĆĘŁŃÓŚŹŻ])", " ", text)
     text = re.sub(r"\bautorem\s+(?:jest|był[ao]?)\s+(<b>)?praca\s+zbiorowa(</b>)?",
                   lambda m: f"to {m.group(1) or ''}praca zbiorowa{m.group(2) or ''}", text, flags=re.IGNORECASE)
+    # „nakładem Wydawnictwa Literackie” -> „Wydawnictwa Literackiego” (przymiotnik w dopełniaczu).
+    text = re.sub(r"(\bWydawnictwa\s+)([A-ZĄĆĘŁŃÓŚŹŻ][a-ząćęłńóśźż]+(?:sk|ck|dzk|g)ie)\b(?!go)", r"\1\2go", text)
     return text

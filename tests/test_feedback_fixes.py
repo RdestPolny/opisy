@@ -127,6 +127,13 @@ class LiveTestRegressionTests(unittest.TestCase):
         fixed = fix_collective_work_phrasing("Książka X, za której redakcję naukową odpowiadają opracowanie zbiorowe, ukazała się")
         self.assertIn("przygotowana w ramach pracy zbiorowej", fixed)
 
+    def test_publisher_adjective_is_declined(self):
+        text = "ukazał się nakładem <b>Wydawnictwa Literackie</b>, a Wydawnictwa Dolnośląskiego nie ruszamy; Wydawnictwo Literackie wydało"
+        fixed = fix_collective_work_phrasing(text)
+        self.assertIn("<b>Wydawnictwa Literackiego</b>", fixed)
+        self.assertIn("Wydawnictwa Dolnośląskiego nie", fixed)
+        self.assertIn("Wydawnictwo Literackie wydało", fixed)
+
     def test_role_detection_uses_whole_words(self):
         from text_utils import detect_contributor_role
 
