@@ -153,10 +153,9 @@ STYLE_MIDDLE = (
     "Drugi akapit: przeprowadź czytelnika przez kolejne części lub wątki książki.",
 )
 STYLE_AUTHOR = (
-    "„<b>Imię Nazwisko</b> w książce <b>Tytuł</b> …” (autor jako podmiot zdania)",
-    "„<b>Tytuł</b> autorstwa <b>Imię Nazwisko</b> …”",
-    "„W <b>Tytuł</b> <b>Imię Nazwisko</b> opowiada / pokazuje …”",
-    "„Autor: <b>Imię Nazwisko</b>.” jako krótkie, osobne zdanie po zdaniu o treści",
+    "twórca jako podmiot zdania: „<b>Imię Nazwisko</b> w książce <b>Tytuł</b> opisuje …”",
+    "osobne krótkie zdanie po zdaniu o treści: „Autor/Autorka/Autorzy: <b>Imię Nazwisko</b>.”",
+    "twórca jako podmiot z czasownikiem: „<b>Tytuł</b> napisał(a) <b>Imię Nazwisko</b>.”",
 )
 STYLE_CLOSINGS = (
     "Trzeci akapit zakończ konkretną grupą odbiorców i sytuacją, w której książka się przyda.",
@@ -238,13 +237,15 @@ UKŁAD TREŚCI
 
 WIARYGODNOŚĆ DANYCH I JĘZYK POLSKI
 - Pola TYTUŁ, TWÓRCY KANONICZNI i WYDAWNICTWO z katalogu są nadrzędne wobec researchu i opisu źródłowego. Research może doprecyzować rolę twórców, ale nie może zmienić ani skrócić ich listy.
-- Wymień każdą osobę z pola TWÓRCY KANONICZNI dokładnie raz i zachowaj pełną pisownię, kolejność członów, łączniki oraz polskie znaki. Najbezpieczniej użyj mianownika w konstrukcji „Autorzy: ...” albo „Redakcja naukowa: ...”.
+- Wymień każdą osobę z pola TWÓRCY KANONICZNI dokładnie raz i zachowaj pełną pisownię, kolejność członów, łączniki oraz polskie znaki. Imiona i nazwiska twórców zawsze w mianowniku (bez odmiany).
 - Jeśli ROLA TWÓRCÓW to „redakcja naukowa”, nie nazywaj tych osób autorami. Użyj „Redakcja naukowa: ...”, aby zachować katalogową formę nazwisk.
-- Gdy jest jeden autor: użyj „Autor: <b>...</b>”. Nie łącz nieodmienionego nazwiska z konstrukcją wymagającą innego przypadka, np. „napisana przez”.
-- Gdy jest kilku autorów: użyj „Autorzy: <b>...</b>”. Zachowaj poprawną liczbę mnogą w zdaniach o zespole.
+- Twórcę wprowadzaj tylko w jeden z dwóch bezpiecznych sposobów: (a) jako podmiot zdania w mianowniku („<b>Olga Tokarczuk</b> w książce …”, „<b>Beata Dębska i Eugeniusz Dębski</b> opisują …”) albo (b) w osobnym, krótkim zdaniu zakończonym kropką: „Autor: <b>…</b>.”, „Autorka: <b>…</b>.”, „Autorzy: <b>…</b>.”. Nigdy nie wstawiaj „Autor:” w środek innego zdania. Dobierz rodzaj do osoby (Marta → „Autorka”, „napisała”).
+- Nie łącz nieodmienionego nazwiska z konstrukcją wymagającą innego przypadka (np. „napisana przez”, „autorstwa”). Zachowaj poprawną liczbę mnogą w zdaniach o zespole.
+- Tytuł podawaj w mianowniku. Nie stawiaj przed tytułem przyimka wymagającego odmiany („W Opowiadania bizarne” jest błędem) - pisz „w książce <b>Tytuł</b>”, „w tomie <b>Tytuł</b>”.
+- Każde zdanie musi mieć jeden czytelny podmiot i orzeczenie; nie doklejaj drugiego orzeczenia („… przedstawiają perypetie bohatera ukazała się …” jest błędem).
 - „Praca zbiorowa” (ROLA TWÓRCÓW = praca zbiorowa) to NIE osoba i nie może być podmiotem zdania. Pisz np. „przygotowana w ramach <b>pracy zbiorowej</b>”, „opracowana przez zespół autorów”, „dzieło zespołu autorów”. ZAKAZ: „za której przygotowanie odpowiada praca zbiorowa”, „autorem jest praca zbiorowa”. Możesz też w ogóle pominąć tę informację.
 - Inicjały i interpunkcję w nazwiskach przepisuj znak w znak (np. „S.T. Abby”, nie „S T Abby”).
-- Wydawcę wprowadzaj w naturalnej formie (np. „ukazała się nakładem <b>Wydawnictwa PWN</b>”, „przygotowana przez <b>Wydawnictwo Muza</b>”).
+- Wydawcę wprowadzaj w naturalnej formie (np. „ukazała się nakładem <b>Wydawnictwa PWN</b>”, „przygotowana przez <b>Wydawnictwo Muza</b>”). Odmieniaj całą nazwę zgodnie z przyimkiem: „nakładem <b>Wydawnictwa Literackiego</b>” (nie „Wydawnictwa Literackie” ani „Wydawnictwo Literackie”).
 - Nie wymyślaj ani nie zniekształcaj nazwisk.
 
 UNIKAJ
