@@ -34,8 +34,9 @@ if hasattr(st.components, "v2") and hasattr(st.components.v2, "component"):
         .source-toggle { margin-left: auto; }
         .editor, .source { box-sizing: border-box; width: 100%; min-height: 22rem; padding: 1rem 1.25rem; border: 1px solid var(--st-border-color, #e0e0e0); border-radius: 0 0 .5rem .5rem; background: var(--st-background-color, #ffffff); color: var(--st-text-color, #31333f); font: inherit; line-height: 1.6; overflow: auto; }
         .editor:focus, .source:focus { outline: 2px solid #0b57d0; outline-offset: -2px; }
-        .editor h2 { font-size: 1.35rem; font-weight: 700; margin: 1.25rem 0 .5rem; color: #1a1a1a; }
-        .editor h3 { font-size: 1.15rem; font-weight: 600; margin: 1.1rem 0 .5rem; color: #2a2a2a; }
+        /* Kolor dziedziczony z motywu: stały #1a1a1a był niewidoczny w ciemnym motywie. */
+        .editor h2 { font-size: 1.35rem; font-weight: 700; margin: 1.25rem 0 .5rem; color: inherit; }
+        .editor h3 { font-size: 1.15rem; font-weight: 600; margin: 1.1rem 0 .5rem; color: inherit; }
         .editor p { margin: .65rem 0; }
         /* Widoczne oznaczenie typu bloku: od razu widać, co jest nagłówkiem, a co akapitem. */
         .editor { padding-left: 3.4rem; }

@@ -152,16 +152,24 @@ STYLE_MIDDLE = (
     "Drugi akapit: najpierw budowa i cechy wydania, potem omawiane zagadnienia.",
     "Drugi akapit: przeprowadź czytelnika przez kolejne części lub wątki książki.",
 )
+STYLE_AUTHOR = (
+    "„<b>Imię Nazwisko</b> w książce <b>Tytuł</b> …” (autor jako podmiot zdania)",
+    "„<b>Tytuł</b> autorstwa <b>Imię Nazwisko</b> …”",
+    "„W <b>Tytuł</b> <b>Imię Nazwisko</b> opowiada / pokazuje …”",
+    "„Autor: <b>Imię Nazwisko</b>.” jako krótkie, osobne zdanie po zdaniu o treści",
+)
 STYLE_CLOSINGS = (
     "Trzeci akapit zakończ konkretną grupą odbiorców i sytuacją, w której książka się przyda.",
-    "Trzeci akapit zakończ praktyczną wskazówką, jak korzystać z książki.",
+    "Trzeci akapit zakończ praktyczną wskazówką dotyczącą lektury lub korzystania z książki.",
     "Trzeci akapit zakończ tym, co wyróżnia to wydanie - rzeczowo, bez superlatywów.",
-    "Trzeci akapit zakończ krótkim zdaniem o tym, z czym czytelnik zostaje po lekturze.",
+    "Trzeci akapit zakończ zdaniem o najważniejszym wrażeniu lub umiejętności, jaką daje książka.",
 )
 STOCK_PHRASES = (
     "publikacja zatytułowana", "kolorowa publikacja", "idealny wybór", "doskonały wybór",
     "idealna propozycja", "pozycja obowiązkowa", "nie tylko", "to idealna", "warto sięgnąć",
-    "każdy miłośnik", "niezwykła podróż", "za której przygotowanie odpowiada",
+    "każdy miłośnik", "niezwykła podróż", "chętnie sięgają po", "po lekturze czytelnik zostaje",
+    "której autorem jest", "której autorką jest", "którego autorami są",
+    "za której/którego … odpowiada (przygotowanie, powstanie, redakcję)",
 )
 
 
@@ -172,7 +180,9 @@ def pick_style_variant(sku: str, title: str = "", offset: int = 0) -> int:
 def style_variant_instructions(variant: int) -> str:
     pick = lambda options, step: options[(variant // step) % len(options)]  # noqa: E731
     return f"""## WARIANT KOMPOZYCJI (różnicuj opisy w obrębie kategorii)
+To wskazówki kompozycyjne - nie przepisuj ich sformułowań do opisu.
 - Otwarcie: {pick(STYLE_OPENINGS, 1)}
+- Twórców wprowadź np. tak: {pick(STYLE_AUTHOR, 13)} (dopasuj do liczby twórców i ich roli).
 - Wydawcę wprowadź np. tak: „{pick(STYLE_PUBLISHER, 5)}” (dopasuj przypadek i rodzaj do zdania).
 - Śródtytuły: {pick(STYLE_HEADINGS, 3)}.
 - {pick(STYLE_MIDDLE, 7)}
@@ -331,7 +341,8 @@ def generate_description(
             product_data.get("title", ""),
             product_data.get("details", ""),
             product_data.get("description", ""),
-            research or "",
+            # Bez researchu: angielskie streszczenia (np. „credited”, „edited by” tłumacza)
+            # dawały fałszywą „redakcję naukową” dla zwykłych powieści.
         )
     system_prompt = (
         build_system_prompt_link_only(internal_link)

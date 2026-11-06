@@ -18,6 +18,7 @@ from http_clients import request_with_retry
 from text_utils import (
     _clean_option_slug,
     format_contributor_names,
+    is_collective_work,
     normalize_for_compare,
     normalize_spaces,
     safe_string_value,
@@ -265,14 +266,26 @@ def parse_akeneo_product(item: Dict, channel: str, locale: str, token: str = "")
         for label, value in (("Wydawnictwo", publisher), ("Rok", year), ("Strony", pages), ("Oprawa", cover))
         if value
     )
+    editor_codes = ["editor", "editors", "redaktor", "redaktorzy", "redakcja", "redakcja_naukowa"]
     contributors, contributor_source = _list_from_values(
-        values,
-        ["editor", "editors", "redaktor", "redaktorzy", "redakcja", "redakcja_naukowa", "author", "autor"],
-        channel,
-        locale,
-        token=token,
-        resolve_option=True,
+        values, editor_codes + ["author", "autor"], channel, locale, token=token, resolve_option=True,
     )
+    publisher_key = normalize_for_compare(publisher)
+
+    def _real_person(name: str) -> bool:
+        # „Opracowanie zbiorowe” czy nazwa wydawnictwa w polu redakcji to nie redaktorzy naukowi.
+        key = normalize_for_compare(name)
+        return bool(key) and not is_collective_work(name) and key != publisher_key and not (
+            publisher_key and (key in publisher_key or publisher_key in key))
+
+    if contributor_source in editor_codes and not [name for name in contributors if _real_person(name)]:
+        collective = any(is_collective_work(name) for name in contributors)
+        contributors, contributor_source = _list_from_values(
+            values, ["author", "autor"], channel, locale, token=token, resolve_option=True,
+        )
+        if not contributors and collective:
+            contributors, contributor_source = ["Praca zbiorowa"], "author"
+    contributors = [name for name in contributors if _real_person(name) or is_collective_work(name)]
     author = format_contributor_names(contributors)
     contributor_role = (
         "redakcja naukowa"

@@ -28,7 +28,7 @@ JEV_TIMEOUT = 30
 # Minimalna trafność Jev (skala 0–3); próg noul (0–1) ustawia operator suwakiem.
 SCORE_THRESHOLD = 2.5
 # Kategoria awaryjna musi być choć „luźno związana” (1 = szerokie powiązanie na skali 0–3).
-CATEGORY_FALLBACK_MIN_SCORE = 1.0
+CATEGORY_FALLBACK_MIN_SCORE = 1.5
 
 
 def _text(value):

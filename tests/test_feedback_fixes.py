@@ -36,6 +36,7 @@ class CollectiveWorkTests(unittest.TestCase):
         fixed = fix_collective_work_phrasing(text)
         self.assertIn("przygotowana w ramach <b>pracy zbiorowej</b>", fixed)
         self.assertNotIn("odpowiada", fixed)
+        self.assertTrue(fixed.startswith("Kolorowa publikacja <b>Magiczne"))
 
     def test_prompt_forbids_collective_subject(self):
         self.assertIn("za której przygotowanie odpowiada praca zbiorowa", build_system_prompt_full())
@@ -103,3 +104,31 @@ class RegenerationTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class LiveTestRegressionTests(unittest.TestCase):
+    """Przypadki z testu na 15 produktach (Mikołajek, Magiczne ścieżki. Pojazdy)."""
+
+    def test_editor_field_with_collective_and_publisher_falls_back_to_authors(self):
+        from akeneo import parse_akeneo_product
+
+        values = {
+            "name": [{"scope": None, "locale": None, "data": "Mikołajek. Mój tata jest najlepszy"}],
+            "publisher": [{"scope": None, "locale": None, "data": "Znak Emotikon"}],
+            "redakcja": [{"scope": None, "locale": None, "data": "Opracowanie zbiorowe, Znak Emotikon"}],
+            "autor": [{"scope": None, "locale": None, "data": "René Goscinny, Jean-Jacques Sempé"}],
+        }
+        parsed = parse_akeneo_product({"identifier": "X", "values": values}, "Bookland", "pl_PL")
+        self.assertEqual(parsed["contributors"], ["René Goscinny", "Jean-Jacques Sempé"])
+        self.assertEqual(parsed["contributor_role"], "")
+
+    def test_opracowanie_zbiorowe_is_collective(self):
+        self.assertTrue(is_collective_work("Opracowanie zbiorowe"))
+        fixed = fix_collective_work_phrasing("Książka X, za której redakcję naukową odpowiadają opracowanie zbiorowe, ukazała się")
+        self.assertIn("przygotowana w ramach pracy zbiorowej", fixed)
+
+    def test_role_detection_uses_whole_words(self):
+        from text_utils import detect_contributor_role
+
+        self.assertEqual(detect_contributor_role("The author is credited with the series"), "")
+        self.assertEqual(detect_contributor_role("Praca pod redakcją Jana Nowaka"), "redakcja naukowa")

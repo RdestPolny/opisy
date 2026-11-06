@@ -190,11 +190,11 @@ def detect_contributor_role(*sources: str) -> str:
         "redaktorami naukowymi",
         "redaktorkami naukowymi",
         "edited by",
-        "edited",
         "scientific editor",
         "scientific editors",
     )
-    return "redakcja naukowa" if any(marker in text for marker in markers) else ""
+    # Całe słowa: wcześniej „edited” trafiało np. w „credited” i oznaczało powieści jako redakcję naukową.
+    return "redakcja naukowa" if any(re.search(rf"\b{re.escape(marker)}\b", text) for marker in markers) else ""
 
 
 def normalize_sku_list(values: Iterable[str]) -> Tuple[List[str], int]:
@@ -267,7 +267,11 @@ def _clean_option_slug(code: str) -> str:
     return code
 
 
-COLLECTIVE_WORK_RE = re.compile(r"^\s*(?:praca\s*zbiorowa|pracazbiorowa|various\s+authors|zbiorowa)\s*$", re.IGNORECASE)
+COLLECTIVE_WORK_RE = re.compile(
+    r"^\s*(?:praca\s*zbiorowa|zbiorowa\s+praca|opracowanie\s*zbiorowe|autor\s+zbiorowy|"
+    r"autorzy\s+r[óo]żni|r[óo]żni\s+autorzy|various\s+authors|zbiorowa|zbiorowy|brak\s+autora)\s*$",
+    re.IGNORECASE,
+)
 
 
 def is_collective_work(name: str) -> bool:
@@ -276,8 +280,8 @@ def is_collective_work(name: str) -> bool:
 
 
 _COLLECTIVE_PHRASE_RE = re.compile(
-    r"\b(?:za\s+)?(któr(?:ej|ego|ych))\s+(?:przygotowanie|opracowanie|powstanie|autorstwo)\s+"
-    r"(?:odpowiada|odpowiadała|odpowiadał)\s+(<b>)?\s*praca\s+zbiorowa\s*(</b>)?",
+    r"\b(?:za\s+)?(któr(?:ej|ego|ych))\s+(?:przygotowanie|opracowanie|powstanie|autorstwo|redakcję(?:\s+naukową)?)\s+"
+    r"(?:odpowiada(?:ją)?|odpowiadała|odpowiadał)\s+(<b>)?\s*(?:praca\s+zbiorowa|opracowanie\s+zbiorowe)\s*(</b>)?",
     re.IGNORECASE,
 )
 _COLLECTIVE_PARTICIPLE = {"której": "przygotowana", "którego": "przygotowany", "których": "przygotowane"}
@@ -297,6 +301,8 @@ def fix_collective_work_phrasing(html_text: str) -> str:
         return f"{participle} w ramach {open_b}pracy zbiorowej{close_b}"
 
     text = _COLLECTIVE_PHRASE_RE.sub(replace, html_text or "")
+    # Szablonowe „publikacja zatytułowana <b>Tytuł</b>” -> „publikacja <b>Tytuł</b>”.
+    text = re.sub(r"\s+(?:zatytułowan[aeyą]|pod\s+tytułem)\s+(?=<b>|[„\"A-ZĄĆĘŁŃÓŚŹŻ])", " ", text)
     text = re.sub(r"\bautorem\s+(?:jest|był[ao]?)\s+(<b>)?praca\s+zbiorowa(</b>)?",
                   lambda m: f"to {m.group(1) or ''}praca zbiorowa{m.group(2) or ''}", text, flags=re.IGNORECASE)
     return text
