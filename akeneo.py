@@ -235,8 +235,14 @@ def _list_from_values(
                 if (
                     resolve_option
                     and isinstance(data, list)
-                    and normalize_for_compare(value) == normalize_for_compare(raw_value)
-                    and re.fullmatch(r"[a-z0-9]{6,}", raw_value)
+                    and (
+                        # Kod bez etykiety („albertoacerbis”) albo slug odtworzony z kodu
+                        # („s_t_abby” -> „S.T. Abby”): etykieta z API nie przyszła,
+                        # więc wolimy tekstowe pole autora z oryginalną interpunkcją.
+                        (normalize_for_compare(value) == normalize_for_compare(raw_value)
+                         and re.fullmatch(r"[a-z0-9]{6,}", raw_value))
+                        or ("_" in raw_value and value == _clean_option_slug(raw_value))
+                    )
                 ):
                     has_unresolved_option = True
         if has_unresolved_option:

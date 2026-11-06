@@ -27,12 +27,17 @@ def _retry_delay(exc: Exception, attempt: int) -> float:
 
 
 def generate_description_result(request, *, contents, context, normalize_response,
-                                max_attempts=3, sleep=time.sleep) -> dict:
+                                max_attempts=3, sleep=time.sleep, repair_warning_codes=()) -> dict:
     """One shared budget, no additional generation for editorial warnings.
 
     request must perform one SDK attempt (including disabled SDK retries).
     A usable response is returned immediately, so later failures cannot erase it.
+    Exception: repair_warning_codes (used by „Regeneruj ten opis”) lists structural
+    warnings (missing headings/links) that trigger one more attempt with the previous
+    result to fix; if the repair does not help, the best usable result is kept.
     """
+    repair_codes = set(repair_warning_codes or ())
+    repairable = None  # (attempt, finish, report) – użyteczny wynik z ostrzeżeniami do naprawy
     # Fail bad validator configuration before spending the first API request.
     analyze_description_html("", **context)
     if max_attempts < 1:
@@ -67,6 +72,15 @@ def generate_description_result(request, *, contents, context, normalize_respons
             previous = ""
             last_error = "Opis ucięty limitem tokenów"
             continue
+        to_repair = [issue for issue in report.warnings if issue["code"] in repair_codes]
+        if not report.errors and to_repair and attempt < max_attempts and finish in {"", "STOP"}:
+            if repairable is None or len(to_repair) < repairable[3]:
+                repairable = (attempt, finish, report, len(to_repair))
+            last_error = "Popraw: " + "; ".join(issue["message"] for issue in to_repair)
+            continue
+        if not report.errors and repairable and len(to_repair) > repairable[3]:
+            # Naprawa pogorszyła strukturę: oddaj wcześniejszy, lepszy wynik.
+            _, finish, report, _ = repairable
         if not report.errors:
             generation_warnings = [issue for issue in report.warnings if issue["code"] == "HTML_NORMALIZED"]
             if finish and finish != "STOP":
@@ -90,6 +104,19 @@ def generate_description_result(request, *, contents, context, normalize_respons
         # Do not repeat a provider-blocked request with the same contents.
         if finish and finish not in {"STOP", "MAX_TOKENS"}:
             break
+    if repairable:
+        _, finish, report, _ = repairable
+        return {
+            "description_html": report.clean_html,
+            "error": None,
+            "status": "completed_with_warnings",
+            "validation_errors": [],
+            "validation_warnings": report.warnings,
+            "generation_warnings": [],
+            "validation_version": VALIDATOR_API_VERSION,
+            "api_attempts": attempt,
+            "finish_reason": finish,
+        }
     if truncated:
         _, finish, report = truncated
         warning = {

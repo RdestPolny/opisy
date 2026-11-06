@@ -37,6 +37,21 @@ if hasattr(st.components, "v2") and hasattr(st.components.v2, "component"):
         .editor h2 { font-size: 1.35rem; font-weight: 700; margin: 1.25rem 0 .5rem; color: #1a1a1a; }
         .editor h3 { font-size: 1.15rem; font-weight: 600; margin: 1.1rem 0 .5rem; color: #2a2a2a; }
         .editor p { margin: .65rem 0; }
+        /* Widoczne oznaczenie typu bloku: od razu widać, co jest nagłówkiem, a co akapitem. */
+        .editor { padding-left: 3.4rem; }
+        .editor > p, .editor > h2, .editor > h3 { position: relative; }
+        .editor > p::before, .editor > h2::before, .editor > h3::before {
+          position: absolute; left: -2.9rem; top: .2em; width: 2.3rem; text-align: center;
+          font: 600 .68rem/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; border-radius: .25rem;
+          pointer-events: none; user-select: none;
+        }
+        .editor > p::before { content: "¶ P"; color: #5f6368; background: rgba(95, 99, 104, .12); }
+        .editor > h2::before { content: "H2"; color: #fff; background: #0b57d0; }
+        .editor > h3::before { content: "H3"; color: #fff; background: #6b4fbb; }
+        .editor > h2 { border-left: 3px solid #0b57d0; padding-left: .5rem; }
+        .editor > h3 { border-left: 3px solid #6b4fbb; padding-left: .5rem; }
+        .editor .active-block { outline: 1px dashed #0b57d0; outline-offset: 3px; }
+        .block-select.is-heading { border-color: #0b57d0; font-weight: 700; }
         .editor b, .editor strong { font-weight: 700; }
         .editor a { color: #0b57d0; text-decoration: underline; font-weight: 600; background: rgba(11, 87, 208, 0.08); padding: 1px 4px; border-radius: 3px; cursor: pointer; }
         .editor a:hover { background: rgba(11, 87, 208, 0.18); }
@@ -102,7 +117,7 @@ if hasattr(st.components, "v2") and hasattr(st.components.v2, "component"):
           };
 
           const saveSelection = () => {
-            const selection = window.getSelection();
+            const selection = currentSelection();
             if (selectionIsInsideEditor(selection)) {
               savedRange = selection.getRangeAt(0).cloneRange();
             }
@@ -116,8 +131,16 @@ if hasattr(st.components, "v2") and hasattr(st.components.v2, "component"):
             return true;
           };
 
+          // W Shadow DOM window.getSelection() bywa „przeniesione” na host komponentu,
+          // przez co lista formatu zawsze pokazywała „Akapit”. ShadowRoot.getSelection
+          // (Chromium) zwraca prawdziwy węzeł; w innych przeglądarkach zostaje window.
+          const currentSelection = () => {
+            const root = editor.getRootNode();
+            return (root && typeof root.getSelection === 'function' ? root.getSelection() : null) || window.getSelection();
+          };
+
           const selectedBlock = () => {
-            const selection = window.getSelection();
+            const selection = currentSelection();
             if (!selectionIsInsideEditor(selection)) return null;
             let node = selection.anchorNode;
             if (node && node.nodeType === 3) node = node.parentNode;
@@ -155,7 +178,11 @@ if hasattr(st.components, "v2") and hasattr(st.components.v2, "component"):
 
           const updateBlockSelect = () => {
             const block = selectedBlock();
-            blockSelect.value = block ? block.tagName.toLowerCase() : 'p';
+            const tag = block ? block.tagName.toLowerCase() : 'p';
+            blockSelect.value = tag;
+            blockSelect.classList.toggle('is-heading', tag !== 'p');
+            editor.querySelectorAll('.active-block').forEach((el) => el.classList.remove('active-block'));
+            if (block) block.classList.add('active-block');
             saveSelection();
           };
 

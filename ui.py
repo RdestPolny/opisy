@@ -36,7 +36,7 @@ from description_output import (
     preserve_description_on_failure,
     refresh_description_result,
 )
-from descriptions import process_product_from_akeneo
+from descriptions import editor_link_targets, process_product_from_akeneo
 from internal_linking import SCORE_THRESHOLD
 from related_products import SHOP_STATUS_LABELS, luigis_item_statuses
 from job_store import (
@@ -146,6 +146,10 @@ def reset_interactive_results() -> None:
         st.session_state.pop(key, None)
 
 
+LINK_SCOPE_CATEGORY = "Tylko kategoria (1 link)"
+LINK_SCOPE_BOTH = "Kategoria + produkt (do 2 linków)"
+
+
 def get_internal_link() -> Optional[Dict]:
     if st.session_state.get("link_active") and st.session_state.get("link_mode") == "Automatyczne (Jev)":
         return {
@@ -154,6 +158,8 @@ def get_internal_link() -> Optional[Dict]:
             "threshold": st.session_state.get("link_threshold", 0.8),
             "firecrawl_api_key": st.secrets.get("FIRECRAWL_API_KEY", ""),
             "related_size": 16,
+            "scope": "category" if st.session_state.get("link_scope", LINK_SCOPE_CATEGORY) == LINK_SCOPE_CATEGORY
+            else "category_product",
         }
     if (
         st.session_state.get("link_active")
@@ -301,11 +307,46 @@ def queue_checkbox(label: str, product: Dict, prefix: str) -> None:
     st.checkbox(label, key=key, on_change=_toggle_queued_product, args=(key, sku, product["title"]))
 
 
+def render_link_summary(description_html: str, result: Dict) -> None:
+    """Zwięzła lista linków w opisie: anchor, adres, typ – do szybkiej weryfikacji bez rozwijania raportu Jev."""
+    import re
+    from html import unescape
+
+    targets = {}
+    for target in (result.get("link_report") or {}).get("links", []) or []:
+        targets[target.get("url", "").rstrip("/")] = target
+    links = re.findall(r"<a\b[^>]*href=\"([^\"]+)\"[^>]*>(.*?)</a>", description_html or "", flags=re.I | re.S)
+    if not links:
+        if result.get("link_report") is not None or result.get("allowed_links"):
+            st.warning("Opis nie zawiera żadnego linku.")
+        return
+    rows = []
+    for href, anchor in links:
+        url = unescape(href)
+        target = targets.get(url.rstrip("/"), {})
+        kind = {"category": "kategoria", "product": "produkt", "editor": "ręczny"}.get(target.get("kind", ""), "inny")
+        badge = " · awaryjny" if target.get("fallback") or target.get("fallback_category") else ""
+        text = unescape(re.sub(r"<[^>]+>", "", anchor)).strip()
+        rows.append(f"- **{kind}{badge}**: „{text}” → [{url}]({url})")
+    st.markdown("**Linki w opisie**\n" + "\n".join(rows))
+
+
 def render_result_preview(result: Dict) -> None:
     sku = result["sku"]
     edit_key = f"edit_{sku}"
     description_html = result.get("description_html", "")
     is_meta_only = is_meta_only_result(result) and result.get("meta_only", True)
+
+    # Identyfikatory w st.code mają wbudowany przycisk kopiowania, który nie wywołuje
+    # rerunu Streamlita – okno opisu (expander) zostaje otwarte.
+    identifiers = [("ISBN", result.get("isbn")), ("EAN", result.get("ean")), ("SKU", sku)]
+    identifiers = [(name, value) for name, value in identifiers if value]
+    unique_identifiers = list({value: name for name, value in reversed(identifiers)}.items())[::-1]
+    id_columns = st.columns(len(unique_identifiers) or 1)
+    for column, (value, name) in zip(id_columns, unique_identifiers):
+        with column:
+            st.caption(name)
+            st.code(value, language=None)
 
     if not is_meta_only:
         if result.get("link_report") is not None:
@@ -351,6 +392,7 @@ def render_result_preview(result: Dict) -> None:
                     )
                 if not report["links"]:
                     st.caption("Nie wybrano trafnego, potwierdzonego celu linkowania.")
+        render_link_summary(st.session_state.get(edit_key, description_html), result)
         editor_seed = result.setdefault(
             "editor_seed",
             hashlib.sha256(description_html.encode()).hexdigest()[:10],
@@ -380,7 +422,15 @@ def render_result_preview(result: Dict) -> None:
             with tabs[3]:
                 st.markdown(result["research"])
 
-        col_reg, _ = st.columns([3, 4])
+        col_reg, col_keep = st.columns([3, 4])
+        with col_keep:
+            keep_links = st.checkbox(
+                "Zachowaj linki z bieżącej wersji",
+                value=True,
+                key=f"regen_keep_links_{sku}",
+                help="Regeneracja użyje linków, które są teraz w edytorze (także poprawionych ręcznie), "
+                     "zamiast dobierać je od nowa.",
+            )
         with col_reg:
             if st.button("♻️ Regeneruj ten opis", key=f"regen_btn_{sku}", type="secondary"):
                 try:
@@ -391,6 +441,10 @@ def render_result_preview(result: Dict) -> None:
                         use_research = st.session_state.get("use_research", True)
                         channel = result.get("channel") or st.session_state.get("channel", DEFAULT_CHANNEL)
                         locale = result.get("locale") or st.session_state.get("locale", DEFAULT_LOCALE)
+                        current_html = st.session_state.get(edit_key, description_html)
+                        kept = editor_link_targets(
+                            current_html, (result.get("link_report") or {}).get("links")
+                        ) if keep_links else []
                         new_res = process_product_from_akeneo(
                             sku,
                             token,
@@ -399,6 +453,11 @@ def render_result_preview(result: Dict) -> None:
                             internal_link=internal_link,
                             link_only=link_only,
                             use_research=use_research,
+                            keep_links=kept or None,
+                            # Inny wariant kompozycji niż poprzednio + naprawa brakujących śródtytułów/linków.
+                            style_offset=int(result.get("style_offset") or 0) + 1,
+                            regenerate=True,
+                            previous_link_report=result.get("link_report"),
                         )
                         new_res = preserve_description_on_failure(result, new_res)
                         for idx, item in enumerate(st.session_state.bulk_results):

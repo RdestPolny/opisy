@@ -76,6 +76,8 @@ from metatags import audit_meta_jobs_for_repetition, revalidate_meta_jobs, send_
 from product_input import ProductInputResolutionError, resolve_product_inputs
 from text_utils import parse_bulk_sku_payload
 from ui import (
+    LINK_SCOPE_BOTH,
+    LINK_SCOPE_CATEGORY,
     clear_product_queue,
     get_internal_link,
     init_session_state,
@@ -212,7 +214,16 @@ with st.sidebar:
         if st.session_state.link_mode == "Automatyczne (Jev)":
             st.session_state.link_threshold = st.slider("Minimalne potwierdzenie dopasowania", 0.5, 1.0,
                                                         st.session_state.get("link_threshold", 0.8), 0.05)
-            st.caption("Jev ocenia kategorie i produkty spod karty (Luigi's Box) i wybiera do 2 linków. Gdy żaden produkt nie przejdzie progów, wybierany jest produkt z najwyższą oceną Jev.")
+            scope_options = [LINK_SCOPE_CATEGORY, LINK_SCOPE_BOTH]
+            st.session_state.link_scope = st.radio(
+                "Zakres linków", scope_options,
+                index=scope_options.index(st.session_state.get("link_scope", LINK_SCOPE_CATEGORY))
+                if st.session_state.get("link_scope") in scope_options else 0,
+            )
+            if st.session_state.link_scope == LINK_SCOPE_CATEGORY:
+                st.caption("Jev wybiera jedną kategorię ze ścieżki produktu. Gdy żadna nie przejdzie progów, wybierana jest najlepiej oceniona. Link jest zawsze w 2. akapicie.")
+            else:
+                st.caption("Jev ocenia kategorie i produkty spod karty (Luigi's Box) i wybiera do 2 linków. Gdy żaden produkt nie przejdzie progów, wybierany jest produkt z najwyższą oceną Jev.")
             if not st.secrets.get("TYPESAFE_API_KEY"):
                 st.warning("Dodaj TYPESAFE_API_KEY w sekretach Streamlit. Bez klucza opis powstanie bez automatycznych linków.")
             if not st.secrets.get("FIRECRAWL_API_KEY"):

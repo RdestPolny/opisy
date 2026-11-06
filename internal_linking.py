@@ -27,6 +27,8 @@ JEV_MODEL = "jev-1.13.0"
 JEV_TIMEOUT = 30
 # Minimalna trafność Jev (skala 0–3); próg noul (0–1) ustawia operator suwakiem.
 SCORE_THRESHOLD = 2.5
+# Kategoria awaryjna musi być choć „luźno związana” (1 = szerokie powiązanie na skali 0–3).
+CATEGORY_FALLBACK_MIN_SCORE = 1.0
 
 
 def _text(value):
@@ -136,7 +138,12 @@ def select_internal_links(product, config) -> dict:
     candidates = _related_candidates(product, config, result)
     result["candidates"].extend(candidates)
     # Jev ocenia wszystkie kategorie ze ścieżki produktu i wszystkie produkty spod karty.
-    shortlisted = [c for c in candidates if c["kind"] == "category"] + [c for c in candidates if c["kind"] == "product"]
+    # Zakres „category” (domyślny w UI): jeden link do kategorii, bez produktów – mniej do weryfikacji.
+    scope = config.get("scope") or "category_product"
+    result["scope"] = scope
+    shortlisted = [c for c in candidates if c["kind"] == "category"]
+    if scope != "category":
+        shortlisted += [c for c in candidates if c["kind"] == "product"]
     api_key = _text(config.get("api_key"))
     if not api_key:
         result["warnings"].append("Brak klucza TypeSafe: opis powstanie bez linków.")
@@ -212,6 +219,18 @@ def select_internal_links(product, config) -> dict:
         if accepted:
             # Remis rozstrzygamy na korzyść głębszej kategorii / mocniejszego powiązania.
             winners.append(max(accepted, key=lambda c: (c["score"], c["noul"], c.get("rank_hint", 0))))
+
+    categories = [c for c in shortlisted if c["kind"] == "category"]
+    if scope == "category" and categories and not any(c["kind"] == "category" for c in winners):
+        # W zakresie „tylko kategoria” link ma być zawsze: zamiast opisu bez linku wybieramy
+        # najlepiej ocenioną kategorię ścieżki (przy remisie głębszą), o ile nie jest jawnie chybiona.
+        # W zakresie kategoria+produkt „pusty” wynik pokrywa wybór awaryjny produktu (bez zmian).
+        best = max(categories, key=lambda c: (c["score"], c["noul"], c.get("rank_hint", 0)))
+        if best["score"] >= CATEGORY_FALLBACK_MIN_SCORE:
+            best.update(fallback_category=True,
+                        reason="Wybór awaryjny kategorii: najwyższa ocena Jev spośród kategorii produktu.")
+            winners.insert(0, best)
+            result["warnings"].append("Żadna kategoria nie przeszła progów; wybrano najlepiej ocenioną kategorię produktu.")
 
     products = [c for c in shortlisted if c["kind"] == "product"]
     if products and not any(c["kind"] == "product" for c in winners):

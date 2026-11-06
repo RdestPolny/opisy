@@ -248,9 +248,55 @@ def _clean_option_slug(code: str) -> str:
     if not code:
         return ""
     if "_" in code or "-" in code:
-        parts = re.split(r"[_\-]+", code)
-        cleaned = " ".join(part.capitalize() for part in parts if part)
+        parts = [part for part in re.split(r"[_\-]+", code) if part]
+        words: List[str] = []
+        for part in parts:
+            # Jednoliterowe człony kodu to inicjały: s_t_abby -> „S.T. Abby”, nie „S T Abby”.
+            if len(part) == 1 and part.isalpha():
+                initial = part.upper() + "."
+                if words and re.fullmatch(r"(?:[A-ZĄĆĘŁŃÓŚŹŻ]\.)+", words[-1]):
+                    words[-1] += initial
+                else:
+                    words.append(initial)
+            else:
+                words.append(part.capitalize())
+        cleaned = " ".join(words)
         cleaned = re.sub(r"\bPwn\b", "PWN", cleaned, flags=re.IGNORECASE)
         cleaned = re.sub(r"\bOop\b", "", cleaned, flags=re.IGNORECASE)
-        return cleaned.strip()
+        return normalize_spaces(cleaned)
     return code
+
+
+COLLECTIVE_WORK_RE = re.compile(r"^\s*(?:praca\s*zbiorowa|pracazbiorowa|various\s+authors|zbiorowa)\s*$", re.IGNORECASE)
+
+
+def is_collective_work(name: str) -> bool:
+    """„Praca zbiorowa” w polu autora nie jest osobą i nie może trafić do zdania jako podmiot."""
+    return bool(COLLECTIVE_WORK_RE.match(normalize_spaces(strip_html(name or ""))))
+
+
+_COLLECTIVE_PHRASE_RE = re.compile(
+    r"\b(?:za\s+)?(któr(?:ej|ego|ych))\s+(?:przygotowanie|opracowanie|powstanie|autorstwo)\s+"
+    r"(?:odpowiada|odpowiadała|odpowiadał)\s+(<b>)?\s*praca\s+zbiorowa\s*(</b>)?",
+    re.IGNORECASE,
+)
+_COLLECTIVE_PARTICIPLE = {"której": "przygotowana", "którego": "przygotowany", "których": "przygotowane"}
+
+
+def fix_collective_work_phrasing(html_text: str) -> str:
+    """Siatka bezpieczeństwa dla kalki „za której przygotowanie odpowiada praca zbiorowa”.
+
+    „Magiczne ścieżki, za której przygotowanie odpowiada praca zbiorowa” ->
+    „Magiczne ścieżki, przygotowana w ramach pracy zbiorowej”.
+    """
+    def replace(match: re.Match) -> str:
+        participle = _COLLECTIVE_PARTICIPLE.get(match.group(1).lower(), "przygotowana")
+        open_b, close_b = (match.group(2) or ""), (match.group(3) or "")
+        if bool(open_b) != bool(close_b):
+            open_b = close_b = ""
+        return f"{participle} w ramach {open_b}pracy zbiorowej{close_b}"
+
+    text = _COLLECTIVE_PHRASE_RE.sub(replace, html_text or "")
+    text = re.sub(r"\bautorem\s+(?:jest|był[ao]?)\s+(<b>)?praca\s+zbiorowa(</b>)?",
+                  lambda m: f"to {m.group(1) or ''}praca zbiorowa{m.group(2) or ''}", text, flags=re.IGNORECASE)
+    return text
